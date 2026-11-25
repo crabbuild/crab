@@ -35,6 +35,8 @@ this crate opens no stored manifest or ref journal.
 ## Invariants
 
 - Keep repository identity, captured inventory and lookup-source binding checks in snapshot construction; locator presence alone is not a visibility proof.
+  `snapshot_retained` requires an independently authorized exact root. Keep it
+  out of generic revision resolution.
   Source: `crates/crab-remote-git/src/repository.rs`.
 - Finish each OperationContext with its semantic result so the locator session closes and close failures remain observable. Runtime shutdown is a separate process-lifecycle obligation.
   Source: `crates/crab-remote-git/src/operation.rs`.

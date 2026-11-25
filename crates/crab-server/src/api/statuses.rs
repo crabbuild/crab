@@ -128,15 +128,21 @@ pub(super) struct CommitScope {
     pub pull: Option<u64>,
 }
 
+pub(super) enum CommitAccess {
+    Read,
+    Write,
+}
+
 impl CommitScope {
     pub(super) async fn require_commit(
         self,
         server: &Server,
         repo: &Repository,
         oid: ObjectId,
+        access: CommitAccess,
     ) -> Result<String> {
         match self.pull {
-            Some(pull) => super::pulls::require_check_head(server, repo, pull, oid).await,
+            Some(pull) => super::pulls::require_check_head(server, repo, pull, oid, access).await,
             None => require_commit(server, repo, oid).await,
         }
     }
@@ -236,7 +242,7 @@ async fn list(
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
     let oid = scope
-        .require_commit(&server, repo, parse_oid(&oid)?)
+        .require_commit(&server, repo, parse_oid(&oid)?, CommitAccess::Read)
         .await?;
     app::actor(&principal)?;
     let statuses = latest(&server, repo, &oid).await?;
@@ -318,7 +324,9 @@ async fn create(
         let status = created_status(outcome)?;
         return Ok((StatusCode::CREATED, Json(status_view(&status))));
     }
-    let oid = scope.require_commit(&server, repo, parsed_oid).await?;
+    let oid = scope
+        .require_commit(&server, repo, parsed_oid, CommitAccess::Write)
+        .await?;
     if !principal.can_write(repo.id) {
         return Err(Error::StatusPermission);
     }

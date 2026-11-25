@@ -128,6 +128,7 @@ export function RepositoryPage({
   codeThemes,
   csrf,
   identity,
+  account,
   onRepositoryChanged,
 }: {
   repo: Repository;
@@ -137,6 +138,7 @@ export function RepositoryPage({
   codeThemes: CodeThemes;
   csrf: string;
   identity: Session["user"];
+  account: string | null;
   onRepositoryChanged: () => void;
 }) {
   const route = repositoryRoute(url);
@@ -768,6 +770,7 @@ export function RepositoryPage({
                     refs={data}
                     url={url}
                     csrf={csrf}
+                    account={account}
                     theme={theme}
                     codeThemes={codeThemes}
                   />

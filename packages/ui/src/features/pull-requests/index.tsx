@@ -15,6 +15,7 @@ export function PullRequests({
   refs,
   url,
   csrf,
+  account,
   theme,
   codeThemes,
 }: {
@@ -22,6 +23,7 @@ export function PullRequests({
   refs: Refs;
   url: URL;
   csrf: string;
+  account: string | null;
   theme: "light" | "dark";
   codeThemes: CodeThemes;
 }) {
@@ -58,7 +60,7 @@ export function PullRequests({
       );
     return (
       <ConversationLockProvider
-        key={`${repo.id}:${number}`}
+        key={`${repo.id}:${number}:${account ?? ""}`}
         repo={repo}
         target={`pulls/${number}`}
       >
@@ -68,6 +70,7 @@ export function PullRequests({
             number={number}
             url={url}
             csrf={csrf}
+            account={account}
             theme={theme}
             codeThemes={codeThemes}
           />

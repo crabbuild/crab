@@ -40,7 +40,7 @@ import { branch } from "../presentation";
 import { ReviewThreadCard } from "./thread-card";
 import { useViewedFiles } from "./viewed";
 import type { PendingReview } from "./pending";
-import { SuggestionCommit, useSuggestionBatch } from "./suggestion";
+import { SuggestionCommit, type SuggestionBatch } from "./suggestion";
 
 function isOutdatedThread(thread: InlineDiffThread) {
   return thread.outdated || thread.vanished;
@@ -75,6 +75,7 @@ export function PullReviewThreads({
   refresh,
   pendingReview,
   submittingReview,
+  suggestions,
   unresolvedOnly,
 }: {
   repo: Repository;
@@ -85,6 +86,7 @@ export function PullReviewThreads({
   refresh: () => void;
   pendingReview: PendingReview;
   submittingReview: boolean;
+  suggestions: SuggestionBatch;
   unresolvedOnly: boolean;
 }) {
   const visibility = useCommentVisibility();
@@ -153,13 +155,16 @@ export function PullReviewThreads({
     navigation.retry();
     refresh();
   }
-  const suggestions = useSuggestionBatch(repo, pull, csrf, refreshThreads);
-  const headRepo = pull.head_repository ?? repo;
+  const savedComparison = pull.merge
+    ? `pulls/${pull.number}/merged-comparison`
+    : undefined;
+  const comparisonRepo = pull.merge ? repo : (pull.head_repository ?? repo);
   const comparison = usePullComparison(
-    headRepo,
+    comparisonRepo,
     pull.base_oid,
     pull.head_oid,
     pull.head_repository ? repo.id : undefined,
+    savedComparison,
   );
   const preview = comparison.data;
   const comparisonChanged =
@@ -415,12 +420,13 @@ export function PullReviewThreads({
       {viewed.status}
       <ChangeComparison
         state={comparison}
-        repo={headRepo}
+        repo={comparisonRepo}
         base={preview?.base}
         rev={preview?.commit ?? ""}
         theme={theme}
         codeThemes={codeThemes}
         review={review}
+        fileAction={savedComparison && `${savedComparison}/file`}
       />
       {linkedThread.error && (
         <Failure
@@ -544,6 +550,7 @@ export function PullReviewThreads({
             <SuggestionCommit
               suggestions={suggestions}
               branch={branch(pull.head_ref)}
+              onSaved={refreshThreads}
             />
             {currentItems.length ? (
               currentItems.map((thread) => (

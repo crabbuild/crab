@@ -50,8 +50,6 @@ pub(crate) enum Error {
     RepositoryForkingRestricted,
     #[error("The organization’s policy restricts repository visibility changes")]
     RepositoryVisibilityRestricted,
-    #[error("Remove organization members from the Members page")]
-    OutsideCollaboratorExpected,
     #[error(
         "The requester must have permission to create repositories in the destination organization"
     )]
@@ -429,11 +427,6 @@ impl IntoResponse for Error {
                 "This transfer expired. Reload the issue to start a new transfer.",
             ),
             Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", *message),
-            Self::OutsideCollaboratorExpected => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "outside_collaborator_expected",
-                "Remove organization members from the Members page",
-            ),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "Resource not found"),
             Self::CommitNotFound => (StatusCode::NOT_FOUND, "not_found", "Commit not found"),
             Self::ReviewDismissalPermission => (

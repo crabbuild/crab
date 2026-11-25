@@ -765,6 +765,7 @@ export function App() {
                             codeThemes={codeThemeChoices[codeTheme].themes}
                             csrf={session.data?.csrf ?? ""}
                             identity={session.data?.user ?? null}
+                            account={teamAccount}
                             onRepositoryChanged={() => {
                               catalog.retry();
                               repositoryCatalog.retry();

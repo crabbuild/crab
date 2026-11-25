@@ -95,6 +95,7 @@ impl Read for GetMember {
         member(context, input.member)
     }
 }
+
 pub(crate) struct ListMembers;
 impl Read for ListMembers {
     const CLASS: &'static str = CLASS;
@@ -194,7 +195,7 @@ pub(crate) struct MemberBatch {
 pub(crate) struct ActiveMembers;
 impl Read for ActiveMembers {
     const CLASS: &'static str = CLASS;
-    const ID: u32 = 91;
+    const ID: u32 = 96;
     type Input = MemberBatch;
     type Output = Option<Vec<Uuid>>;
 

@@ -45,6 +45,8 @@ import { ProjectBoard } from "./board";
 import { ProjectTable, ProjectRoadmap } from "./views";
 import { useProjectCommands } from "./commands";
 import { ProjectHistory } from "./history";
+import { ProjectViewTabs } from "./view-tabs";
+import { ProjectLibrary as OrganizationProjectLibrary } from "./workspace/library";
 import { DraftRecovery } from "./drafts";
 import { checkpointDraft, itemDraft, readDraft } from "./draft-storage";
 import {
@@ -66,10 +68,46 @@ export default function Projects({
   url: URL;
   project?: string;
 }) {
-  return project ? (
-    <ProjectDetail key={project} repo={repo} url={url} id={project} />
-  ) : (
-    <ProjectLibrary repo={repo} url={url} />
+  if (project)
+    return <ProjectDetail key={project} repo={repo} url={url} id={project} />;
+  const organization = repo.organization_id;
+  const linked =
+    organization && url.searchParams.get("collection") === "linked";
+  return (
+    <section className="projects-page">
+      {organization && (
+        <nav
+          aria-label="Project collections"
+          className="mb-5 flex flex-wrap gap-2"
+        >
+          <Button asChild variant={linked ? "ghost" : "secondary"}>
+            <Link
+              href={projectHref(repo)}
+              aria-current={linked ? undefined : "page"}
+            >
+              Repository projects
+            </Link>
+          </Button>
+          <Button asChild variant={linked ? "secondary" : "ghost"}>
+            <Link
+              href={`${projectHref(repo)}?collection=linked`}
+              aria-current={linked ? "page" : undefined}
+            >
+              Linked projects
+            </Link>
+          </Button>
+        </nav>
+      )}
+      {linked ? (
+        <OrganizationProjectLibrary
+          organization={organization}
+          url={url}
+          scope={{ target: { repository: repo.id }, canLink: true }}
+        />
+      ) : (
+        <ProjectLibrary repo={repo} url={url} />
+      )}
+    </section>
   );
 }
 function ProjectLibrary({ repo, url }: { repo: Repository; url: URL }) {
@@ -88,7 +126,7 @@ function ProjectLibrary({ repo, url }: { repo: Repository; url: URL }) {
     }
   }, [commands.generation, resource.retry]);
   return (
-    <section className="projects-page">
+    <>
       <header className="project-page-header">
         <div>
           <h1>Projects</h1>
@@ -185,7 +223,7 @@ function ProjectLibrary({ repo, url }: { repo: Repository; url: URL }) {
           )
         }
       </Result>
-    </section>
+    </>
   );
 }
 function ProjectDetail({
@@ -292,6 +330,8 @@ function ProjectWorkspace({
     if (resource.data) setProject(resource.data.page.project);
   }, [resource.data]);
   const manager = resource.data?.can_manage ?? canManage;
+  const activeView =
+    url.searchParams.get("pv") === "history" ? "history" : selected.id;
   const bulkTarget =
     manager && !repo.archived && !project.archived ? { repo } : undefined;
   const editable =
@@ -398,9 +438,7 @@ function ProjectWorkspace({
         }}
       />
       <Tabs
-        value={
-          url.searchParams.get("pv") === "history" ? "history" : selected.id
-        }
+        value={activeView}
         onValueChange={(pv) =>
           filters({
             pv,
@@ -412,23 +450,19 @@ function ProjectWorkspace({
           })
         }
       >
-        <TabsList variant="line" className="project-view-tabs">
-          <TabsTrigger value="history">History</TabsTrigger>
-          {project.definition.views.map((view) => {
-            const ViewIcon =
-              view.layout === "board"
-                ? Columns3Icon
-                : view.layout === "roadmap"
-                  ? CalendarRangeIcon
-                  : ListIcon;
-            return (
-              <TabsTrigger key={view.id} value={view.id}>
-                <ViewIcon />
-                {view.name}
-              </TabsTrigger>
-            );
-          })}
-        </TabsList>
+        <ProjectViewTabs
+          project={project}
+          active={activeView}
+          target={bulkTarget}
+          editable={editable}
+          preserveSelection={() => {
+            if (
+              activeView !== "history" &&
+              url.searchParams.get("pv") !== activeView
+            )
+              filters({ pv: activeView });
+          }}
+        />
         <TabsContent value="history">
           <ProjectHistory
             target={{ repo }}
@@ -524,11 +558,14 @@ function ProjectWorkspace({
                     <span>Showing {page.items.length} on this page</span>
                   )}
                 </div>
-                {page.items.length || createInGroup ? (
+                {selected.layout === "board" ||
+                page.items.length ||
+                createInGroup ? (
                   selected.layout === "board" ? (
                     <ProjectBoard
                       repo={repo}
                       page={page}
+                      viewId={selected.id}
                       editable={editable && can_manage}
                       bulkTarget={bulkTarget}
                       onEdit={setEditing}

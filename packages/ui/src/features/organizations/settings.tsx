@@ -16,12 +16,14 @@ import { OrganizationAutomation } from "./automation";
 import { organizationHref } from "@/lib/organization-route";
 import { MutationError } from "./feedback";
 import { OrganizationIssueTypes } from "./issue-types";
+import { ProjectPolicySettings } from "./project-policy";
 import { RepositoryPolicySettings } from "./repository-policy";
 import { OrganizationRepositoryProperties } from "./repository-properties";
 
 const sections = {
   settings: "Profile",
   privileges: "Member privileges",
+  "project-policy": "Project policy",
   rulesets: "Rulesets",
   properties: "Repository properties",
   "issue-types": "Issue types",
@@ -63,6 +65,7 @@ export function OrganizationSettings({
       />
     ),
     privileges: <RepositoryPolicySettings organization={id} csrf={csrf} />,
+    "project-policy": <ProjectPolicySettings organization={id} />,
     rulesets: <OrganizationRulesets key={id} organization={id} csrf={csrf} />,
     properties: (
       <OrganizationRepositoryProperties

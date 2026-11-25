@@ -105,6 +105,16 @@ describe("GitHub repository addresses", () => {
     [
       {
         view: "pulls",
+        pull: "7",
+        pull_tab: "commits",
+        pull_commit: "a".repeat(40),
+      },
+      `/team/repo.name/pull/7/commits/${"a".repeat(40)}`,
+      { pull: "7", pullTab: "commits", pullCommit: "a".repeat(40) },
+    ],
+    [
+      {
+        view: "pulls",
         pull: "new",
         base: "refs/heads/main",
         head: "refs/heads/feature/x",

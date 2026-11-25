@@ -8,7 +8,7 @@ use planning::grouping::{self, GroupBy};
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BulkSourceQuery {
-    pub actor: Uuid,
+    pub actor: AccessActor,
     pub project: Uuid,
     pub items: Vec<Uuid>,
 }
@@ -96,17 +96,24 @@ impl Read for GetAttachmentSources {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ListQuery {
-    pub actor: Uuid,
+    pub actor: AccessActor,
     pub archived: bool,
     pub search: String,
     pub after: Option<Uuid>,
     pub revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linkable: bool,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Listing {
     pub items: Vec<Project>,
     pub next: Option<Uuid>,
     pub revision: u64,
+    pub can_create: bool,
 }
 pub(crate) struct List;
 impl Read for List {
@@ -124,12 +131,72 @@ impl Read for List {
                 "project page changed; reload the first page",
             ));
         }
-        let rows=context.query("SELECT data FROM organization_projects WHERE archived=? AND id>? AND instr(name_key,?)>0 ORDER BY id LIMIT 31",&[SqlValue::Integer(i64::from(input.archived)),blob(input.after.unwrap_or(Uuid::nil())),SqlValue::Text(input.search.to_lowercase())])?;
-        let mut items = rows
-            .rows
-            .iter()
-            .map(|row| serde_json::from_str::<Project>(&text(&row[0])?).map_err(Error::from))
-            .collect::<Result<Vec<_>>>()?;
+        if input.team.is_some() && input.repository.is_some() {
+            return Err(Error::Invalid("Choose a team or a repository"));
+        }
+        if let Some(team) = input.team {
+            let team = teams::view(context, input.actor.id(), team)?.ok_or(Error::AccessDenied)?;
+            if input.linkable && !team.can_manage {
+                return Err(Error::AccessDenied);
+            }
+        } else if input.linkable && input.repository.is_none() {
+            return Err(Error::Invalid(
+                "Choose a team or repository before searching for linkable Projects",
+            ));
+        }
+        let viewer = access::Viewer::load(context, input.actor, true)?;
+        let search = SqlValue::Text(input.search.to_lowercase());
+        let repository = input.repository.map(blob).unwrap_or(SqlValue::Null);
+        let linked = SqlValue::Integer(i64::from(!input.linkable));
+        let mut after = input.after.unwrap_or(Uuid::nil());
+        let mut items = Vec::new();
+        // Scan bounded batches so inaccessible projects do not consume visible page slots.
+        while items.len() <= 30 {
+            let rows = context.query(
+                "SELECT p.id,p.data FROM organization_projects p
+                 WHERE p.archived=? AND p.id>? AND instr(p.name_key,?)>0
+                   AND (? IS NULL OR EXISTS (
+                     SELECT 1 FROM organization_project_repositories
+                     WHERE project=p.id AND repository=?
+                   ) = ?)
+                 ORDER BY p.id LIMIT 31",
+                &[
+                    SqlValue::Integer(i64::from(input.archived)),
+                    blob(after),
+                    search.clone(),
+                    repository.clone(),
+                    repository.clone(),
+                    linked.clone(),
+                ],
+            )?;
+            for row in &rows.rows {
+                after = uuid(&row[0])?;
+                let project: Project = serde_json::from_str(&text(&row[1])?)?;
+                if project.id != after {
+                    return Err(Error::Invalid("organization project record is invalid"));
+                }
+                let role = viewer.role(&project);
+                let matches = match input.team {
+                    Some(team) if input.linkable => {
+                        role == AccessRole::Admin
+                            && !project.access.has_team(team)
+                            && !project.archived
+                    }
+                    Some(team) => role != AccessRole::None && project.access.has_team(team),
+                    None if input.linkable => role >= AccessRole::Write && !project.archived,
+                    None => role != AccessRole::None,
+                };
+                if matches {
+                    items.push(project);
+                    if items.len() > 30 {
+                        break;
+                    }
+                }
+            }
+            if rows.rows.len() < 31 {
+                break;
+            }
+        }
         let more = items.len() > 30;
         items.truncate(30);
         Ok(Listing {
@@ -140,13 +207,14 @@ impl Read for List {
             },
             items,
             revision: organization.version,
+            can_create: input.team.is_none() && input.repository.is_none() && viewer.member(),
         })
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProjectKey {
-    pub actor: Uuid,
+    pub actor: AccessActor,
     pub project: Uuid,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -154,6 +222,8 @@ pub(crate) struct View {
     pub project: Project,
     pub repositories: Vec<Uuid>,
     pub can_manage: bool,
+    #[serde(default)]
+    pub can_admin: bool,
 }
 pub(crate) struct Get;
 impl Read for Get {
@@ -162,21 +232,25 @@ impl Read for Get {
     type Input = ProjectKey;
     type Output = Option<View>;
     fn execute(context: &mut Transaction<'_>, input: ProjectKey) -> Result<Option<View>> {
-        load(context, input.project)?
-            .map(|project| {
-                Ok(View {
-                    can_manage: can_manage(context, input.actor, &project)?,
-                    repositories: repositories(context, input.project)?,
-                    project,
-                })
-            })
-            .transpose()
+        let Some(project) = load(context, input.project)? else {
+            return Ok(None);
+        };
+        let role = access::effective_role(context, input.actor, &project)?;
+        if role == AccessRole::None {
+            return Ok(None);
+        }
+        Ok(Some(View {
+            can_manage: role >= AccessRole::Write,
+            can_admin: role == AccessRole::Admin,
+            repositories: repositories(context, input.project)?,
+            project,
+        }))
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ItemsQuery {
-    pub actor: Uuid,
+    pub actor: AccessActor,
     pub project: Uuid,
     pub after: Option<Uuid>,
     pub version: Option<u64>,
@@ -197,7 +271,7 @@ pub(crate) struct MatchedItems {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SourcesQuery {
-    pub actor: Uuid,
+    pub actor: AccessActor,
     pub project: Uuid,
     pub item: Option<Uuid>,
     pub include_pulls: bool,

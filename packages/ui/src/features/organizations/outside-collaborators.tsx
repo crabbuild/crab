@@ -36,12 +36,14 @@ import {
 } from "@/components/ui/empty";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { useRequest } from "@/lib/api";
+import { navigate, useRequest } from "@/lib/api";
 import type {
   OrganizationPage,
   OutsideCollaborator,
   OutsideCollaboratorRepository,
-  OutsideGrantChange,
+  OutsideRemovalImpact,
+  OutsideRemovalPlan,
+  OutsideRemovalPreview,
 } from "@/lib/contracts";
 import { repositoryRoleLabels } from "@/lib/repository-roles";
 import { repoHref } from "@/lib/repository-route";
@@ -51,15 +53,18 @@ import { MutationError } from "./feedback";
 export function OutsideCollaborators({
   endpoint,
   csrf,
+  actor,
+  url,
   onInvited,
 }: {
   endpoint: string;
   csrf: string;
+  actor: string;
+  url: URL;
   onInvited: () => void;
 }) {
-  const [search, setSearch] = useState("");
-  const [q, setQ] = useState("");
-  const [after, setAfter] = useState<string>();
+  const q = url.searchParams.get("q") ?? "";
+  const after = url.searchParams.get("after");
   const [expanded, setExpanded] = useState<string>();
   const [checked, setChecked] = useState<string[]>([]);
   const [notice, setNotice] = useState("");
@@ -69,12 +74,18 @@ export function OutsideCollaborators({
   const list = useRequest<OrganizationPage<OutsideCollaborator>>(
     `${root}?${parameters}`,
   );
-  const firstPage = () => {
-    setAfter(undefined);
+  function showPage(query: string, cursor?: string) {
+    const next = new URLSearchParams(url.searchParams);
+    if (query) next.set("q", query);
+    else next.delete("q");
+    if (cursor) next.set("after", cursor);
+    else next.delete("after");
     setExpanded(undefined);
     setChecked([]);
-    if (!after) list.retry();
-  };
+    if (next.toString() === url.searchParams.toString()) list.retry();
+    else navigate(`${url.pathname}?${next}`);
+  }
+  const firstPage = () => showPage(q);
   return (
     <section aria-labelledby="outside-collaborators" className="grid gap-4">
       <h2 id="outside-collaborators" className="text-lg font-semibold">
@@ -86,10 +97,8 @@ export function OutsideCollaborators({
         className="flex flex-wrap items-end gap-2"
         onSubmit={(event) => {
           event.preventDefault();
-          setExpanded(undefined);
-          setAfter(undefined);
-          setChecked([]);
-          setQ(search.trim());
+          const search = new FormData(event.currentTarget).get("q");
+          if (typeof search === "string") showPage(search.trim());
         }}
       >
         <Field className="min-w-0 flex-1 sm:max-w-xs">
@@ -97,13 +106,14 @@ export function OutsideCollaborators({
             Find collaborators
           </FieldLabel>
           <Input
+            key={q}
             id="collaborator-search"
+            name="q"
             type="search"
-            placeholder="Name or username"
+            placeholder="Name, username, or repository"
             autoComplete="off"
             maxLength={100}
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
+            defaultValue={q}
           />
         </Field>
         <Button type="submit" variant="outline">
@@ -119,24 +129,26 @@ export function OutsideCollaborators({
           {notice}
         </p>
       )}
+      <RemoveCollaborators
+        key={`${root}:${actor}`}
+        root={root}
+        csrf={csrf}
+        storageKey={`crab:outside-removal:${endpoint}:${actor}`}
+        people={
+          list.data?.items.filter((person) => checked.includes(person.key)) ??
+          []
+        }
+        onRefresh={firstPage}
+        onRemoved={({ collaborators, grants }) => {
+          setNotice(
+            `Removed ${grants} direct repository ${grants === 1 ? "grant" : "grants"} for ${collaborators} ${collaborators === 1 ? "collaborator" : "collaborators"}.`,
+          );
+          firstPage();
+        }}
+      />
       <Result state={list} timingLabel="Outside collaborators">
-        {({ items, next, revision }) => (
+        {({ items, next }) => (
           <>
-            {checked.length > 0 && (
-              <RemoveCollaborators
-                root={root}
-                csrf={csrf}
-                people={items.filter((person) => checked.includes(person.key))}
-                revision={revision}
-                onRefresh={firstPage}
-                onRemoved={({ collaborators, grants }) => {
-                  setNotice(
-                    `Removed ${grants} direct repository ${grants === 1 ? "grant" : "grants"} for ${collaborators} ${collaborators === 1 ? "collaborator" : "collaborators"}.`,
-                  );
-                  firstPage();
-                }}
-              />
-            )}
             {items.length ? (
               <ul className="divide-y rounded-lg border">
                 {items.map((person) => (
@@ -234,7 +246,7 @@ export function OutsideCollaborators({
                     {next
                       ? "Continue to look through the remaining grants."
                       : q
-                        ? "Try a different name or username."
+                        ? "Try a different name, username, or repository."
                         : "People with direct repository access who aren’t organization members appear here."}
                   </EmptyDescription>
                 </EmptyHeader>
@@ -244,11 +256,7 @@ export function OutsideCollaborators({
               <Button
                 className="justify-self-start"
                 variant="outline"
-                onClick={() => {
-                  setExpanded(undefined);
-                  setChecked([]);
-                  setAfter(next);
-                }}
+                onClick={() => showPage(q, next)}
               >
                 Next page
               </Button>
@@ -264,40 +272,86 @@ function RemoveCollaborators({
   root,
   csrf,
   people,
-  revision,
+  storageKey,
   onRefresh,
   onRemoved,
 }: {
   root: string;
   csrf: string;
   people: OutsideCollaborator[];
-  revision: number;
+  storageKey: string;
   onRefresh: () => void;
-  onRemoved: (removal: OutsideGrantChange) => void;
+  onRemoved: (removal: OutsideRemovalImpact) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [plan, setPlan] = useState(() => readPending(storageKey));
+  const [open, setOpen] = useState(Boolean(plan));
+  const [review, setReview] = useState<OutsideRemovalPreview>();
+  const [storageError, setStorageError] = useState<string>();
+  const preview = useMutation(csrf, null);
   const mutation = useMutation(csrf, null);
-  async function remove() {
-    const result = await mutation.run<OutsideGrantChange>(
-      `${root}/remove`,
-      "POST",
-      {
-        revision,
-        keys: people.map((person) => person.key),
-      },
-    );
-    if (result) {
-      setOpen(false);
-      onRemoved(result);
+  const pending = preview.pending || mutation.pending;
+  const stale = preview.status === 409 || mutation.status === 409;
+  function clearPlan() {
+    try {
+      sessionStorage.removeItem(storageKey);
+    } catch {
+      // A saved plan can only replay its original result.
     }
+    setPlan(undefined);
   }
+  async function loadPreview() {
+    setReview(
+      (await preview.run<OutsideRemovalPreview>(
+        `${root}/removal-preview`,
+        "POST",
+        { collaborators: people.map((person) => person.key) },
+      )) ?? undefined,
+    );
+  }
+  async function remove(confirmation: OutsideRemovalPlan) {
+    try {
+      sessionStorage.setItem(storageKey, JSON.stringify(confirmation));
+    } catch {
+      setStorageError("Unable to save this removal for recovery. Try again.");
+      return;
+    }
+    setStorageError(undefined);
+    setPlan(confirmation);
+    const result = await mutation.run<OutsideRemovalImpact>(
+      `${root}/removals`,
+      "POST",
+      confirmation,
+    );
+    if (!result) return;
+    if (
+      result.collaborators !== confirmation.collaborators.length ||
+      !Number.isSafeInteger(result.repositories) ||
+      !Number.isSafeInteger(result.grants) ||
+      result.repositories < 1 ||
+      result.grants < Math.max(result.repositories, result.collaborators)
+    ) {
+      setStorageError(
+        "The removal result could not be verified. Retry to recover it.",
+      );
+      return;
+    }
+    clearPlan();
+    setOpen(false);
+    onRemoved(result);
+  }
+  if (!people.length && !plan) return null;
   return (
     <Dialog
       open={open}
       onOpenChange={(value) => {
-        if (mutation.pending) return;
+        if (pending || (plan && !stale)) return;
         mutation.reset();
+        preview.reset();
+        setReview(undefined);
+        setStorageError(undefined);
         setOpen(value);
+        if (value) void loadPreview();
+        else if (plan) clearPlan();
       }}
     >
       <div className="flex flex-wrap items-center gap-3">
@@ -341,22 +395,61 @@ function RemoveCollaborators({
             </li>
           ))}
         </ul>
-        <MutationError error={mutation.error} />
+        {review && (
+          <p>
+            Remove {review.impact.grants} direct{" "}
+            {review.impact.grants === 1 ? "grant" : "grants"} for{" "}
+            {review.impact.collaborators}{" "}
+            {review.impact.collaborators === 1
+              ? "collaborator"
+              : "collaborators"}{" "}
+            across {review.impact.repositories}{" "}
+            {review.impact.repositories === 1 ? "repository" : "repositories"}.
+          </p>
+        )}
+        {review && review.repository_names.length > 0 && (
+          <p className="text-sm text-muted-foreground">
+            {review.repository_names.join(", ")}
+          </p>
+        )}
+        {plan && !review && (
+          <p>Retry the submitted removal to recover its result.</p>
+        )}
+        <MutationError
+          error={storageError || preview.error || mutation.error}
+        />
         <DialogFooter>
           <DialogClose asChild>
-            <Button variant="outline" disabled={mutation.pending}>
+            <Button variant="outline" disabled={pending || (!!plan && !stale)}>
               Cancel
             </Button>
           </DialogClose>
-          {mutation.status === 409 ? (
-            <Button onClick={onRefresh}>Reload collaborators</Button>
+          {stale ? (
+            <Button
+              onClick={() => {
+                clearPlan();
+                setOpen(false);
+                onRefresh();
+              }}
+            >
+              Reload collaborators
+            </Button>
           ) : (
             <Button
               variant="destructive"
-              disabled={mutation.pending}
-              onClick={() => void remove()}
+              disabled={pending || (!review && !plan)}
+              onClick={() => {
+                const confirmation = plan ?? review?.plan;
+                if (confirmation) void remove(confirmation);
+              }}
             >
-              {mutation.pending ? "Removing…" : "Remove outside collaborators"}
+              {mutation.pending
+                ? "Removing…"
+                : plan
+                  ? "Retry removal"
+                  : preview.pending
+                    ? "Loading preview…"
+                    : "Remove outside collaborators"}
             </Button>
           )}
         </DialogFooter>
@@ -429,4 +522,20 @@ function CollaboratorRepositories({ path }: { path: string }) {
       )}
     </div>
   );
+}
+
+function readPending(key: string): OutsideRemovalPlan | undefined {
+  try {
+    const saved = sessionStorage.getItem(key);
+    if (saved === null) return;
+    const plan = JSON.parse(saved) as OutsideRemovalPlan | null;
+    if (
+      plan &&
+      typeof plan.confirmation === "string" &&
+      Array.isArray(plan.collaborators)
+    )
+      return plan;
+  } catch {
+    return;
+  }
 }

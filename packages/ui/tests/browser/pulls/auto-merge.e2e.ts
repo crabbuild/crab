@@ -185,3 +185,103 @@ test("queue submission replays a lost reply and allocates a new request on re-en
   });
   expect(writes[2].request_id).not.toBe(writes[0].request_id);
 });
+
+test("merge when ready waits for requirements before showing a queue position", async ({
+  page,
+}) => {
+  const fixture = await mockPullRequest(page);
+  const pull = fixture.pull();
+  let active = false;
+  let queued = false;
+  let canceled = false;
+  let requestId: string | undefined;
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/pulls/1",
+    (route) =>
+      route.fulfill({
+        json: {
+          ...pull,
+          merge_queue_required: true,
+          merge_queue_requested: active,
+          merge_queued: queued,
+          can_merge: false,
+        },
+      }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/pulls/1/auto-merge",
+    (route) => {
+      const request = route.request();
+      if (request.method() === "PUT") {
+        const input = request.postDataJSON();
+        expect(input).toEqual({
+          request_id: expect.any(String),
+          queue: true,
+          when_ready: true,
+          method: "squash",
+          version: pull.version,
+          base_oid: pull.base_oid,
+          head_oid: pull.head_oid,
+        });
+        if (canceled) expect(input.request_id).not.toBe(requestId);
+        requestId = input.request_id;
+        canceled = false;
+        active = true;
+      } else if (request.method() === "DELETE") {
+        expect(request.postDataJSON()).toEqual({ request_id: requestId });
+        canceled = true;
+        active = false;
+      }
+      return route.fulfill({
+        json: {
+          can_enable: false,
+          can_enqueue: false,
+          can_wait_for_queue: !active,
+          queue_method: "squash",
+          can_disable: active,
+          request: requestId
+            ? {
+                request_id: requestId,
+                method: "squash",
+                head_oid: pull.head_oid,
+                scheduled_by: "Alice",
+                stopped: canceled ? "canceled" : null,
+                waiting_for_queue: !queued,
+                queue: queued,
+              }
+            : null,
+        },
+      });
+    },
+  );
+
+  await page.goto("/team/project/pull/1");
+  const start = page.getByRole("button", {
+    name: "Merge when ready",
+    exact: true,
+  });
+  const dialog = page.getByRole("dialog", { name: "Merge when ready" });
+  const panel = page.getByRole("region", { name: "Merge queue", exact: true });
+  const confirm = dialog.getByRole("button", {
+    name: "Confirm merge when ready",
+  });
+  await start.click();
+  await expect(dialog).toContainText(pull.head_oid.slice(0, 7));
+  await confirm.click();
+  await expect(panel).toContainText("Waiting for merge requirements");
+  await expect(
+    panel.getByRole("link", { name: "View merge queue" }),
+  ).toHaveCount(0);
+  await panel.getByRole("button", { name: "Cancel merge when ready" }).click();
+  await expect(panel.getByRole("status")).toContainText(
+    "Merge when ready canceled",
+  );
+  await start.click();
+  await confirm.click();
+  await expect(panel).toContainText("Waiting for merge requirements");
+  queued = true;
+  await expect(panel).toContainText("Waiting in the merge queue");
+  await expect(
+    panel.getByRole("link", { name: "View merge queue" }),
+  ).toBeVisible();
+});

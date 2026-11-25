@@ -142,11 +142,7 @@ where
                 RulesetScope::Organization(id) => id,
             };
             let catalog = server.catalog().ok_or(Error::NotFound)?;
-            let root = catalog.root();
-            let prefix = root
-                .path(&format!(".crab/policy/{organization}"))
-                .to_string();
-            root.repository_layout(prefix)
+            catalog.root().organization_policy_layout(organization)
         }
     };
     // Patterns cover branches and repositories that do not exist yet. Final
@@ -158,8 +154,8 @@ where
         let result = crab_remote::publication::with_internal_lease(
             layout.store(),
             &layout,
-            "branch-rulesets",
-            Duration::from_secs(300),
+            crate::storage_root::POLICY_LEASE_RESOURCE,
+            crate::storage_root::POLICY_LEASE_TTL,
             cancel,
             |cancel| {
                 let work = work.take();

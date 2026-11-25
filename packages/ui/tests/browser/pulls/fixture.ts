@@ -401,6 +401,9 @@ export async function mockPullRequest(
     ) {
       const input = request.postDataJSON();
       expect(input).toEqual({
+        request_id: expect.stringMatching(
+          /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/,
+        ),
         expected_head: lifecycle.head,
         message: "Apply review suggestions from pull request #2",
         threads: [{ number: 1, version: 1 }],
@@ -634,6 +637,39 @@ export async function mockPullRequest(
     ) {
       await route.fulfill({ json: { version: null, comments: [] } });
       return;
+    }
+    if (/\/pulls\/\d+\/threads\/navigation$/.test(path)) {
+      const current = threads.filter(
+        (thread) => !thread.outdated && !thread.vanished,
+      );
+      const outdated = threads.filter(
+        (thread) => thread.outdated || thread.vanished,
+      );
+      const open = current.filter((thread) => !thread.resolved);
+      const around = Number(
+        url.searchParams.get("around") ?? Number.MAX_SAFE_INTEGER,
+      );
+      const nearby = threads
+        .filter((thread) => !thread.resolved)
+        .map((thread) => Number(thread.number))
+        .sort((a, b) => a - b);
+      const next = nearby.find((number) => number > around) ?? null;
+      return route.fulfill({
+        json: {
+          base_oid: mergeBase,
+          head_oid: lifecycle.head,
+          summary: {
+            open: open.length,
+            resolved: current.length - open.length,
+            outdated: outdated.length,
+            outdated_unresolved: outdated.filter((thread) => !thread.resolved)
+              .length,
+            previous:
+              nearby.reverse().find((number) => number < around) ?? null,
+            next,
+          },
+        },
+      });
     }
     if (/\/pulls\/\d+\/threads$/.test(path)) {
       if (request.method() === "POST") {

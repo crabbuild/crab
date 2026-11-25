@@ -11,6 +11,16 @@ import {
   selectDarkTheme,
 } from "../accessibility";
 
+function editedContribution<T extends Comment>(item: T): T {
+  return {
+    ...item,
+    body: `${item.body} (canonical)`,
+    version: 2,
+    updated_at: item.updated_at + 1000,
+    has_edit_history: true,
+  };
+}
+
 async function historyFixture(page: Page) {
   await mockPullRequest(page);
   const comments: Comment[] = Array.from({ length: 65 }, (_, index) => ({
@@ -105,7 +115,7 @@ async function historyFixture(page: Page) {
         items.map((item) =>
           focus ===
           `${path.includes("/pulls/") && "state" in item ? "review" : "comment"}:${item.number}`
-            ? { ...item, body: `${item.body} (canonical)`, version: 2 }
+            ? editedContribution(item)
             : item,
         );
       return conversationPage(route, {
@@ -126,9 +136,7 @@ async function historyFixture(page: Page) {
         const item = source.find((item) => item.number === Number(match[3]));
         // The canonical point record is newer than the historical list snapshot.
         return item
-          ? route.fulfill({
-              json: { ...item, body: `${item.body} (canonical)`, version: 2 },
-            })
+          ? route.fulfill({ json: editedContribution(item) })
           : route.fulfill({
               status: 404,
               json: { error: { message: "Contribution not found" } },

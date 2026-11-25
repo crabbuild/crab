@@ -74,6 +74,7 @@ export interface PullRequest extends PullSummary {
   can_merge: boolean;
   auto_merge_configured?: boolean;
   merge_queued?: boolean;
+  merge_queue_requested?: boolean;
   merge_queue_required?: boolean;
   branches_available: boolean;
   merge: {
@@ -130,15 +131,15 @@ export interface CodeOwnersReport {
   head_oid: string | null;
   invalid_lines: number;
   affected_paths: number;
-  missing_paths: number;
+  missing_paths?: number;
   problem: string | null;
   groups: {
     line: number;
     owners: string[];
     paths: string[];
     affected: number;
-    approved: boolean;
-    has_eligible_owner: boolean;
+    approved?: boolean;
+    has_eligible_owner?: boolean;
   }[];
 }
 

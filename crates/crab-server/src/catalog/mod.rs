@@ -4,6 +4,7 @@ pub(crate) mod conversion;
 pub(crate) mod deletion;
 pub(crate) mod description;
 pub(crate) mod forking;
+pub(crate) mod outside_removal;
 mod read;
 mod rename;
 pub(crate) mod topics;
@@ -22,7 +23,7 @@ use uuid::Uuid;
 
 use crate::{
     BranchProtection, RepositoryAccess, RepositoryConfig, RepositoryGroup, RepositoryMember,
-    storage_root::StorageRoot,
+    storage_root::{POLICY_LEASE_RESOURCE, POLICY_LEASE_TTL, StorageRoot},
 };
 
 const SCHEMA_VERSION: u32 = 3;
@@ -52,6 +53,8 @@ pub enum CatalogError {
     Metadata(#[from] crab_metadata::error::MetadataError),
     #[error("repository content validation failed")]
     Read(#[from] crab_read::ReadError),
+    #[error("organization access publication lease failed")]
+    AccessLease(#[source] crab_remote::publication::Error),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -146,7 +149,7 @@ pub struct CatalogDocument {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     organization_audit_heads: BTreeMap<Uuid, audit::Position>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_membership_audit: Option<MembershipAuditEvent>,
+    pub(crate) pending_membership_audit: Option<audit::AccessAudit>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) pending_conversions: BTreeMap<Uuid, crate::cells::organization::Conversion>,
 }
@@ -250,18 +253,14 @@ impl CatalogDocument {
             ));
         }
         if let Some(event) = &self.pending_membership_audit {
-            if event.repository_version != self.version
+            if event.position().revision != self.version
                 || !event.valid()
                 || !self.valid_pending_scopes(event)
-                || event.previous != self.membership_audit_head
+                || event.previous() != self.membership_audit_head.as_deref()
             {
                 return Err(CatalogError::Invalid("membership audit event is invalid"));
             }
-            if event.digest(self)? != event.new_members_digest {
-                return Err(CatalogError::Invalid(
-                    "membership audit digest does not match",
-                ));
-            }
+            event.validate_catalog(self)?;
         }
         if self
             .membership_audit_head
@@ -826,6 +825,61 @@ impl CatalogStore {
         actor: MembershipActor,
         require_administrator: bool,
     ) -> Result<CatalogRecord, CatalogError> {
+        let (snapshot, _) = self.load_snapshot().await?;
+        if snapshot.version != input.expected_revision {
+            return Err(CatalogError::Conflict);
+        }
+        let organization = snapshot
+            .repositories
+            .iter()
+            .find(|record| {
+                record.owner.eq_ignore_ascii_case(owner) && record.name.eq_ignore_ascii_case(name)
+            })
+            .ok_or(CatalogError::NotFound)?
+            .organization_id();
+        let Some(organization) = organization else {
+            return self
+                .replace_access_under_policy(owner, name, input, actor, require_administrator)
+                .await;
+        };
+        let layout = self.root.organization_policy_layout(organization);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        // The operator CLI uses the same lease as browser ACL writes and guest
+        // Project commands. The catalog revision also fences ownership changes.
+        use crab_remote::publication::Error as LeaseError;
+        match crab_remote::publication::with_internal_lease(
+            layout.store(),
+            &layout,
+            POLICY_LEASE_RESOURCE,
+            POLICY_LEASE_TTL,
+            &cancel,
+            |cancel| async move {
+                if cancel.is_cancelled() {
+                    return Ok(Err(CatalogError::Conflict));
+                }
+                Ok(self
+                    .replace_access_under_policy(owner, name, input, actor, require_administrator)
+                    .await)
+            },
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(LeaseError::Coordination(crab_coordination::CoordinationError::PushLockHeld {
+                ..
+            })) => Err(CatalogError::Conflict),
+            Err(error) => Err(CatalogError::AccessLease(error)),
+        }
+    }
+
+    pub(crate) async fn replace_access_under_policy(
+        &self,
+        owner: &str,
+        name: &str,
+        input: AccessUpdate,
+        actor: MembershipActor,
+        require_administrator: bool,
+    ) -> Result<CatalogRecord, CatalogError> {
         self.edit_access(owner, name, input.expected_revision, actor, |record| {
             record.members = input.members;
             record.groups = input.groups;
@@ -958,7 +1012,7 @@ impl CatalogStore {
                     .store
                     .get_with_etag_bounded(&path, MAX_CATALOG_BYTES)
                     .await?;
-                if serde_json::from_slice::<MembershipAuditEvent>(&body)? != event {
+                if serde_json::from_slice::<audit::AccessAudit>(&body)? != event {
                     return Err(CatalogError::Invalid("immutable membership audit differs"));
                 }
             }
@@ -967,10 +1021,10 @@ impl CatalogStore {
         // Catalog roots are portable backup units. Persisting a root-qualified
         // key here would make an otherwise byte-exact restore prefix-dependent.
         document.membership_audit_head = Some(relative_path);
-        for scope in &event.organizations {
+        for (organization, _) in event.organizations() {
             document
                 .organization_audit_heads
-                .insert(scope.organization, position);
+                .insert(organization, position);
         }
         document.pending_membership_audit = None;
         document.validate(&self.root)?;

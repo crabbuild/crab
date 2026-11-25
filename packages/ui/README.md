@@ -317,8 +317,9 @@ pending or past invitations under **People → Invitations**. **Outside
 collaborators** lists people outside the organization with direct repository
 grants. Expand a person to see their roles and open the repository
 access editor, or invite a collaborator with a public profile. Select people
-and choose **Remove from all repositories** to revoke their direct grants
-across the organization. From **Members**, select people to convert and keep their
+and choose **Remove from all repositories** to review and revoke their direct
+grants across the organization. A submitted removal can be recovered after
+reload. From **Members**, select people to convert and keep their
 direct and team-derived repository grants while ending organization and team
 membership. **Settings** has
 dedicated pages for the organization profile, member privileges, and repository
@@ -431,12 +432,30 @@ from the owned Calendar, Popover and Select. Dates remain nullable `YYYY-MM-DD`
 civil dates; selecting or clearing a date never converts it through UTC. Start
 and target controls constrain each other, and the native API validates ranges.
 
-Current organization members can read and create projects; the creator in their
-current membership incarnation and organization owners manage them. Project
-access grants no source repository access. Inaccessible work is redacted, and
-repository UUIDs prevent name reuse from redirecting project references. Source
-permissions are refreshed after enrichment; native organization authority is
-checked again before returning a composed response.
+Current organization members can create Projects. Organization owners set the
+default access in **Settings** → **Project policy**. Project administrators can
+inherit that default or set a base role and individual, team, or outside
+collaborator grants in **Manage access**. Outside collaborators must retain
+direct access to an organization repository. Their library shows only Projects
+explicitly shared with them. The creator in their original membership
+incarnation and organization owners retain administrative access. Source
+repository permissions still apply. Inaccessible work and history are redacted.
+Repository UUIDs prevent name reuse from redirecting project references. Source
+permissions are refreshed after enrichment, and native organization authority
+is checked again before returning a composed response.
+
+A team's **Projects** tab uses that same library and only shows readable
+Projects with an explicit grant for the team. **Link a project** uses the
+current Project revision and the standard submission journal to grant team
+Read access. Organization owners and team maintainers with Project Admin
+access can use the picker.
+
+Organization-owned repositories show a **Linked projects** collection in
+**Projects**. It lists shared Projects the viewer can read. Project editors
+can search for and link an active Project from the same organization.
+Project administrators can choose a **Default repository** under
+**Repositories** → **Manage**. New issue drafts preselect it when writable,
+and the editor offers any writable linked repository as an explicit choice.
 
 When a linked issue moves, its row opens the current issue while planning edits
 retain the stored project item and its history. A reader needs access to the
@@ -445,10 +464,13 @@ includes published destinations and counts relocated work there.
 Adding the moved issue again keeps its existing Project placement and shows an
 already-linked message.
 
-Shared projects link existing work and support draft notes. Source creation,
-draft conversion, title/state saved filters and custom project templates remain
-repository-scoped. Linking does not migrate repository projects or grant team
-access. Workflow automation and cross-organization/personal project discovery are
+Shared projects link existing work, create issues in writable organization
+repositories, and support draft notes. Open a saved draft note and choose
+**Convert to issue** to publish it in a linked repository while keeping its
+planning fields and item identity. Title/state saved filters and custom
+project templates remain repository-scoped. Linking does
+not migrate repository projects. Workflow
+automation and cross-organization/personal project discovery are
 separate features. Preparation and API contracts are in
 `crates/crab-server/CELLAR.md`; browser proof is
 `tests/browser/project-workspaces.e2e.ts`.

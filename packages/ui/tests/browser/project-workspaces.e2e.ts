@@ -76,6 +76,7 @@ async function fixture(page: Page, movedIssue = false) {
   const revisions = new Map<string, number>();
   const decisions = new Map<string, Outcome>();
   const submissions: { request_id: string; command: WorkspaceCommand }[] = [];
+  let defaultRepository: string | null | undefined;
   let lose = false;
   const movedItem = "01900000-0000-7000-8000-000000000030";
   if (movedIssue) {
@@ -129,6 +130,10 @@ async function fixture(page: Page, movedIssue = false) {
             protection_version: 0,
           })),
         },
+      });
+    if (path === `${root}/context`)
+      return route.fulfill({
+        json: { name: "Engineering", can_create: true },
       });
     if (path === `/api/organizations/${organization}`)
       return route.fulfill({
@@ -299,6 +304,39 @@ async function fixture(page: Page, movedIssue = false) {
               definition: command.definition,
               archived: command.archived,
             };
+          if (command.kind === "reorder_views")
+            project = {
+              ...project,
+              definition: {
+                ...project.definition,
+                views: command.order.map(
+                  (id) =>
+                    project.definition.views.find((view) => view.id === id)!,
+                ),
+              },
+            };
+          if (command.kind === "column_limit") {
+            const { view, group_by, value, limit } = command.column;
+            project = {
+              ...project,
+              definition: {
+                ...project.definition,
+                views: project.definition.views.map((saved) => {
+                  if (saved.id !== view) return saved;
+                  const columns = { ...saved.column_limits?.[group_by] };
+                  if (limit === null) delete columns[value];
+                  else columns[value] = limit;
+                  return {
+                    ...saved,
+                    column_limits: {
+                      ...saved.column_limits,
+                      [group_by]: columns,
+                    },
+                  };
+                }),
+              },
+            };
+          }
           outcome = {
             outcome: "applied",
             project: project.id,
@@ -318,8 +356,15 @@ async function fixture(page: Page, movedIssue = false) {
         json: {
           project,
           can_manage: true,
-          repositories: repositories.filter((repo) => linked.has(repo.id)),
+          repositories: repositories
+            .filter((repo) => linked.has(repo.id))
+            .map((repo) => ({
+              ...repo,
+              can_create_issue: defaultRepository !== undefined || undefined,
+            })),
           restricted_repositories: 0,
+          default_repository: defaultRepository,
+          default_repository_configured: defaultRepository !== undefined,
           lead: { id: actor, name: "Alice", handle: "alice" },
         },
       });
@@ -406,6 +451,10 @@ async function fixture(page: Page, movedIssue = false) {
   return {
     submissions,
     items,
+    setDefaultRepository(repository: string | null) {
+      defaultRepository = repository;
+      for (const repo of repositories) linked.add(repo.id);
+    },
     addDraft(title: string, status = "Todo", values: Item["values"] = {}) {
       const id = crypto.randomUUID();
       items.push({
@@ -452,6 +501,40 @@ async function fixture(page: Page, movedIssue = false) {
     },
   };
 }
+
+test("an unavailable issue default requires a destination and a draft retains the explicit choice", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  state.setDefaultRepository(null);
+  await page.goto(`${home}/${projectId}`);
+  await page
+    .getByRole("button", { name: "Add work", exact: true })
+    .first()
+    .click();
+  const editor = page.getByRole("dialog", { name: "Add work to project" });
+  await editor.getByRole("tab", { name: "New issue", exact: true }).click();
+  const repository = editor.getByRole("combobox", { name: "Issue repository" });
+  await expect(repository).toHaveText("Choose a repository");
+  await expect(
+    editor.getByRole("button", { name: "Create issue" }),
+  ).toBeDisabled();
+  await chooseSelectOption(repository, { label: "team/server" });
+  await editor
+    .getByLabel("Title", { exact: true })
+    .fill("Preserve my destination");
+  state.setDefaultRepository(repositories[1].id);
+  await page.reload();
+  await page
+    .getByRole("button", { name: "Resume item draft", exact: true })
+    .click();
+  await expect(editor.getByLabel("Title", { exact: true })).toHaveValue(
+    "Preserve my destination",
+  );
+  await expect(repository).toHaveText("team/server");
+  expect(state.submissions).toHaveLength(0);
+});
+
 test("one project coordinates matching issue numbers across repositories with planning views and properties", async ({
   page,
 }) => {
@@ -720,6 +803,13 @@ test("project history presents attributed field changes without overflowing a mo
                 { field: "/status", before: "Todo", after: "In progress" },
               ],
             },
+            {
+              version: 2,
+              at_ms: Date.UTC(2026, 10, 1),
+              actor: { id: actor, profile: { name: "Alice" } },
+              target: { kind: "repository", restricted: true },
+              changes: [],
+            },
           ],
           next: null,
         },
@@ -727,6 +817,9 @@ test("project history presents attributed field changes without overflowing a mo
   );
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${home}/${projectId}`);
+  await expect(
+    page.getByRole("tablist", { name: "Project views" }).getByRole("tab"),
+  ).toHaveText(["Overview", "Board", "Table", "Roadmap", "History"]);
   await page.getByRole("tab", { name: "History", exact: true }).click();
   const history = page.getByRole("region", {
     name: "Project history",
@@ -734,6 +827,12 @@ test("project history presents attributed field changes without overflowing a mo
   });
   await expect(history).toContainText("Alice");
   await expect(history).toContainText("Revision 3");
+  await expect(history).toContainText(
+    "Repository access is required to view this source.",
+  );
+  await expect(
+    history.getByRole("button", { name: "View 0 field changes", exact: true }),
+  ).toHaveCount(0);
   await history
     .getByRole("button", { name: "View 1 field changes", exact: true })
     .click();
@@ -1228,6 +1327,101 @@ test("the board move menu clears a custom column with the keyboard on mobile", a
     "Todo",
     "In progress",
   ]);
+});
+
+test("board column limits recover the saved write and stay with their grouping", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  state.addStreamField();
+  state.addDraft("Launch API");
+  state.addDraft("Launch client");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${home}/${projectId}`);
+  await selectDarkTheme(page);
+  await page
+    .getByRole("button", { name: "Column limit for Todo" })
+    .press("Enter");
+  const editor = page.getByRole("dialog", { name: "Column limit for Todo" });
+  await editor.getByRole("spinbutton", { name: "Item limit" }).fill("1");
+  await expectNoAccessibilityViolations(page);
+  state.loseNext();
+  await editor.getByRole("button", { name: "Save limit" }).click();
+  await expect(
+    page.getByRole("button", { name: "Retry submission" }),
+  ).toBeVisible();
+  await page.reload();
+  await page.getByRole("button", { name: "Retry submission" }).click();
+  const todo = page.getByRole("region", { name: "Todo", exact: true });
+  await expect(todo.getByText("2 / 1", { exact: true })).toBeVisible();
+  await expect(todo.getByText("2 items, limit 1, over limit")).toHaveCount(1);
+  expect(state.submissions[1]).toEqual(state.submissions[0]);
+  expect(state.submissions[0].command).toMatchObject({
+    kind: "column_limit",
+    column: { view: views[0].id, group_by: "status", value: "Todo", limit: 1 },
+  });
+  await page.screenshot({
+    path: test.info().outputPath("board-column-limit-mobile-dark.png"),
+  });
+  const grouping = page.getByLabel("Group board by", { exact: true });
+  await chooseSelectOption(grouping, { label: "Workstream" });
+  await expect(
+    page.getByRole("region", { name: "No value", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("2 / 1", { exact: true })).toHaveCount(0);
+  await chooseSelectOption(grouping, { label: "Workflow status" });
+  await expect(todo.getByText("2 / 1", { exact: true })).toBeVisible();
+});
+
+test("saved views reorder by keyboard and pointer while History stays last", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${home}/${projectId}`);
+  const tabs = page.getByRole("tablist", { name: "Project views" });
+  const board = tabs.getByRole("tab", { name: "Board", exact: true });
+  const reorder = page.getByRole("button", { name: "Reorder Board view" });
+  await reorder.press("Enter");
+  state.loseNext();
+  await page.getByRole("menuitem", { name: "Move right" }).press("Enter");
+  const retry = page.getByRole("button", { name: "Retry submission" });
+  await expect(retry).toBeVisible();
+  await page.reload();
+  await retry.click();
+  await expect(retry).toHaveCount(0);
+  await expect(tabs.getByRole("tab")).toHaveText([
+    "Overview",
+    "Table",
+    "Board",
+    "Roadmap",
+    "History",
+  ]);
+  await expect(board).toHaveAttribute("aria-selected", "true");
+  expect(state.submissions[0].command).toEqual({
+    kind: "reorder_views",
+    project: projectId,
+    version: 1,
+    order: [views[1].id, views[0].id, views[2].id],
+  });
+  expect(state.submissions[1]).toEqual(state.submissions[0]);
+  await page.reload();
+  await expect(board).toHaveAttribute("aria-selected", "true");
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await tabs
+    .locator(`[data-view-tab-handle="${views[2].id}"]`)
+    .dragTo(tabs.getByRole("tab", { name: "Table", exact: true }));
+  await expect(tabs.getByRole("tab")).toHaveText([
+    "Overview",
+    "Roadmap",
+    "Table",
+    "Board",
+    "History",
+  ]);
+  await expect(board).toHaveAttribute("aria-selected", "true");
+  expect(state.submissions[2].command).toMatchObject({
+    order: [views[2].id, views[1].id, views[0].id],
+  });
 });
 
 test("a failed recovery checkpoint prevents the new native request", async ({

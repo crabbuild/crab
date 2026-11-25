@@ -7,6 +7,9 @@ use crab_storage::{
 
 use crate::{Error, Result, StorageConfig};
 
+pub(crate) const POLICY_LEASE_RESOURCE: &str = "branch-rulesets";
+pub(crate) const POLICY_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
 #[derive(Clone)]
 pub(crate) struct StorageRoot {
     pub store: Store,
@@ -20,6 +23,15 @@ pub(crate) struct StorageRoot {
 }
 
 impl StorageRoot {
+    pub(crate) fn organization_policy_layout(
+        &self,
+        organization: uuid::Uuid,
+    ) -> StoreLayout<Store> {
+        self.repository_layout(
+            self.path(&format!(".crab/policy/{organization}"))
+                .to_string(),
+        )
+    }
     pub(crate) fn build(config: &StorageConfig) -> Result<Self> {
         let selection = Self::selection(config)?;
         let bucket_label = match &selection.target {

@@ -79,6 +79,8 @@ pub(super) struct Reservation {
     pub(super) request_id: Uuid,
     pub(super) repository: Uuid,
     item: planning::Item,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    draft_version: Option<u64>,
 }
 
 pub(super) type Reservations = BTreeMap<Uuid, Reservation>;
@@ -108,7 +110,11 @@ pub(super) fn has_room(
         "SELECT COUNT(*) FROM organization_project_items WHERE project=?",
         &[blob(project)],
     )?;
-    Ok(uint(&count.rows[0][0])?.saturating_add(pending.len() as u64) < MAX_ITEMS)
+    let insertions = pending
+        .values()
+        .filter(|entry| entry.draft_version.is_none())
+        .count();
+    Ok(uint(&count.rows[0][0])?.saturating_add(insertions as u64) < MAX_ITEMS)
 }
 
 fn rejected(reason: &str) -> MutationResult<Outcome> {
@@ -122,36 +128,54 @@ pub(super) fn reserve(
     request: &Request,
     project: &Project,
     mut pending: Reservations,
-    repository: Uuid,
-    item: &planning::Item,
-    type_id: Option<Uuid>,
 ) -> Result<MutationResult<Outcome>> {
+    let Command::CreateIssue {
+        repository,
+        item: draft,
+        type_id,
+        draft_version,
+        ..
+    } = &request.command
+    else {
+        return Err(Error::Invalid("Expected an issue creation command"));
+    };
     let Some(ownership_epoch) = request.source_epoch.filter(|_| request.source_allowed) else {
         return Ok(rejected(
             "Choose a linked organization repository where you have write access",
         ));
     };
-    if !repositories(context, project.id)?.contains(&repository) {
+    if !repositories(context, project.id)?.contains(repository) {
         return Ok(rejected("Choose a linked organization repository"));
     }
-    if item.subject.is_some()
-        || !item.valid(&project.definition)
+    if draft.subject.is_some()
+        || !draft.valid(&project.definition)
         || type_id.is_some_and(|id| id.is_nil())
     {
         return Ok(rejected("Check the new issue and its Project fields"));
     }
-    if pending.contains_key(&item.id) {
+    if pending.contains_key(&draft.id) {
         return Ok(rejected("This item has a pending issue submission"));
     }
-    let version = ledger::item_version(context, project.id, item.id)?;
-    if version != 0 {
+    let version = ledger::item_version(context, project.id, draft.id)?;
+    let matches_item = match draft_version {
+        None => version == 0,
+        Some(expected) => {
+            version > 0
+                && version == *expected
+                && item(context, project.id, draft.id)?
+                    .is_some_and(|saved| saved.repository.is_none() && saved.item.subject.is_none())
+        }
+    };
+    if !matches_item {
         return Ok(MutationResult::Rejected(Outcome::ItemConflict {
             project: project.id,
-            item: item.id,
+            item: draft.id,
             version,
         }));
     }
-    if pending.len() >= MAX_PENDING || !has_room(context, project.id, &pending)? {
+    if pending.len() >= MAX_PENDING
+        || draft_version.is_none() && !has_room(context, project.id, &pending)?
+    {
         return Ok(rejected(
             "This Project has no available issue creation slots",
         ));
@@ -159,21 +183,21 @@ pub(super) fn reserve(
     let issue = PendingIssue {
         request_id: request.request_id,
         project: project.id,
-        repository,
-        item: item.id,
-        actor: request.actor,
+        repository: *repository,
+        item: draft.id,
+        actor: request.actor.id(),
         ownership_epoch,
         digest: source::digest(
             project.id,
-            request.actor,
-            &item.title,
-            &item.body,
-            type_id,
+            request.actor.id(),
+            &draft.title,
+            &draft.body,
+            *type_id,
             ownership_epoch,
         )?,
         wake_at: context.now_ms().saturating_add(GRACE_MS),
     };
-    let mut item = item.clone();
+    let mut item = draft.clone();
     item.title.clear();
     item.body.clear();
     // A placeholder validates fields as linked work without publishing a row.
@@ -185,8 +209,9 @@ pub(super) fn reserve(
         item.id,
         Reservation {
             request_id: request.request_id,
-            repository,
+            repository: *repository,
             item,
+            draft_version: *draft_version,
         },
     );
     context.put_document(&key(project.id), &pending)?;
@@ -256,15 +281,7 @@ impl Mutation for ResolveIssue {
                         .version;
                     Outcome::IssueAlreadyLinked { project, version }
                 } else {
-                    link(
-                        context,
-                        project,
-                        repository,
-                        actor,
-                        input.request_id,
-                        reserved.item,
-                        number,
-                    )?
+                    link(context, project, actor, reserved, number)?
                 }
             }
         };
@@ -277,30 +294,35 @@ impl Mutation for ResolveIssue {
 fn link(
     context: &mut Transaction<'_>,
     project: Uuid,
-    repository: Uuid,
     actor: Uuid,
-    request_id: Uuid,
-    mut item: planning::Item,
+    reservation: Reservation,
     number: u64,
 ) -> Result<Outcome> {
+    let Reservation {
+        request_id,
+        repository,
+        mut item,
+        draft_version,
+    } = reservation;
     item.subject = Some(Subject {
         kind: SubjectKind::Issue,
         number,
     });
-    let applied = commands::apply(
+    let applied = commands::apply_published_issue(
         context,
         &Request {
             command: Command::Item {
                 project,
-                version: 0,
+                version: draft_version.unwrap_or_default(),
                 repository: Some(repository),
                 item,
             },
-            actor,
+            actor: actor.into(),
             request_id,
             source_allowed: true,
             attachment: None,
             source_epoch: None,
+            eligible_outside: None,
             cancel: false,
         },
     )?;

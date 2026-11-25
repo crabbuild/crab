@@ -12,6 +12,8 @@ test("webhook setup recovers its secret and redelivery keeps the delivery ID", a
     id: string;
     push: boolean;
     pull_request: boolean;
+    issues: boolean;
+    issue_comment: boolean;
   } | null = null;
   let setup: unknown;
   let status = "failed";
@@ -69,9 +71,11 @@ test("webhook setup recovers its secret and redelivery keeps the delivery ID", a
               ? [
                   {
                     id: deliveryId,
-                    event: "pull_request",
-                    action: "opened",
-                    pull: 1,
+                    event: "issue_comment",
+                    action: "created",
+                    issue: 1,
+                    pull: null,
+                    comment: 2,
                     head_change: null,
                     queued_at: 1770000000000,
                     status,
@@ -92,13 +96,17 @@ test("webhook setup recovers its secret and redelivery keeps the delivery ID", a
           expect(change).toMatchObject({
             expected: null,
             push: false,
-            pull_request: true,
+            pull_request: false,
+            issues: true,
+            issue_comment: true,
             id: expect.any(String),
           });
           subscription = {
             id: change.id,
             push: change.push,
             pull_request: change.pull_request,
+            issues: change.issues,
+            issue_comment: change.issue_comment,
           };
           return route.abort("failed");
         }
@@ -132,6 +140,13 @@ test("webhook setup recovers its secret and redelivery keeps the delivery ID", a
     .boundingBox();
   expect(deliveries!.y - (receiver!.y + receiver!.height)).toBeGreaterThan(12);
   await page.getByRole("checkbox", { name: "Git pushes" }).uncheck();
+  await page
+    .getByRole("checkbox", { name: "Pull requests", exact: true })
+    .uncheck();
+  await page.getByRole("checkbox", { name: "Issues", exact: true }).check();
+  await page
+    .getByRole("checkbox", { name: "Issue and pull request comments" })
+    .check();
   const enable = page.getByRole("button", { name: "Enable webhook" });
   await enable.click();
   await expect(page.getByRole("alert")).toContainText("The response was lost.");
@@ -140,6 +155,12 @@ test("webhook setup recovers its secret and redelivery keeps the delivery ID", a
     page.getByRole("textbox", { name: "Copy this secret to your receiver." }),
   ).toHaveValue("fixture-outbound-secret");
   await page.getByRole("button", { name: "Hide secret" }).click();
+  await expect(
+    page.getByRole("link", { name: "Issue #1 · Comment #2" }),
+  ).toHaveAttribute(
+    "href",
+    `/team/project/issues/1?repository_id=${lifecycle.repositoryId}#issuecomment-2`,
+  );
   await page.getByText("Delivery details · 3 attempts").click();
   await expect(page.getByText(deliveryId)).toBeVisible();
   await expect(page.getByText("HTTP 503", { exact: false })).toBeVisible();

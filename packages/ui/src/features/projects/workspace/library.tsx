@@ -30,37 +30,38 @@ import { useProjectCommands } from "../commands";
 import { projectEndpoint } from "../model";
 import { NewProject } from "./forms";
 import { DraftRecovery } from "../drafts";
+import { LinkProject } from "./link-project";
 import {
   statuses,
   health,
   workspaceHref,
-  type WorkspaceProject,
+  type ProjectAssociation,
+  type WorkspaceListing,
 } from "./model";
 
 export function ProjectLibrary({
   organization,
   url,
+  scope,
 }: {
   organization: string;
   url: URL;
+  scope?: { target: ProjectAssociation; canLink: boolean };
 }) {
   const [creating, setCreating] = useState(false);
+  const [linking, setLinking] = useState(false);
   const [after, setAfter] = useState<string>();
   const [revision, setRevision] = useState<string>();
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
   const archived = url.searchParams.get("archived") === "true";
-  const resource = useRequest<{
-    items: WorkspaceProject[];
-    next: string | null;
-    revision: number;
-    can_create: boolean;
-  }>(
+  const resource = useRequest<WorkspaceListing>(
     projectEndpoint({ organization }, "", {
       archived: String(archived),
       search: query,
       after,
       revision,
+      ...scope?.target,
     }),
   );
   const commands = useProjectCommands();
@@ -84,30 +85,49 @@ export function ProjectLibrary({
     <section className="workspace-project-library">
       <header className="workspace-project-header">
         <div>
-          <h1>Projects</h1>
-          <p>Plan and track delivery across your repositories.</p>
+          {scope ? (
+            "team" in scope.target ? (
+              <h3 className="text-lg font-semibold">Team projects</h3>
+            ) : (
+              <h1>Linked projects</h1>
+            )
+          ) : (
+            <>
+              <h1>Projects</h1>
+              <p>Plan and track delivery across your repositories.</p>
+            </>
+          )}
         </div>
-        {resource.data?.can_create && (
+        {scope?.canLink && !archived && (
+          <Button onClick={() => setLinking(true)} disabled={commands.locked}>
+            <PlusIcon data-icon="inline-start" />
+            Link a project
+          </Button>
+        )}
+        {!scope && resource.data?.can_create && (
           <Button onClick={() => setCreating(true)} disabled={commands.locked}>
             <PlusIcon data-icon="inline-start" />
             New project
           </Button>
         )}
       </header>
-      <DraftRecovery
-        scope={{ target: { organization }, project: null }}
-        disabled={!resource.data?.can_create}
-        onResume={() => setCreating(true)}
-      />
+      {!scope && (
+        <DraftRecovery
+          scope={{ target: { organization }, project: null }}
+          disabled={!resource.data?.can_create}
+          onResume={() => setCreating(true)}
+        />
+      )}
       <div className="workspace-project-filters">
         <Tabs
           value={archived ? "archived" : "active"}
           onValueChange={(value) => {
             setAfter(undefined);
             setRevision(undefined);
-            navigate(
-              `${workspaceHref(organization)}${value === "archived" ? "?archived=true" : ""}`,
-            );
+            const next = new URL(url);
+            if (value === "archived") next.searchParams.set("archived", "true");
+            else next.searchParams.delete("archived");
+            navigate(next.pathname + next.search);
           }}
         >
           <TabsList variant="line">
@@ -145,7 +165,7 @@ export function ProjectLibrary({
           Return to first page
         </Button>
       )}
-      <Result state={resource}>
+      <Result state={resource} timingLabel="Projects">
         {(data) =>
           data.items.length ? (
             <>
@@ -234,13 +254,17 @@ export function ProjectLibrary({
                     ? "No archived projects"
                     : query
                       ? "No matching projects"
-                      : "Plan your next project"}
+                      : scope
+                        ? "No linked projects"
+                        : "Plan your next project"}
                 </EmptyTitle>
-                <EmptyDescription>
-                  {query
-                    ? "Try another project name."
-                    : "Create a project, link repositories, and bring the work together."}
-                </EmptyDescription>
+                {(query || !scope) && (
+                  <EmptyDescription>
+                    {query
+                      ? "Try another project name."
+                      : "Create a project, link repositories, and bring the work together."}
+                  </EmptyDescription>
+                )}
               </EmptyHeader>
             </Empty>
           )
@@ -250,6 +274,18 @@ export function ProjectLibrary({
         <NewProject
           organization={organization}
           onClose={() => setCreating(false)}
+        />
+      )}
+      {scope && linking && (
+        <LinkProject
+          organization={organization}
+          target={scope.target}
+          onClose={() => setLinking(false)}
+          onLinked={() => {
+            setLinking(false);
+            setSearch("");
+            setQuery("");
+          }}
         />
       )}
     </section>

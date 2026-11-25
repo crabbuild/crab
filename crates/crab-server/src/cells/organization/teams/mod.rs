@@ -129,6 +129,12 @@ pub(crate) struct MemberKey {
 const COLUMNS: &str = "id,name,description,visibility,version,created_at_ms,updated_at_ms";
 pub(super) const ACTIVE_MEMBERSHIP: &str =
     "m.role IS NOT NULL AND o.active=1 AND m.membership_epoch=e.epoch";
+pub(super) fn active_ids(context: &Transaction<'_>, person: Uuid) -> Result<Vec<Uuid>> {
+    repository_access::active_team_rows(context, person, false)?
+        .iter()
+        .map(|row| uuid(&row[0]))
+        .collect()
+}
 pub(super) fn team(context: &Transaction<'_>, id: Uuid) -> Result<Option<Team>> {
     actor(id)?;
     context

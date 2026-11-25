@@ -118,6 +118,33 @@ for (const method of ["merge_commit", "squash"] as const) {
         created_at: pull.updated_at,
       },
     });
+    for (const [oid, context] of [
+      [pull.head_oid, "ci/reviewed-head"],
+      [commit, "ci/tested-merge"],
+    ]) {
+      await page.route(
+        (url) =>
+          url.pathname === `/api/repos/team/project/commits/${oid}/status`,
+        (route) => {
+          expect(new URL(route.request().url()).searchParams.get("pull")).toBe(
+            "1",
+          );
+          return route.fulfill({
+            json: {
+              sha: oid,
+              statuses: [
+                {
+                  context,
+                  state: "success",
+                  author: "Crab CI",
+                  target_url: null,
+                },
+              ],
+            },
+          });
+        },
+      );
+    }
     await page.route(
       (url) => url.pathname === root,
       (route) =>
@@ -202,6 +229,17 @@ for (const method of ["merge_commit", "squash"] as const) {
       request_id: expect.any(String),
     });
     expect(submissions[1]).toEqual(submissions[0]);
+
+    await page.getByRole("link", { name: "Checks", exact: true }).click();
+    const history = page.getByRole("region", { name: "Merge check history" });
+    await expect(history.locator("code")).toHaveAttribute(
+      "title",
+      pull.head_oid,
+    );
+    await expect(history).toContainText("ci/reviewed-head");
+    await history.getByRole("link", { name: "Tested merge checks" }).click();
+    await expect(history.locator("code")).toHaveAttribute("title", commit);
+    await expect(history).toContainText("ci/tested-merge");
   });
 }
 

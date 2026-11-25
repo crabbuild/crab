@@ -179,6 +179,7 @@ impl CreateIssue {
             &record.author,
             milestone,
         )?;
+        webhooks::issue(context, &record, webhooks::IssueAction::Opened, None)?;
         Ok(MutationResult::Success(CreateIssueOutcome::Created(
             Box::new(record),
         )))
@@ -345,6 +346,16 @@ pub(in crate::cells::repository) fn append_comment(
     if can_mark_duplicate {
         collaboration::duplicates::from_comment(context, &source, body)?;
     }
+    webhooks::comment(
+        context,
+        collaboration::Subject {
+            kind: collaboration::SubjectKind::Issue,
+            number: record.issue,
+        },
+        record.number,
+        record.version,
+        webhooks::CommentAction::Created,
+    )?;
     Ok(record)
 }
 
@@ -426,14 +437,15 @@ impl UpdateIssue {
         closing_source: Option<ClosingSource<'_>>,
     ) -> crate::cells::Result<MutationResult<UpdateIssueOutcome>> {
         let was_closed = issue.state != 0;
-        let edited = input
+        let text_changed = input
             .title
             .as_ref()
             .is_some_and(|value| value != &issue.title)
             || input
                 .body
                 .as_ref()
-                .is_some_and(|value| value != &issue.body)
+                .is_some_and(|value| value != &issue.body);
+        let edited = text_changed
             || input
                 .label_ids
                 .as_ref()
@@ -566,6 +578,12 @@ impl UpdateIssue {
                 }
             };
             activity::append(context, target, &input.actor, action)?;
+            let webhook_action = if issue.state == 0 {
+                webhooks::IssueAction::Reopened
+            } else {
+                webhooks::IssueAction::Closed
+            };
+            webhooks::issue(context, &issue, webhook_action, lifecycle.state_reason)?;
         }
         if was_closed
             && issue.state != 0
@@ -581,6 +599,14 @@ impl UpdateIssue {
                         "closure reason change is missing",
                     ))?,
                 },
+            )?;
+        }
+        if text_changed {
+            webhooks::issue(
+                context,
+                &issue,
+                webhooks::IssueAction::Edited,
+                lifecycle.state_reason,
             )?;
         }
         Ok(MutationResult::Success(UpdateIssueOutcome::Updated(
@@ -714,6 +740,16 @@ impl Mutation for UpdateComment {
                 &source,
                 Some(&previous_comment),
                 &comment.body,
+            )?;
+            webhooks::comment(
+                context,
+                collaboration::Subject {
+                    kind: collaboration::SubjectKind::Issue,
+                    number: comment.issue,
+                },
+                comment.number,
+                comment.version,
+                webhooks::CommentAction::Edited,
             )?;
         }
         Ok(MutationResult::Success(UpdateCommentOutcome::Updated(

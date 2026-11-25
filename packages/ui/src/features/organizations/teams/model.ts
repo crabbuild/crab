@@ -6,7 +6,7 @@ export type Draft = Pick<
 export function teamHref(
   organization: string,
   team?: string,
-  view?: "repositories" | "settings",
+  view?: "repositories" | "projects" | "settings",
 ) {
   const query = new URLSearchParams({ tab: "teams" });
   if (team) query.set("team", team);

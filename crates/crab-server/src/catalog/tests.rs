@@ -166,7 +166,7 @@ async fn pending_audit_survives_crash_and_later_mutation_keeps_chain() {
         .await
         .unwrap();
     document.membership_audit_head = None;
-    document.pending_membership_audit = Some(event.clone());
+    document.pending_membership_audit = Some(event.clone().into());
     assert!(catalog.write_document(&document, etag).await.unwrap());
     let mut member = admin();
     member.name = "Alice renamed".into();

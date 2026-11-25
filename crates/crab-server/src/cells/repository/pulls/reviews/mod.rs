@@ -199,6 +199,14 @@ impl CreatePullReview {
             None,
             &record.body,
         )?;
+        // Pending batches share this write and roll the event back if any of
+        // their threads fail to publish. Receipt replay returns before here.
+        webhooks::review(
+            context,
+            &record,
+            record.version,
+            webhooks::ReviewAction::Submitted,
+        )?;
         Ok(MutationResult::Success(CreatePullReviewOutcome::Created(
             record,
         )))
@@ -261,6 +269,12 @@ impl Mutation for UpdatePullReview {
                 &source,
                 Some(&previous_comment),
                 &record.body,
+            )?;
+            webhooks::review(
+                context,
+                &record,
+                record.version,
+                webhooks::ReviewAction::Edited,
             )?;
         }
         Ok(MutationResult::Success(UpdatePullReviewOutcome::Updated(

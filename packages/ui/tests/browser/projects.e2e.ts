@@ -300,6 +300,12 @@ test("templates, linked issue and PR items, board moves, roadmap dates, saved se
 }) => {
   await setup(page);
   await create(page);
+  await expect(page.getByRole("tablist").getByRole("tab")).toHaveText([
+    "Table",
+    "Board",
+    "Roadmap",
+    "History",
+  ]);
   await page.getByRole("button", { name: "Add item", exact: true }).click();
   await page.getByLabel("Add", { exact: true }).click();
   await page
@@ -335,6 +341,13 @@ test("templates, linked issue and PR items, board moves, roadmap dates, saved se
       .getByRole("link", { name: "Ship project management", exact: true }),
   ).toBeVisible();
   await expect(blocked).toBeVisible();
+  await page.getByRole("button", { name: "Column limit for Done" }).click();
+  const limit = page.getByRole("dialog", { name: "Column limit for Done" });
+  await expect(
+    limit.getByRole("spinbutton", { name: "Item limit" }),
+  ).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(limit).toBeHidden();
   await page
     .getByRole("button", { name: "Edit Ship project management", exact: true })
     .click();

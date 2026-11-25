@@ -223,7 +223,7 @@ fn check_conversion(
 pub(crate) struct CheckConversion;
 impl Read for CheckConversion {
     const CLASS: &'static str = CLASS;
-    const ID: u32 = 92;
+    const ID: u32 = 97;
     type Input = Conversion;
     type Output = ChangeOutcome<()>;
 
@@ -238,7 +238,7 @@ impl Read for CheckConversion {
 pub(crate) struct FinalizeConversion;
 impl Mutation for FinalizeConversion {
     const CLASS: &'static str = CLASS;
-    const ID: u32 = 92;
+    const ID: u32 = 97;
     type Input = Conversion;
     type Output = ChangeOutcome<()>;
 

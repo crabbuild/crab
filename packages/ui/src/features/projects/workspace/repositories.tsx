@@ -5,6 +5,8 @@ import { Link } from "@/components/navigation/link";
 import { repoHref } from "@/lib/repository-route";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { FieldSelect } from "@/components/ui/field-select";
 import {
   InputGroup,
   InputGroupInput,
@@ -67,6 +69,9 @@ export function Repositories({
           <span>
             {repo.owner}/<strong>{repo.name}</strong>
           </span>
+          {repo.id === detail.default_repository && (
+            <Badge variant="secondary">Default</Badge>
+          )}
         </Link>
       ))}
       {!detail.repositories.length && (
@@ -117,44 +122,55 @@ export function Repositories({
                   .includes(query.toLocaleLowerCase()),
               );
               return (
-                <div className="max-h-80 overflow-y-auto">
-                  {matches.map((repo) => {
-                    const linked = detail.repositories.some(
-                      (current) => current.id === repo.id,
-                    );
-                    return (
-                      <Field
-                        orientation="horizontal"
-                        key={repo.id}
-                        className="workspace-repository-choice"
-                      >
-                        <Checkbox
-                          id={`link-${repo.id}`}
-                          checked={linked}
-                          disabled={commands.locked || disabled}
-                          onCheckedChange={(checked) =>
-                            void commands.submitOrganization(organization, {
-                              kind: "repository",
-                              project: detail.project.id,
-                              version: detail.project.version,
-                              repository: repo.id,
-                              linked: checked === true,
-                            })
-                          }
-                        />
-                        <FieldLabel htmlFor={`link-${repo.id}`}>
-                          <FolderGit2Icon aria-hidden="true" />
-                          {repo.owner}/{repo.name}
-                        </FieldLabel>
-                      </Field>
-                    );
-                  })}
-                  {!matches.length && (
-                    <p className="p-3 text-sm text-muted-foreground">
-                      No accessible repositories match this search.
-                    </p>
+                <>
+                  {detail.can_admin && (
+                    <DefaultRepository
+                      key={detail.project.version}
+                      organization={organization}
+                      detail={detail}
+                      disabled={commands.locked || disabled}
+                      candidates={repositories}
+                    />
                   )}
-                </div>
+                  <div className="max-h-80 overflow-y-auto">
+                    {matches.map((repo) => {
+                      const linked = detail.repositories.some(
+                        (current) => current.id === repo.id,
+                      );
+                      return (
+                        <Field
+                          orientation="horizontal"
+                          key={repo.id}
+                          className="workspace-repository-choice"
+                        >
+                          <Checkbox
+                            id={`link-${repo.id}`}
+                            checked={linked}
+                            disabled={commands.locked || disabled}
+                            onCheckedChange={(checked) =>
+                              void commands.submitOrganization(organization, {
+                                kind: "repository",
+                                project: detail.project.id,
+                                version: detail.project.version,
+                                repository: repo.id,
+                                linked: checked === true,
+                              })
+                            }
+                          />
+                          <FieldLabel htmlFor={`link-${repo.id}`}>
+                            <FolderGit2Icon aria-hidden="true" />
+                            {repo.owner}/{repo.name}
+                          </FieldLabel>
+                        </Field>
+                      );
+                    })}
+                    {!matches.length && (
+                      <p className="p-3 text-sm text-muted-foreground">
+                        No accessible repositories match this search.
+                      </p>
+                    )}
+                  </div>
+                </>
               );
             }}
           </Result>
@@ -169,5 +185,76 @@ export function Repositories({
         </DialogContent>
       </Dialog>
     </section>
+  );
+}
+
+function DefaultRepository({
+  organization,
+  detail,
+  disabled,
+  candidates,
+}: {
+  organization: string;
+  detail: Detail;
+  disabled: boolean;
+  candidates: Repository[];
+}) {
+  const commands = useProjectCommands();
+  const current =
+    detail.default_repository ??
+    (detail.default_repository_configured ? "unavailable" : "none");
+  const [selected, setSelected] = useState(current);
+  const options = candidates
+    .filter((repo) => repo.organization_id === organization && !repo.archived)
+    .map((repo) => ({ value: repo.id, label: `${repo.owner}/${repo.name}` }));
+  return (
+    <form
+      className="grid gap-2 border-b pb-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (disabled || selected === "unavailable" || selected === current)
+          return;
+        void commands.submitOrganization(organization, {
+          kind: "set_default_repository",
+          project: detail.project.id,
+          version: detail.project.version,
+          repository: selected === "none" ? null : selected,
+        });
+      }}
+    >
+      <h3 className="text-sm font-medium">Default repository</h3>
+      <p className="text-sm text-muted-foreground">
+        Preselect a repository for new issues and list this Project there.
+      </p>
+      <FieldSelect
+        label="Default repository"
+        value={selected}
+        onValueChange={setSelected}
+        disabled={disabled}
+        options={[
+          { value: "none", label: "No default" },
+          ...(current === "unavailable"
+            ? [
+                {
+                  value: "unavailable",
+                  label: "Unavailable repository",
+                  disabled: true,
+                },
+              ]
+            : []),
+          ...options,
+        ]}
+      />
+      <Button
+        type="submit"
+        size="sm"
+        className="w-fit"
+        disabled={
+          disabled || selected === "unavailable" || selected === current
+        }
+      >
+        Save default repository
+      </Button>
+    </form>
   );
 }

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "@/components/navigation/link";
 import { Failure } from "@/components/discussion/failure";
+import { Result } from "@/components/request/result";
 import { useSubmission } from "@/components/discussion/hooks";
 import { useMutation } from "@/components/discussion/mutations";
 import { Button } from "@/components/ui/button";
@@ -63,15 +64,7 @@ interface Promotion {
   head_oid: string;
 }
 
-export function PullChecks({
-  repo,
-  pull,
-  csrf,
-  selected,
-  before,
-  showCandidate,
-  onMerged,
-}: {
+type PullChecksProps = {
   repo: Repository;
   pull: PullRequest;
   csrf: string;
@@ -79,7 +72,22 @@ export function PullChecks({
   before?: number;
   showCandidate: boolean;
   onMerged: (pull: PullRequest) => void;
-}) {
+};
+
+export function PullChecks(props: PullChecksProps) {
+  if (props.pull.merge) return <MergedChecks {...props} />;
+  return <ActiveChecks {...props} />;
+}
+
+function ActiveChecks({
+  repo,
+  pull,
+  csrf,
+  selected,
+  before,
+  showCandidate,
+  onMerged,
+}: PullChecksProps) {
   const url = endpoint(repo, `pulls/${pull.number}/merge-candidate`);
   const status = useRequest<{
     preview: Preview | null;
@@ -419,7 +427,7 @@ export function PullChecks({
           oid={focused?.commit ?? pull.head_oid}
           selected={selected}
           before={before}
-          fork={!showCandidate && Boolean(pull.head_repository)}
+          scopeToPull={!showCandidate && Boolean(pull.head_repository)}
           candidate={showCandidate}
           githubActionsRef={
             focused
@@ -430,6 +438,108 @@ export function PullChecks({
           }
         />
       )}
+    </>
+  );
+}
+
+function MergedChecks({
+  repo,
+  pull,
+  selected,
+  before,
+  showCandidate,
+}: Pick<
+  PullChecksProps,
+  "repo" | "pull" | "selected" | "before" | "showCandidate"
+>) {
+  const tested = pull.merge?.tested_candidate_oid;
+  const candidate = showCandidate && !!tested;
+  const oid = candidate ? tested : pull.head_oid;
+  const statuses = useRequest<{
+    statuses: {
+      context: string;
+      state: string;
+      author: string;
+      target_url: string | null;
+    }[];
+  }>(endpoint(repo, `commits/${oid}/status`, { pull: String(pull.number) }));
+  const href = (tested: boolean) =>
+    repoHref(repo, {
+      view: "pulls",
+      pull: String(pull.number),
+      pull_tab: "checks",
+      candidate: tested ? "1" : undefined,
+    });
+  return (
+    <>
+      <section
+        className="grid gap-3 rounded-md border p-4 text-sm"
+        aria-label="Merge check history"
+      >
+        <p>
+          {candidate ? "Tested merge commit" : "Reviewed head commit"}{" "}
+          <code title={oid}>{short(oid)}</code>
+        </p>
+        {tested && (
+          <nav className="flex flex-wrap gap-2" aria-label="Check commits">
+            <Button variant="outline" size="sm" asChild>
+              <Link
+                href={href(false)}
+                aria-current={!candidate ? "page" : undefined}
+              >
+                Head checks
+              </Link>
+            </Button>
+            <Button variant="outline" size="sm" asChild>
+              <Link
+                href={href(true)}
+                aria-current={candidate ? "page" : undefined}
+              >
+                Tested merge checks
+              </Link>
+            </Button>
+          </nav>
+        )}
+        <Result state={statuses} timingLabel="Commit statuses">
+          {({ statuses }) =>
+            statuses.length > 0 && (
+              <section aria-label="Commit statuses">
+                <h3 className="font-semibold">Commit statuses</h3>
+                <ul className="mt-1 divide-y">
+                  {statuses.map((status) => (
+                    <li
+                      key={status.context}
+                      className="flex flex-wrap gap-x-2 py-2"
+                    >
+                      {status.target_url ? (
+                        <a href={status.target_url} className="underline">
+                          {status.context}
+                        </a>
+                      ) : (
+                        <strong>{status.context}</strong>
+                      )}
+                      <span className="capitalize">{status.state}</span>
+                      <span className="text-muted-foreground">
+                        Reported by {status.author}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )
+          }
+        </Result>
+      </section>
+      <CheckRuns
+        key={oid}
+        repo={repo}
+        pull={pull.number}
+        oid={oid}
+        selected={selected}
+        before={before}
+        scopeToPull
+        candidate={candidate}
+      />
     </>
   );
 }

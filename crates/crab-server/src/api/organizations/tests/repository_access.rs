@@ -2,6 +2,7 @@ use super::{repositories::repository_write, *};
 use crate::test_support::http::{browser::Browser, organizations::bootstrap};
 
 mod conversion;
+mod removal;
 
 pub(super) struct AccessFixture {
     pub(super) h: Harness,
@@ -13,6 +14,7 @@ pub(super) struct AccessFixture {
     pub(super) bob: String,
     pub(super) org: String,
     repository: String,
+    repository_id: Uuid,
 }
 
 impl AccessFixture {
@@ -133,6 +135,7 @@ impl AccessFixture {
             bob,
             org,
             repository,
+            repository_id: id,
         }
     }
 
@@ -380,13 +383,13 @@ async fn owner_finds_outside_collaborators_and_revokes_a_repository_grant() {
     assert_eq!(
         f.h.write(
             Method::POST,
-            &format!("{people}/remove"),
+            &format!("{people}/removal-preview"),
             &f.alice,
-            json!({"revision":current_page["revision"],"keys":[current_page["items"][0]["key"]]}),
+            json!({"collaborators":[current_page["items"][0]["key"]]}),
         )
         .await
         .status(),
-        StatusCode::UNPROCESSABLE_ENTITY
+        StatusCode::CONFLICT
     );
     assert_eq!(
         f.h.json(&people, &f.alice).await["items"],
@@ -470,16 +473,17 @@ async fn bulk_outside_removal_revokes_all_selected_sources_and_survives_restore(
         .unwrap();
 
     let root = format!("{}/outside-collaborators", f.org);
-    let remove = format!("{root}/remove");
+    let preview = format!("{root}/removal-preview");
+    let remove = format!("{root}/removals");
     let prior = f.h.json(&root, &f.alice).await;
     assert_eq!(prior["items"].as_array().unwrap().len(), 2);
     let denied =
         f.h.write(
             Method::POST,
-            &remove,
+            &preview,
             &f.bob,
             json!({
-                "revision":prior["revision"], "keys":[prior["items"][0]["key"]],
+                "collaborators":[prior["items"][0]["key"]],
             }),
         )
         .await;
@@ -507,22 +511,20 @@ async fn bulk_outside_removal_revokes_all_selected_sources_and_survives_restore(
         .map(|row| row["key"].clone())
         .collect();
     assert_eq!(keys.len(), 2);
-    let revoke = async |revision: Value, keys: Vec<Value>| {
+    let review = async |collaborators: Vec<Value>| {
         f.h.write(
             Method::POST,
-            &remove,
+            &preview,
             &f.alice,
-            json!({ "revision":revision, "keys":keys }),
+            json!({ "collaborators":collaborators }),
         )
         .await
     };
+    let revoke = async |plan: Value| f.h.write(Method::POST, &remove, &f.alice, plan).await;
     assert_eq!(
-        revoke(
-            listed["revision"].clone(),
-            vec![keys[0].clone(), json!("0".repeat(64))]
-        )
-        .await
-        .status(),
+        review(vec![keys[0].clone(), json!("0".repeat(64))])
+            .await
+            .status(),
         StatusCode::CONFLICT,
     );
     assert_eq!(f.h.json(&root, &f.alice).await["items"], listed["items"]);
@@ -556,7 +558,18 @@ async fn bulk_outside_removal_revokes_all_selected_sources_and_survives_restore(
             .status()
     };
     assert_eq!(fetch().await, StatusCode::OK);
-    let removed: Value = revoke(listed["revision"].clone(), keys.clone())
+    let reviewed: Value = review(keys)
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        reviewed["impact"],
+        json!({"collaborators":2, "repositories":3, "grants":6})
+    );
+    let removed: Value = revoke(reviewed["plan"].clone())
         .await
         .error_for_status()
         .unwrap()
@@ -568,8 +581,14 @@ async fn bulk_outside_removal_revokes_all_selected_sources_and_survives_restore(
         json!({"collaborators":2, "repositories":3, "grants":6})
     );
     assert_eq!(
-        revoke(listed["revision"].clone(), keys).await.status(),
-        StatusCode::CONFLICT
+        revoke(reviewed["plan"].clone())
+            .await
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap(),
+        removed
     );
     assert_eq!(
         f.get(&format!("{}/refs", f.repository), &f.bob)
@@ -608,7 +627,7 @@ async fn bulk_outside_removal_revokes_all_selected_sources_and_survives_restore(
     assert_eq!(audit["items"].as_array().unwrap().len(), 1);
     assert_eq!(
         audit["items"][0]["detail"],
-        "2 collaborators · 6 grants · 3 repositories"
+        "2 collaborators · 6 direct grants · 3 repositories"
     );
     f.h.close().await;
 }

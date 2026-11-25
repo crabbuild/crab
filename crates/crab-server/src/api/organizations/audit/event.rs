@@ -29,6 +29,7 @@ pub(in crate::api) enum AuditAction {
     TeamMembership,
     TeamCreationPolicy,
     RepositoryPolicyChanged,
+    ProjectPolicyChanged,
     RepositoryRegistered,
     RepositoryAccessChanged,
     RepositoryTransferredIn,
@@ -87,6 +88,16 @@ impl From<organization::Event> for RawEvent {
         event.action = match value.action {
             Action::Created => AuditAction::OrganizationCreated,
             Action::RepositoryPolicyChanged => AuditAction::RepositoryPolicyChanged,
+            Action::ProjectPolicyChanged {
+                before,
+                after,
+                affected_projects,
+            } => {
+                event.detail = Some(format!(
+                    "{before:?} → {after:?} · {affected_projects} Projects"
+                ));
+                AuditAction::ProjectPolicyChanged
+            }
             Action::Automation { identity, action } => {
                 use organization::automation::Audit;
                 let label = match action {
@@ -266,10 +277,20 @@ impl From<audit::Entry> for RawEvent {
                 repository: entry
                     .repository
                     .map(|(id, name)| AuditRepository { id, name }),
-                detail: entry.outside_grants.map(|removal| {
+                detail: entry.outside_grants.map(|audit::OutsideGrantChange { collaborators, grants, repositories }| {
+                    let people = if collaborators == 1 {
+                        "collaborator"
+                    } else {
+                        "collaborators"
+                    };
+                    let grant = if grants == 1 { "grant" } else { "grants" };
+                    let repo = if repositories == 1 {
+                        "repository"
+                    } else {
+                        "repositories"
+                    };
                     format!(
-                        "{} collaborators · {} grants · {} repositories",
-                        removal.collaborators, removal.grants, removal.repositories,
+                        "{collaborators} {people} · {grants} direct {grant} · {repositories} {repo}"
                     )
                 }),
             },

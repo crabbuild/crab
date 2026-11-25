@@ -14,6 +14,46 @@ pub(crate) enum Command {
         definition: planning::Definition,
         archived: bool,
     },
+    ColumnLimit {
+        project: Uuid,
+        version: u64,
+        column: planning::grouping::ColumnLimit,
+    },
+    ReorderViews {
+        project: Uuid,
+        version: u64,
+        order: Vec<Uuid>,
+    },
+    SetAccess {
+        project: Uuid,
+        version: u64,
+        target: AccessTarget,
+        #[serde(deserialize_with = "Option::<AccessRole>::deserialize")]
+        role: Option<AccessRole>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_version: Option<u64>,
+    },
+    LinkTeam {
+        project: Uuid,
+        version: u64,
+        team: Uuid,
+    },
+    LinkRepository {
+        project: Uuid,
+        version: u64,
+        repository: Uuid,
+    },
+    SetDefaultRepository {
+        project: Uuid,
+        version: u64,
+        #[serde(deserialize_with = "Option::<Uuid>::deserialize")]
+        repository: Option<Uuid>,
+    },
+    SetDefaultAccess {
+        version: u64,
+        role: AccessRole,
+        scope: String,
+    },
     Planning {
         project: Uuid,
         version: u64,
@@ -40,6 +80,8 @@ pub(crate) enum Command {
         repository: Uuid,
         item: planning::Item,
         type_id: Option<Uuid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        draft_version: Option<u64>,
     },
     Remove {
         project: Uuid,
@@ -50,8 +92,14 @@ pub(crate) enum Command {
 impl Command {
     pub(super) fn project(&self) -> Option<Uuid> {
         match self {
-            Self::Create { .. } => None,
+            Self::Create { .. } | Self::SetDefaultAccess { .. } => None,
             Self::Edit { project, .. }
+            | Self::ColumnLimit { project, .. }
+            | Self::ReorderViews { project, .. }
+            | Self::SetAccess { project, .. }
+            | Self::LinkTeam { project, .. }
+            | Self::LinkRepository { project, .. }
+            | Self::SetDefaultRepository { project, .. }
             | Self::Planning { project, .. }
             | Self::Repository { project, .. }
             | Self::Item { project, .. }
@@ -64,6 +112,13 @@ impl Command {
         match self {
             Self::Create { .. } | Self::CreateIssue { .. } | Self::BulkFields { .. } => 0,
             Self::Edit { version, .. }
+            | Self::ColumnLimit { version, .. }
+            | Self::ReorderViews { version, .. }
+            | Self::SetAccess { version, .. }
+            | Self::LinkTeam { version, .. }
+            | Self::LinkRepository { version, .. }
+            | Self::SetDefaultRepository { version, .. }
+            | Self::SetDefaultAccess { version, .. }
             | Self::Planning { version, .. }
             | Self::Repository { version, .. }
             | Self::Item { version, .. }
@@ -74,7 +129,7 @@ impl Command {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Request {
-    pub actor: Uuid,
+    pub actor: AccessActor,
     pub request_id: Uuid,
     pub command: Command,
     pub cancel: bool,
@@ -85,6 +140,8 @@ pub(crate) struct Request {
     pub attachment: Option<AttachmentCheck>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_epoch: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligible_outside: Option<Uuid>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -125,7 +182,7 @@ pub(super) struct Saved {
 }
 fn digest(input: &Request) -> Result<String> {
     Ok(
-        blake3::hash(&serde_json::to_vec(&(input.actor, &input.command))?)
+        blake3::hash(&serde_json::to_vec(&(input.actor.id(), &input.command))?)
             .to_hex()
             .to_string(),
     )
@@ -166,7 +223,7 @@ impl Mutation for Change {
     type Output = Outcome;
     fn execute(context: &mut Transaction<'_>, input: Request) -> Result<MutationResult<Outcome>> {
         ensure_ready(context)?;
-        actor(input.actor)?;
+        actor(input.actor.id())?;
         actor(input.request_id)?;
         if let Some(outcome) = recover(context, &input)? {
             return Ok(MutationResult::Success(outcome));
@@ -186,18 +243,39 @@ impl Mutation for Change {
         Ok(MutationResult::Success(outcome))
     }
 }
-pub(super) fn apply(
+fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResult<Outcome>> {
+    apply_command(context, input, &input.command, false)
+}
+
+pub(super) fn apply_published_issue(
     context: &mut Transaction<'_>,
     input: &Request,
 ) -> Result<MutationResult<Outcome>> {
-    apply_command(context, input, &input.command)
+    apply_command(context, input, &input.command, true)
 }
 
 fn apply_command(
     context: &mut Transaction<'_>,
     input: &Request,
     command: &Command,
+    finalizing_issue: bool,
 ) -> Result<MutationResult<Outcome>> {
+    if let Command::SetDefaultAccess {
+        version,
+        role,
+        scope,
+    } = command
+    {
+        return match policy::change(context, input.actor.id(), *version, *role, scope)? {
+            Some(version) => Ok(MutationResult::Success(Outcome::Applied {
+                project: None,
+                version,
+            })),
+            None => Ok(rejected(
+                "The default role or affected Projects changed. Review the current settings before saving.",
+            )),
+        };
+    }
     if let Command::BulkFields { project, items } = command {
         return apply_bulk(context, input, *project, items);
     }
@@ -231,7 +309,7 @@ fn apply_command(
             properties: Properties {
                 status: Status::Planned,
                 health: Health::OnTrack,
-                lead: Some(input.actor),
+                lead: Some(input.actor.id()),
                 start: None,
                 target: None,
             },
@@ -239,8 +317,10 @@ fn apply_command(
             archived: false,
             created_at: now,
             updated_at: now,
-            created_by: input.actor,
-            creator_epoch: epoch(context, input.actor)?,
+            created_by: input.actor.id(),
+            creator_epoch: epoch(context, input.actor.id())?,
+            default_repository: None,
+            access: Default::default(),
         };
         save(context, &project)?;
         history::append(
@@ -253,7 +333,7 @@ fn apply_command(
         )?;
         advance(
             context,
-            input.actor,
+            input.actor.id(),
             Action::ProjectChanged {
                 project: project.id,
             },
@@ -282,7 +362,7 @@ fn apply_command(
     if project.version.saturating_add(pending.len() as u64) >= MAX_VERSION {
         return Ok(rejected("Project version limit reached"));
     }
-    if project.archived && !matches!(command, Command::Edit { .. }) {
+    if project.archived && !matches!(command, Command::Edit { .. } | Command::SetAccess { .. }) {
         return Ok(rejected("Archived projects are read-only"));
     }
     let mut event_target = ledger::Target::Project;
@@ -299,6 +379,8 @@ fn apply_command(
                     "Finish pending issue creation before removing its status or fields or archiving the Project",
                 ));
             }
+            let mut definition = definition.clone();
+            definition.prune_board_limits();
             if !definition.valid() {
                 return Ok(rejected(
                     "Check the project name, workflow, fields and views",
@@ -322,14 +404,61 @@ fn apply_command(
             )?;
             for row in rows.rows {
                 let item: Item = serde_json::from_str(&text(&row[0])?)?;
-                if !item.item.valid(definition) {
+                if !item.item.valid(&definition) {
                     return Ok(rejected(
                         "Existing work uses a removed status or field. Update those items first.",
                     ));
                 }
             }
-            project.definition = definition.clone();
+            project.definition = definition;
             project.archived = *archived;
+        }
+        Command::ColumnLimit { column, .. } => {
+            if let Err(reason) = column.apply(&mut project.definition) {
+                return Ok(rejected(reason));
+            }
+        }
+        Command::ReorderViews { order, .. } => {
+            if !project.definition.reorder_views(order) {
+                return Ok(rejected("Include each saved Project view exactly once"));
+            }
+        }
+        Command::SetAccess {
+            target,
+            role,
+            default_version,
+            ..
+        } => {
+            if let Some(reason) = project.access.change(
+                context,
+                input.actor.id(),
+                *target,
+                *role,
+                *default_version,
+                input.eligible_outside,
+            )? {
+                return Ok(rejected(reason));
+            }
+        }
+        Command::LinkTeam { team, .. } => {
+            // The team page only adds Read; keep any role assigned by a
+            // Project administrator through Manage access.
+            if project.access.has_team(*team) {
+                return Ok(MutationResult::Success(Outcome::Applied {
+                    project: Some(project_id),
+                    version: project.version,
+                }));
+            }
+            if let Some(reason) = project.access.change(
+                context,
+                input.actor.id(),
+                AccessTarget::Team { id: *team },
+                Some(AccessRole::Read),
+                None,
+                None,
+            )? {
+                return Ok(rejected(reason));
+            }
         }
         Command::Planning { properties, .. } => {
             if !properties_valid(context, properties)? {
@@ -342,26 +471,82 @@ fn apply_command(
             after = Some(serde_json::to_value(properties)?);
             project.properties = properties.clone();
         }
-        Command::Repository {
-            repository, linked, ..
-        } => {
+        Command::SetDefaultRepository { repository, .. } => {
+            let previous = project.default_repository;
+            let next = if let Some(id) = repository {
+                let Some(ownership_epoch) = input
+                    .source_epoch
+                    .filter(|_| input.source_allowed && !id.is_nil())
+                else {
+                    return Ok(rejected(
+                        "Choose an active repository you can access in this organization",
+                    ));
+                };
+                Some(DefaultRepository {
+                    id: *id,
+                    ownership_epoch,
+                })
+            } else {
+                None
+            };
+            if next == previous {
+                return Ok(MutationResult::Success(Outcome::Applied {
+                    project: Some(project_id),
+                    version: project.version,
+                }));
+            }
+            let target = next
+                .or(previous)
+                .ok_or(Error::Invalid("Default repository target is missing"))?;
+            if next.is_some()
+                && !link_repository(
+                    context,
+                    project_id,
+                    target.id,
+                    &repositories(context, project_id)?,
+                )?
+            {
+                return Ok(rejected("A project can link up to 20 repositories"));
+            }
+            // History carries one repository target and booleans. Exposing the
+            // previous destination could disclose a different private source.
+            event_target = ledger::Target::Repository { id: target.id };
+            before = Some(serde_json::json!({"default_repository": previous == Some(target)}));
+            after = Some(serde_json::json!({"default_repository": next.is_some()}));
+            project.default_repository = next;
+        }
+        Command::Repository { repository, .. } | Command::LinkRepository { repository, .. } => {
             if repository.is_nil() || !input.source_allowed {
                 return Ok(rejected(
                     "Repository access is required to change this link",
                 ));
             }
+            let linked = !matches!(command, Command::Repository { linked: false, .. });
             let linked_repositories = repositories(context, project_id)?;
+            if matches!(command, Command::LinkRepository { .. })
+                && linked_repositories.contains(repository)
+            {
+                return Ok(MutationResult::Success(Outcome::Applied {
+                    project: Some(project_id),
+                    version: project.version,
+                }));
+            }
             event_target = ledger::Target::Repository { id: *repository };
             before = Some(serde_json::json!({"linked":linked_repositories.contains(repository)}));
             after = Some(serde_json::json!({"linked":linked}));
-            if *linked {
-                if !linked_repositories.contains(repository)
-                    && linked_repositories.len() >= MAX_REPOSITORIES
-                {
+            if linked {
+                if !link_repository(context, project_id, *repository, &linked_repositories)? {
                     return Ok(rejected("A project can link up to 20 repositories"));
                 }
-                context.query("INSERT INTO organization_project_repositories(project,repository) VALUES(?,?) ON CONFLICT DO NOTHING",&[blob(project_id),blob(*repository)])?;
             } else {
+                if project
+                    .default_repository
+                    .is_some_and(|default| default.id == *repository)
+                {
+                    return Ok(rejected(
+                        "Clear or change the default repository before unlinking it",
+                    ));
+                }
                 if pending
                     .values()
                     .any(|reservation| reservation.repository == *repository)
@@ -404,8 +589,11 @@ fn apply_command(
                     version: current,
                 }));
             }
+            // Only the durable source receipt can attach an issue to an
+            // existing draft. Ordinary edits keep their original source.
             if old.as_ref().is_some_and(|old| {
-                old.repository != *repository || old.item.subject != next.subject
+                (old.repository != *repository || old.item.subject != next.subject)
+                    && !(finalizing_issue && old.repository.is_none() && old.item.subject.is_none())
             }) {
                 return Ok(rejected(
                     "An existing project item's source cannot be replaced",
@@ -464,7 +652,7 @@ fn apply_command(
                 repository: *repository,
                 item: next.clone(),
             };
-            context.query("INSERT INTO organization_project_items(project,id,repository,kind,number,status,data) VALUES(?,?,?,?,?,?,?) ON CONFLICT(project,id) DO UPDATE SET status=excluded.status,data=excluded.data",&[blob(project_id),blob(next.id),repository_value,kind,number,SqlValue::Text(next.status.clone()),SqlValue::Text(serde_json::to_string(&data)?)])?;
+            context.query("INSERT INTO organization_project_items(project,id,repository,kind,number,status,data) VALUES(?,?,?,?,?,?,?) ON CONFLICT(project,id) DO UPDATE SET repository=excluded.repository,kind=excluded.kind,number=excluded.number,status=excluded.status,data=excluded.data",&[blob(project_id),blob(next.id),repository_value,kind,number,SqlValue::Text(next.status.clone()),SqlValue::Text(serde_json::to_string(&data)?)])?;
             ledger::advance_item(context, project_id, next.id)?;
             event_target = ledger::Target::Item {
                 id: next.id,
@@ -481,25 +669,15 @@ fn apply_command(
                 .transpose()?;
             after = Some(history::item_snapshot(next)?);
         }
-        Command::CreateIssue {
-            repository,
-            item,
-            type_id,
-            ..
-        } => {
-            return issue_creation::reserve(
-                context,
-                input,
-                &project,
-                pending,
-                *repository,
-                item,
-                *type_id,
-            );
+        Command::CreateIssue { .. } => {
+            return issue_creation::reserve(context, input, &project, pending);
         }
         Command::Remove {
             item: id, version, ..
         } => {
+            if pending.contains_key(id) {
+                return Ok(rejected("This item has a pending issue submission"));
+            }
             let old = item(context, project_id, *id)?;
             let current = ledger::item_version(context, project_id, *id)?;
             let Some(old) = old.filter(|_| current == *version) else {
@@ -525,7 +703,7 @@ fn apply_command(
             };
             before = Some(history::item_snapshot(&old.item)?);
         }
-        Command::Create { .. } | Command::BulkFields { .. } => {
+        Command::Create { .. } | Command::BulkFields { .. } | Command::SetDefaultAccess { .. } => {
             return Err(Error::Invalid("project create reached item dispatch"));
         }
     }
@@ -540,7 +718,7 @@ fn apply_command(
     history::append(context, input, &project, event_target, before, after)?;
     advance(
         context,
-        input.actor,
+        input.actor.id(),
         Action::ProjectChanged {
             project: project_id,
         },
@@ -549,6 +727,25 @@ fn apply_command(
         project: Some(project_id),
         version: project.version,
     }))
+}
+
+fn link_repository(
+    context: &Transaction<'_>,
+    project: Uuid,
+    repository: Uuid,
+    links: &[Uuid],
+) -> Result<bool> {
+    if links.contains(&repository) {
+        return Ok(true);
+    }
+    if links.len() >= MAX_REPOSITORIES {
+        return Ok(false);
+    }
+    context.query(
+        "INSERT INTO organization_project_repositories(project,repository) VALUES(?,?)",
+        &[blob(project), blob(repository)],
+    )?;
+    Ok(true)
 }
 
 fn apply_bulk(
@@ -585,7 +782,7 @@ fn apply_bulk(
             repository: entry.repository,
             item,
         };
-        match apply_command(context, input, &command)? {
+        match apply_command(context, input, &command, false)? {
             MutationResult::Success(Outcome::Applied { version: next, .. }) => version = next,
             outcome => return Ok(outcome),
         }

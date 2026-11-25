@@ -206,6 +206,8 @@ export function OrganizationPage({
                     {tab === "outside-collaborators" ? (
                       <OutsideCollaborators
                         endpoint={endpoint}
+                        actor={actor}
+                        url={url}
                         csrf={csrf}
                         onInvited={() =>
                           setNotice("Invitation sent to the collaborator.")

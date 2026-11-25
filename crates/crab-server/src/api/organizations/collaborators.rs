@@ -4,10 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{
     RepositoryAccess, RepositoryMember,
     api::{members::roster, read_admission},
-    catalog::{
-        CatalogDocument, CatalogRecord, MembershipActor, audit::OutsideGrantChange,
-        collaborators::Revoke,
-    },
+    catalog::{CatalogDocument, CatalogRecord},
     cells::{
         directory::IdentityKey,
         organization::{ActiveMembers, MemberBatch},
@@ -15,12 +12,20 @@ use crate::{
 };
 use axum::response::{IntoResponse, Response};
 
+mod removal;
+#[cfg(test)]
+pub(in crate::api) use removal::{RemovalPlan, RemovalPreview};
+
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new()
         .route("/api/organizations/{id}/outside-collaborators", get(list))
         .route(
-            "/api/organizations/{id}/outside-collaborators/remove",
-            axum::routing::post(revoke),
+            "/api/organizations/{id}/outside-collaborators/removal-preview",
+            axum::routing::post(removal::preview),
+        )
+        .route(
+            "/api/organizations/{id}/outside-collaborators/removals",
+            axum::routing::post(removal::remove),
         )
         .route(
             "/api/organizations/{id}/outside-collaborators/{key}/repositories",
@@ -257,6 +262,9 @@ async fn list(
                 |profile| profile.name.clone(),
             );
             if name.to_lowercase().contains(&q)
+                || repositories
+                    .iter()
+                    .any(|(repository, _)| repository.name.to_lowercase().contains(&q))
                 || profile.is_some_and(|profile| profile.handle.to_lowercase().contains(&q))
             {
                 items.push(OutsideCollaborator {
@@ -335,70 +343,4 @@ async fn repositories(
         .into_response(),
         admission,
     ))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Selection {
-    revision: u64,
-    keys: Vec<String>,
-}
-
-async fn revoke(
-    State(server): State<Arc<Server>>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<Uuid>,
-    Json(input): Json<Selection>,
-) -> Result<Json<OutsideGrantChange>> {
-    let count = input.keys.len();
-    let keys: BTreeSet<_> = input.keys.into_iter().collect();
-    if !(1..=50).contains(&count)
-        || keys.len() != count
-        || keys
-            .iter()
-            .any(|key| key.len() != 64 || blake3::Hash::from_hex(key).is_err())
-    {
-        return Err(Error::Invalid(
-            "Choose 1 to 50 distinct outside collaborators",
-        ));
-    }
-    let caller = actor(&server, &principal).await?;
-    owner_version(&server, id, caller).await?;
-    let worker = Arc::clone(&server);
-    let removed = membership_change(&server, id, move |cancel| async move {
-        let snapshot = Snapshot::load(&worker, &principal, id).await?;
-        if snapshot.actor != caller || snapshot.document.version != input.revision {
-            return Err(Error::PageChanged);
-        }
-        let subjects: Vec<_> = snapshot
-            .grants()
-            .into_keys()
-            .filter(|subject| keys.contains(&snapshot.collaborator_key(subject)))
-            .collect();
-        if subjects.len() != count {
-            return Err(Error::PageChanged);
-        }
-        if snapshot.outsiders(&subjects).await?.len() != count {
-            return Err(Error::OutsideCollaboratorExpected);
-        }
-        let identity = app::account(&principal)?;
-        let catalog = worker.catalog().ok_or(Error::NotFound)?;
-        catalog
-            .revoke_outside_grants(
-                Revoke {
-                    organization: id,
-                    revision: input.revision,
-                    subjects: subjects.into_iter().map(str::to_owned).collect(),
-                    actor: MembershipActor {
-                        issuer: identity.issuer,
-                        subject: identity.subject,
-                    },
-                },
-                &cancel,
-            )
-            .await
-            .map_err(app::repository_access_error)
-    })
-    .await?;
-    Ok(Json(removed))
 }

@@ -11,6 +11,7 @@ export interface RepositoryRoute {
   issue?: string;
   pull?: string;
   pullTab?: string;
+  pullCommit?: string;
   release?: string;
   milestone?: string;
   project?: string;
@@ -92,6 +93,7 @@ export function repoHref(
     issue,
     pull,
     pull_tab,
+    pull_commit,
     release,
     milestone,
     project,
@@ -132,6 +134,8 @@ export function repoHref(
       suffix = pull
         ? `/pull/${encodeURIComponent(pull)}${pull_tab && pull_tab !== "conversation" ? `/${pull_tab}` : ""}`
         : "/pulls";
+      if (pull && pull_tab === "commits" && pull_commit)
+        suffix += `/${encodeURIComponent(pull_commit)}`;
     }
   } else if (view === "projects") {
     suffix = `/projects${project ? `/${encodeURIComponent(project)}` : ""}`;
@@ -172,6 +176,7 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
       "issue",
       "pull",
       "pull_tab",
+      "pull_commit",
       "release",
       "milestone",
       "action",
@@ -278,6 +283,20 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
         ...route,
         view: "fork-compare",
         head: tail[0] && decodeURIComponent(tail[0]),
+      };
+    if (
+      page === "pull" &&
+      tail.length === 3 &&
+      tail[0] &&
+      tail[1] === "commits" &&
+      commitOid(tail[2])
+    )
+      return {
+        ...route,
+        view: "pulls",
+        pull: decodeURIComponent(tail[0]),
+        pullTab: "commits",
+        pullCommit: tail[2],
       };
     if (
       page === "pull" &&

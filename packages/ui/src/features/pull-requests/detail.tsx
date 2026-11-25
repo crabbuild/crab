@@ -39,6 +39,7 @@ import { ReviewChanges, type ReviewDraft } from "./reviews/form";
 import { PendingComments, usePendingReview } from "./reviews/pending";
 import { PullReviewThreads } from "./reviews/threads";
 import { LinkedReviewThread } from "./reviews/thread-card";
+import { SuggestionCommit, useSuggestionBatch } from "./reviews/suggestion";
 
 function PullBadge({ pull }: { pull: PullRequest }) {
   const status = pullStatus(pull);
@@ -80,6 +81,7 @@ export function PullDetail({
   number,
   url,
   csrf,
+  account,
   theme,
   codeThemes,
 }: {
@@ -87,6 +89,7 @@ export function PullDetail({
   number: number;
   url: URL;
   csrf: string;
+  account: string | null;
   theme: "light" | "dark";
   codeThemes: CodeThemes;
 }) {
@@ -114,7 +117,9 @@ export function PullDetail({
   }
   const data = current ?? pull.data;
   const publicReader = repo.public_read_only === true;
-  const requestedTab = repositoryRoute(url)?.pullTab;
+  const suggestions = useSuggestionBatch(repo, number, data, csrf, account);
+  const route = repositoryRoute(url);
+  const requestedTab = route?.pullTab;
   const tab =
     requestedTab === "commits" ||
     requestedTab === "files" ||
@@ -311,8 +316,15 @@ export function PullDetail({
               }}
             />
           ) : tab === "commits" ? (
-            data.branches_available ? (
-              <PullCommits repo={repo} pull={data} url={url} />
+            data.branches_available || data.merge ? (
+              <PullCommits
+                repo={repo}
+                pull={data}
+                url={url}
+                selected={route?.pullCommit}
+                theme={theme}
+                codeThemes={codeThemes}
+              />
             ) : null
           ) : linkedThread ? (
             <LinkedReviewThread
@@ -322,6 +334,7 @@ export function PullDetail({
               csrf={csrf}
               number={thread}
               refresh={refresh}
+              suggestions={suggestions}
               reply={
                 Number.isSafeInteger(reply) && reply > 0 ? reply : undefined
               }
@@ -367,7 +380,7 @@ export function PullDetail({
                 canDiscard={!repo.archived}
                 busy={!!reviewDraft?.attempt}
               />
-              {data.branches_available && (
+              {data.branches_available ? (
                 <PullReviewThreads
                   key={unresolvedOnly ? "unresolved" : "all"}
                   unresolvedOnly={unresolvedOnly}
@@ -379,6 +392,13 @@ export function PullDetail({
                   refresh={refresh}
                   pendingReview={pendingReview}
                   submittingReview={!!reviewDraft?.attempt}
+                  suggestions={suggestions}
+                />
+              ) : (
+                <SuggestionCommit
+                  suggestions={suggestions}
+                  branch={branch(data.head_ref)}
+                  onSaved={refresh}
                 />
               )}
             </>

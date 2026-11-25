@@ -1831,7 +1831,7 @@ peers together so every owner supports the new read.
 
 Organization owners can open **People → Outside collaborators** to find
 people who have direct repository grants and lack an active membership in
-the organization. Search by name or public username. Expand a person's
+the organization. Search by name, public username, or repository name. Expand a person's
 repository list to see the role granted on each repository. **Manage access**
 opens that repository's access settings to change or remove the grant.
 For collaborators with a public profile, **Invite to organization** opens
@@ -1854,14 +1854,15 @@ catalog and organization revisions. Restart from the first page after a
 grant or membership changes. Upgrade Organization Cell peers together to
 enable the member checks for this view.
 
-`POST /api/organizations/{id}/outside-collaborators/remove` accepts the
-listing's `revision` and up to 50 distinct collaborator `keys`. It returns
-`{collaborators, repositories, grants}` after a successful catalog commit.
-The owner and targets are checked under the organization policy lease shared
-by membership changes and invitation acceptance. Reload after a conflict to
-review the current membership and grants before submitting again.
-Upgrade serving replicas together before using bulk removal so every replica
-can read its audit event.
+`POST /api/organizations/{id}/outside-collaborators/removal-preview` accepts
+up to 50 opaque `collaborators` keys from the listing. Review the returned
+impact and submit its signed `plan` to
+`POST /api/organizations/{id}/outside-collaborators/removals`. The owner and
+targets are checked under the organization policy lease shared by membership
+changes and invitation acceptance. Request a fresh preview if membership or
+the catalog changes. Resubmit the same plan after a lost reply to recover
+the committed result. Upgrade serving replicas together before using bulk
+removal so every replica can read its audit event.
 
 From **People → Members**, organization owners can select members and choose
 **Convert to outside collaborators**. Existing direct roles and the highest current team grant
@@ -3101,6 +3102,113 @@ number, and date fields, each page includes counts for its displayed groups.
 Issues without an enabled type use **No type**. Drafts, pull requests, and
 issues whose type is unavailable to the viewer use **Other work**.
 
+Project managers can drag a saved view by its tab handle, or use the active
+tab's **Reorder view** menu to move it left or right. The selected view stays
+open, and the saved order applies to the whole Project. **Overview** stays
+first where available, and **History** stays last.
+
+Both Project command endpoints accept `reorder_views` with `project`,
+`version`, and `order`, a list containing every saved view UUID exactly once.
+The command updates the view order and records it in Project history.
+
+Organization owners can change **Default Project access** under organization
+**Settings** → **Project policy**. It starts at **Read**. The confirmation shows
+how many existing Projects inherit the default. The change also applies to new
+Projects. Projects with explicit base roles keep them.
+
+In an organization Project, **Manage access** lets Project administrators set
+an explicit base role, select **Organization default**, or grant **Read**,
+**Write**, or **Admin** to current members, teams, and outside collaborators.
+**No access** hides the Project from members without a grant. A current direct grant takes precedence
+over the base role. Active team memberships can add access. Organization
+owners and the creator's original membership retain administrative access.
+Write includes editing planning data and views. Admin also includes managing
+access and opening or archiving the Project. Linked issues and PRs still follow
+their repository permissions. Work and history from an unreadable linked
+repository omit its identity, custom field values, and history field changes.
+
+To share a Project with a guest, select **Outside collaborator** and search by
+Crab username. The guest must have a current direct grant on a repository owned
+by the organization. The Project appears in the guest's organization Project
+library. Guests see only the Projects shared with them. They can neither create
+organization Projects nor access the organization roster. Project Admin grants
+let guests manage individual collaborators, with team grants reserved for
+organization members.
+
+Removing the last qualifying repository grant makes the saved Project role
+inactive immediately. Restoring repository access reactivates the saved role
+unless the Project grant was removed or the guest joined the organization in
+the meantime. Organization membership uses its own Project access rules.
+
+Project admins can call `GET /api/organizations/{id}/projects/{project}/access`
+to read the effective base role, optional override, organization default and
+its version, grants, and Project version. Post `set_access` to the organization
+Project command endpoint with `project`, `version`, `target` (`{kind:"base"}`,
+`{kind:"member",id}`, `{kind:"team",id}`, or `{kind:"outside",id}`) and `role`
+(`none`, `read`, `write`, or `admin`). For a base role, pass `role: null` and the
+displayed `default_version` to inherit the current default. `none` removes an
+explicit grant.
+A Project supports up to 100 explicit grants. A grant to a member expires when
+that membership ends. Team grants check the active roster on every operation.
+
+`GET /api/organizations/{id}/projects/context` returns the library name and
+whether the caller can create Projects. Project administrators can call
+`GET /api/organizations/{id}/projects/{project}/collaborators?q={prefix}` to
+find eligible guests and their account UUIDs. With `member=true`, the search
+returns current organization members matching the username prefix.
+
+Organization owners can call `GET /api/organizations/{id}/project-policy` for
+the current `role`, `version`, `affected_projects` count, and opaque `scope`.
+Submit `set_default_access` with the new `role` and the displayed `version`
+and `scope`. A different set of inheriting Projects or changed default requires
+a fresh confirmation. A successful change appears in the organization audit log.
+Upgrade all serving peers before using Project access policies or guest links.
+
+Open **Teams** → a team → **Projects** to search its linked Projects and browse
+the active and archived lists. The list requires current access to both the
+team and the Project. An organization owner, or a maintainer who also has
+Project Admin access, can choose **Link a project**. Linking an active Project
+adds a Read grant for the team. Existing Write and Admin grants remain in
+effect. Manage or remove the grant under **Manage access** on the Project.
+
+`GET /api/organizations/{id}/projects?team={team}` scopes the Project
+collection to that team. Add `linkable=true` to search unlinked active Projects
+the caller can administer. Submit `link_team` to the standard Project command
+endpoint with `project`, `version`, and `team`. Current team and Project roles
+are checked in the same native transaction as the grant and its receipt.
+
+In an organization-owned repository, open **Projects** → **Linked projects**
+to search active and archived shared Projects owned by that organization.
+The list requires current Read access to both the repository and the Project.
+On the **Active** tab, choose **Link a project** to list an active Project you
+can edit. The same link appears in the Project's **Repositories** panel and lets Project editors
+add issues and pull requests from the repository according to source access.
+Use that panel to remove the link.
+
+`GET /api/organizations/{id}/projects?repository={repository}` scopes the
+collection to links for the repository UUID. Add `linkable=true` to search
+unlinked active Projects you can edit. Submit `link_repository` with
+`project`, `version`, and `repository` to the organization Project command
+endpoint. Publication rechecks access and ownership under the organization
+policy lease.
+
+An organization Project administrator can set **Default repository** under
+**Repositories** → **Manage**. The destination must be an active, readable
+repository owned by the organization. Saving the default also links the
+repository and lists the Project on its **Linked projects** page. Clear or
+change the default before removing that link.
+
+In the Project's **New issue** form, the default is preselected for people
+who can write to it. They can choose another writable linked repository.
+If the default is unavailable, the form asks for a destination. A saved
+draft or retried submission retains its chosen repository.
+
+Submit `set_default_repository` with `project`, `version`, and a repository
+UUID or `null` to the organization Project command endpoint. The server binds
+the default to the repository's current ownership epoch. Project detail
+returns `default_repository_configured` and the currently visible, active
+`default_repository`. A Project membership grants no repository access.
+
 With source repository triage access, drag an issue to another type group in
 a table or board, or use the **Change issue type** control in any layout.
 Moving to **No type** clears the assignment. The item retains its Project
@@ -3118,6 +3226,21 @@ from different columns. The move uses one bulk Project submission and offers
 **Undo** after saving. Cards already in the destination keep their revisions
 and still participate in the batch's conflict checks.
 
+In a saved board view, open a column's menu and enter an **Item limit**.
+The header shows the matching item count and the limit, with a warning when
+the count exceeds the limit. A limit is advisory, so moves and additions can
+still put work into the column. Each saved view and grouping has its own
+limits. Project managers can change or remove them.
+
+Both Project command endpoints accept `column_limit` with `project`,
+`version`, and `column: {view, group_by, value, limit}`. The limit is a positive
+32-bit integer. Use `null` to remove it. Saved board views expose the optional
+`column_limits` map keyed by grouping and column value. Group values are status
+names, issue-type UUIDs or `none`/`other`, or single-select option names (the
+empty string means **No value**). Older records without this field load with
+no limits. Update all server replicas before first saving a limit so each
+replica can read the updated view definition.
+
 Choose **Add work to** on a status or custom-field group to start an item
 with that value. The editor keeps the prefilled value when you switch work
 sources. Unfinished items started this way have separate recovery drafts.
@@ -3133,8 +3256,14 @@ In an organization Project, choose **New issue** when adding work, or
 **Create issue in** on an issue-type group. Choose a linked repository
 owned by the organization where you have Write access. The editor keeps
 the selected issue type and planning fields in its recovery draft.
+Open a saved draft note and select **Convert to issue** to publish it in
+one of those repositories. The issue replaces the draft in the same
+Project row with its planning fields intact.
 Organization Project `create_issue` commands take `project`, `repository`,
-`item` (a new item with no subject), and an optional `type_id`.
+`item` (with no subject), and an optional `type_id`. Include `draft_version`
+with the saved item's current revision to convert it. The revision stays
+reserved until the destination returns a receipt. Rejection or cancellation
+before publication releases the reservation and leaves the saved draft intact.
 The server reserves the Project item, commits the issue and type in the
 repository, and then links the issue. Retry an interrupted submission with
 the same request ID to recover the original result. **Cancel if not
@@ -3755,6 +3884,14 @@ required gate. Invalid pattern lines are skipped. Policy files must be regular
 UTF-8 Git blobs under 3 MiB, with up to 4,096 rules and 1,024 distinct owner
 references per comparison.
 
+On a merged PR, **Files changed** shows the rules from the recorded base
+commit and the paths they matched in the recorded comparison. The saved
+report omits approval counts and eligibility fields. **View CODEOWNERS at
+merge** opens the exact policy as text at
+`GET .../pulls/{number}/codeowners/source`. Both reads require current access
+to the PR repository and any source fork, including after source-branch
+deletion.
+
 Opening a ready PR or marking a draft ready requests its eligible code owners
 even on branches without a required-owner protection rule. Draft creation
 sends no requests. Requests appear in **Reviewers**, and the inbox notification
@@ -4304,7 +4441,32 @@ is the newest unresolved conversation. A resolved anchor can still be used
 as the starting position. The endpoint requires current repository read
 access.
 
-If either branch is deleted, the conversation and original OIDs remain visible while live comparison becomes unavailable. A completed merge retains its pre-merge comparison after source deletion.
+If either branch is deleted, the conversation and original OIDs remain visible.
+A completed merge retains its pre-merge base and head IDs after source deletion.
+**Files changed** and **Commits** read the recorded comparison while its Git
+objects remain in storage, including after squash or rebase. The server checks
+current access to the PR repository and any source fork. Inline review anchors
+use the same recorded comparison as the base route
+`GET .../pulls/{number}/merged-comparison`.
+
+| Path | Response |
+| --- | --- |
+| Base route | Changed files from the recorded comparison. |
+| `/file?path_hex=...` | One changed file from that comparison. |
+| `/commits?limit=50&cursor=...` | Original commits reachable from the recorded head and excluded from the recorded base, with a signed `next` cursor when another page exists. |
+| `/commits/{oid}` | Commit metadata and changed files relative to its first parent. The OID must belong to the recorded range. |
+| `/commits/{oid}/file?path_hex=...` | One file changed by that commit. |
+
+Ordinary repository commit browsing requires Git reachability. The **Checks**
+tab reads stored reports for the recorded merge commits independently of their
+Git objects.
+
+The active v2 pack inventory supplies saved PR comparisons. Repack preserves
+the object IDs in its replacement packs. Pruning recovery history drops old
+checkpoint references and capture indexes while the active inventory continues
+to supply the recorded commits. Repository GC keeps the pack sources in that
+active inventory. Restoring an older repository state or removing stored Git
+objects can make a saved comparison unavailable.
 
 Reviews record `commented`, `approved`, or `changes_requested` against the exact current head. Pull authors cannot approve or request changes on their own pull. Advancing the head marks older reviews as not current.
 
@@ -4357,9 +4519,11 @@ returns `{commit}`. Use a fresh UUID for a new batch. Retry the same UUID,
 expected head, selected versions, and message to recover the original commit
 after a lost response or a busy reply. Recovery requires current write access
 and uses the durable publication receipt, including after the branch advances.
-The browser keeps the original submission while the review workspace stays
-open. Close the dialog to refresh the review and choose **Resume suggestion
-commit** to retry.
+The browser saves the original request for the signed-in account and exact PR
+and destination repository in the current tab. After refreshing **Files
+changed**, choose **Resume suggestion commit** to retry, even if the original
+head has moved or its branch was deleted. The tab clears the saved request after
+confirmation, an initial definitive rejection, or dismissal.
 Crab prepares the selected comment versions and anchors in a single Repository
 Cell snapshot, then verifies current file blobs and nonoverlapping line ranges
 before building one commit against the expected head. The publication worker
@@ -4375,8 +4539,8 @@ header to that fork. The fork's recorded upstream supplies the PR and review
 records. Crab verifies that the PR names this fork and applies the fork's
 current write permissions, branch rules, and archive state to publication.
 The native Chromium qualification selects 20 suggestions across thread pages,
-recovers the original commit after a lost reply, and verifies the result and
-its parent with stock Git on the fork. It also checks the upstream ref.
+reloads after a lost reply, and recovers the original commit. Stock Git verifies
+the result and its parent on the fork and the unchanged upstream ref.
 
 `POST .../pulls/{number}/reviews` requires `request_id`, `body`, `state` and
 `commit_oid`. The latter is the exact lowercase, nonzero SHA-1 inspected by the
@@ -4735,6 +4899,12 @@ up-to-date head when required. Crab rechecks current write access, both source
 tips, the candidate ref, file locks, and the current policy before publication.
 The merged pull request records the tested SHA.
 
+After merge, **Checks** opens the recorded reviewed head. If Crab published a
+tested candidate, **Tested merge checks** shows reports for that separately
+recorded commit. Both views list stored commit statuses and check runs,
+including after squash or rebase and source branch deletion. These are the
+reports currently stored for the displayed SHA.
+
 `GET .../pulls/{number}/merge-candidate` returns `preview` and `candidate`.
 Submit `preview` with `POST` to prepare the recorded comparison. It contains
 the request ID, PR version, exact tip OIDs, prior candidate OID, and the
@@ -4769,6 +4939,14 @@ To offer the queue on other branches, enable **Allow merge queue** under
 **Settings → General → Pull request merge methods**. It is disabled by default. On a ready pull request with passing
 head checks and reviews, select **Add to merge queue**. The target branch must
 require at least one check.
+
+When the branch requires the queue and the pull request is still blocked by
+reviews or checks, a writer can select **Merge when ready**. The request
+survives reload and worker restart. Crab gives it a queue position once the
+exact head satisfies current requirements, then builds and checks a candidate
+against the live base and earlier queue entries. A new head needs fresh
+confirmation. Writers can cancel from the pull request before it enters the
+queue.
 
 In the same settings section, **Queue merge method** chooses the repository
 default of merge commit, squash, or rebase. It is independent of the enabled
@@ -4849,6 +5027,9 @@ timeout for the target branch. It identifies the first entry and shows
 whether candidate preparation has started. Disabling
 optional queues invalidates optional entries, including across off/on changes.
 Branches that require the queue keep their entries.
+On a required branch, add `when_ready: true` to record consent and wait for the
+head requirements. The request reports `waiting_for_queue: true` until it joins
+the queue with the same ID. A waiting request takes no position or build slot.
 
 ### Manage labels and assignees
 
@@ -5046,6 +5227,10 @@ Authorization: Basic base64_encoded_crab_and_token
 State is `pending`, `success`, `failure`, or `error`. Context matching is case-insensitive. The newest report replaces the visible result for that context; replaying an older request returns its original record without replacing newer state.
 
 `GET /api/repos/{owner}/{name}/commits/{sha}/status` returns the latest context results and combined state.
+For a completed pull request, pass `?pull={number}` to read the exact recorded
+source head or the published tested SHA. The same read scope applies to the
+check run list and detail. Repository access and commit admission for reporting
+still apply to writes.
 
 Status limits include 1,000 submissions per commit, 128 retained contexts, 140 description characters, a 2 KiB target URL, and an 8 KiB request body. Target URLs require HTTPS, except loopback HTTP during local development.
 
@@ -5087,7 +5272,7 @@ url = "https://audit.example.test/events"
 ```
 
 A repository administrator opens **Settings → Webhooks**, selects a destination,
-chooses **Git pushes** and/or **Pull requests**, and copies the signing secret
+chooses events, and copies the signing secret
 to that receiver. Each endpoint has its own subscriptions, secret, and
 delivery history. Saving creates a new secret for that endpoint and cancels
 its outstanding deliveries. Removing an approved endpoint stops delivery to
@@ -5100,8 +5285,9 @@ with reads and mutations. A mutation can omit the selector when the repository
 has exactly one approved receiver.
 
 Crab POSTs a JSON object with `repository` (the stable UUID), `delivery` (the
-delivery UUID), `occurred_at_ms`, and `data`. `X-Crab-Event` is `push` or
-`pull_request`. `X-Crab-Delivery` is the delivery UUID. Verify the raw bytes
+delivery UUID), `occurred_at_ms`, and `data`. `X-Crab-Event` is `push`,
+`pull_request`, `issues`, `issue_comment`, or `pull_request_review`.
+`X-Crab-Delivery` is the delivery UUID. Verify the raw bytes
 with the configured secret and `X-Hub-Signature-256` (`sha256=` plus the
 hex-encoded HMAC-SHA256), then deduplicate by delivery UUID before processing.
 [Webhook signature guidance](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
@@ -5122,6 +5308,31 @@ hex-encoded HMAC-SHA256), then deduplicate by delivery UUID before processing.
   check. A recreated branch has a null `before`. The `base_sha` describes
   the PR's recorded comparison. A browser head-branch switch emits the
   recorded new comparison without `head_change`.
+- `issues` contains `data.action`, `number`, `title`, `state`, `state_reason`,
+  and `version`. Actions are `opened`, `edited` for title or description
+  changes, `closed`, and `reopened`. Closures from merges and commits use the
+  same `closed` event as an interactive change.
+- `issue_comment` contains `data.action` (`created` or `edited`),
+  `subject` (`kind` of `issue` or `pull` and its `number`), `comment` (the
+  comment number), and its `version`. This covers ordinary conversation
+  comments and comments submitted with a close or reopen. Use the subject and
+  comment revision to reconcile current state through the authorized API.
+  Discussion bodies and private account identifiers are excluded from payloads.
+- `pull_request_review` contains `data.action` (`submitted`, `edited`, or
+  `dismissed`), the pull and review numbers, the review `version`, the exact
+  reviewed `commit_oid`, and the original `decision`. Subscribe using **Pull
+  request reviews**. The event covers published standalone and batched reviews,
+  summary edits, and explicit dismissals. Draft saves and retries of a committed
+  submission do not enqueue deliveries. Base and head changes that expire
+  approvals are reported through the corresponding `pull_request` event.
+  The payload excludes review text and dismissal reasons. Delivery history
+  shows the reviewed commit and links directly to the review.
+  [GitHub review event](https://docs.github.com/en/webhooks/webhook-events-and-payloads#pull_request_review)
+
+Existing subscriptions keep their event selection. The settings command
+accepts the optional booleans `issues`, `issue_comment`, and
+`pull_request_review`, each defaulting to `false`. Upgrade all server replicas
+before enabling a newly supported event.
 
 A branch update emits one synchronization event per subscribed receiver for
 each open PR already tracking that repository and branch when publication
@@ -5655,8 +5866,8 @@ submission controller lives above application routing, so lost acknowledgements
 can recover after navigation or organization removal without retargeting the
 write. New native/HTTP tests live beside their team owners; responsive,
 accessibility, conflict and recovery scenarios live in
-`packages/ui/tests/browser/teams.e2e.ts`. Hierarchy, autocomplete and Projects
-remain separate work.
+`packages/ui/tests/browser/teams.e2e.ts`. Team Project listings and linking
+reuse the organization Project collection and access policy.
 
 Current team qualification: 13 native/HTTP team checks, all 476 native regressions
 (six existing opt-in qualifications ignored), 13 CLI checks, 164 browser scenarios,

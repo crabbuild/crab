@@ -29,6 +29,8 @@ pub(crate) struct Job {
     pub comparison_revision: Option<u64>,
     pub method: MergeMethod,
     pub message: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub when_ready: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<QueueEntry>,
 }
@@ -112,6 +114,13 @@ pub(crate) enum Change {
         #[serde(default)]
         ruleset_queue_required: bool,
     },
+    Enqueue {
+        pull: u64,
+        id: Uuid,
+        version: u64,
+        configured_queue_required: bool,
+        ruleset_queue_required: bool,
+    },
     Test {
         pull: u64,
         id: Uuid,
@@ -166,6 +175,24 @@ impl QueueSettings {
 }
 
 impl Job {
+    pub(crate) fn uses_queue(&self) -> bool {
+        self.when_ready || self.queue.is_some()
+    }
+
+    pub(crate) fn waiting_for_queue(&self) -> bool {
+        self.when_ready && self.queue.is_none()
+    }
+
+    fn matches_pull(&self, pull: &PullRecord, version: u64) -> bool {
+        pull.version == version
+            && pull.state == PullState::Open
+            && !pull.draft
+            && pull.base_ref == self.base_ref
+            && pull.head_ref == self.head_ref
+            && pull.head_repository == self.head_repository
+            && pull.retargeted_base.as_ref().map(|base| base.revision) == self.comparison_revision
+    }
+
     pub(crate) fn candidate_id(&self, order_revision: u64) -> Uuid {
         if order_revision == 0 {
             return self.id;
@@ -205,7 +232,7 @@ impl Job {
         settings: &settings::merge_methods::MergeMethods,
         queue_required: bool,
     ) -> bool {
-        if self.queue.is_some() {
+        if self.uses_queue() {
             self.queue_settings().enabled(settings, queue_required)
         } else {
             !queue_required
@@ -267,6 +294,17 @@ fn allocate_sequence(context: &Transaction<'_>) -> crate::cells::Result<u64> {
         ))?;
     context.put_document(QUEUE_SEQUENCE, &sequence)?;
     Ok(sequence)
+}
+
+fn enter_queue(context: &Transaction<'_>, job: &mut Job) -> crate::cells::Result<()> {
+    let entry = QueueEntry {
+        sequence: allocate_sequence(context)?,
+        priority: false,
+        testing: None,
+    };
+    context.put_document(&queue_key(&job.base_ref, &entry), &job.pull)?;
+    job.queue = Some(entry);
+    Ok(())
 }
 
 fn front(context: &Transaction<'_>, branch: &str) -> crate::cells::Result<Option<u64>> {
@@ -401,6 +439,7 @@ impl Mutation for Edit {
                 validate_oid(&job.initial_base_oid)?;
                 if job.id.is_nil()
                     || job.queue.is_some()
+                    || (job.when_ready && !queue)
                     || job.message.chars().count() > 256
                     || (queue && (!job.method.supports_queue() || !job.message.is_empty()))
                 {
@@ -408,7 +447,7 @@ impl Mutation for Edit {
                 }
                 let active = key(ACTIVE, job.pull);
                 if let Some(existing) = context.document::<Job>(&active)? {
-                    let same_mode = existing.queue.is_some() == queue;
+                    let same_mode = existing.uses_queue() == queue;
                     job.queue = existing.queue.clone();
                     return Ok(if same_mode && existing == job {
                         Success(Outcome::Saved)
@@ -441,6 +480,9 @@ impl Mutation for Edit {
                 if queue_required && !queue {
                     return Ok(Rejected(Outcome::QueueRequired));
                 }
+                if job.when_ready && !queue_required {
+                    return Ok(Rejected(Outcome::Disabled));
+                }
                 let settings = settings::merge_methods::load_for_ref(context, &job.base_ref)?;
                 if queue && !job.queue_method_matches(&settings) {
                     return Ok(Rejected(Outcome::Changed));
@@ -461,28 +503,59 @@ impl Mutation for Edit {
                 if pull.merge_pending.is_some() {
                     return Ok(Rejected(Outcome::MergePending));
                 }
-                if pull.version != version
-                    || pull.state != PullState::Open
-                    || pull.draft
-                    || pull.base_ref != job.base_ref
-                    || pull.head_ref != job.head_ref
-                    || pull.head_repository != job.head_repository
-                    || pull.retargeted_base.map(|base| base.revision) != job.comparison_revision
-                {
+                if !job.matches_pull(&pull, version) {
                     return Ok(Rejected(Outcome::Changed));
                 }
-                if queue {
-                    let queued = QueueEntry {
-                        sequence: allocate_sequence(context)?,
-                        priority: false,
-                        testing: None,
-                    };
-                    context.put_document(&queue_key(&job.base_ref, &queued), &job.pull)?;
-                    job.queue = Some(queued);
+                if queue && !job.when_ready {
+                    enter_queue(context, &mut job)?;
                 }
                 context.put_document(&active, &job)?;
                 context.put_document(&receipt, &true)?;
                 context.delete_document(&key(STOPPED, job.pull))?;
+            }
+            Change::Enqueue {
+                pull,
+                id,
+                version,
+                configured_queue_required,
+                ruleset_queue_required,
+            } => {
+                let active = key(ACTIVE, pull);
+                let Some(mut job) = context
+                    .document::<Job>(&active)?
+                    .filter(|job| job.id == id && job.when_ready)
+                else {
+                    return Ok(Rejected(Outcome::Changed));
+                };
+                if job.queue.is_some() {
+                    return Ok(Success(Outcome::Saved));
+                }
+                if settings::archived(context)? {
+                    return Ok(Rejected(Outcome::Archived));
+                }
+                let configured = settings::merge_methods::load_for_ref(context, &job.base_ref)?;
+                let required = ruleset_queue_required
+                    || settings::requires_merge_queue(
+                        context,
+                        &job.base_ref,
+                        configured_queue_required,
+                    )?;
+                if !job.enabled(&configured, required) {
+                    return Ok(Rejected(Outcome::Disabled));
+                }
+                let Some(pull) = load_pull(context, job.pull)? else {
+                    return Ok(Rejected(Outcome::Changed));
+                };
+                if pull.merge_pending.is_some() {
+                    return Ok(Rejected(Outcome::MergePending));
+                }
+                if !job.matches_pull(&pull, version) {
+                    return Ok(Rejected(Outcome::Changed));
+                }
+                // Only eligible requests occupy a queue position. The index
+                // and the active job must commit together for retry safety.
+                enter_queue(context, &mut job)?;
+                context.put_document(&active, &job)?;
             }
             Change::Test {
                 pull,
