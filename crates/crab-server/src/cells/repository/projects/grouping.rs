@@ -1,17 +1,82 @@
 use super::{
-    Definition, FieldKind, Item, Result, SqlValue, Transaction, result_text, result_u64_from_row,
+    Definition, Field, FieldKind, Item, Layout, Result, SqlValue, Transaction, result_text,
+    result_u64_from_row,
 };
 use crate::cells::Error;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU32;
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(try_from = "String", into = "String")]
 pub(crate) enum GroupBy {
     Status,
     IssueType,
     Field(Uuid),
+}
+
+impl GroupBy {
+    pub(super) fn board_column(self, value: &str, statuses: &[String], fields: &[Field]) -> bool {
+        match self {
+            Self::Status => statuses.iter().any(|status| status == value),
+            Self::IssueType => {
+                matches!(value, "none" | "other")
+                    || Uuid::parse_str(value)
+                        .is_ok_and(|id| !id.is_nil() && id.to_string() == value)
+            }
+            Self::Field(id) => fields.iter().any(|field| {
+                field.id == id
+                    && matches!(&field.definition, FieldKind::Select { options }
+                        if value.is_empty() || options.iter().any(|option| option == value))
+            }),
+        }
+    }
+}
+
+pub(super) type ColumnLimits = BTreeMap<GroupBy, BTreeMap<String, NonZeroU32>>;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ColumnLimit {
+    view: Uuid,
+    group_by: GroupBy,
+    value: String,
+    limit: Option<NonZeroU32>,
+}
+
+impl ColumnLimit {
+    pub(crate) fn apply(
+        &self,
+        definition: &mut Definition,
+    ) -> std::result::Result<(), &'static str> {
+        let view = definition
+            .views
+            .iter_mut()
+            .find(|view| view.id == self.view && view.layout == Layout::Board)
+            .ok_or("Choose a saved board view")?;
+        if !self
+            .group_by
+            .board_column(&self.value, &definition.statuses, &definition.fields)
+        {
+            return Err("This board column is unavailable");
+        }
+        if let Some(limit) = self.limit {
+            view.column_limits
+                .entry(self.group_by)
+                .or_default()
+                .insert(self.value.clone(), limit);
+        } else if let Some(columns) = view.column_limits.get_mut(&self.group_by) {
+            columns.remove(&self.value);
+            if columns.is_empty() {
+                view.column_limits.remove(&self.group_by);
+            }
+        }
+        if !definition.valid() {
+            return Err("This Project exceeds the saved settings size limit");
+        }
+        Ok(())
+    }
 }
 
 impl TryFrom<String> for GroupBy {

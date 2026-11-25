@@ -1,6 +1,8 @@
 use super::{repositories::repository_write, *};
 use crate::test_support::http::{browser::Browser, organizations::bootstrap};
 
+mod removal;
+
 pub(super) struct AccessFixture {
     pub(super) h: Harness,
     pub(super) organization: Uuid,
@@ -11,6 +13,7 @@ pub(super) struct AccessFixture {
     pub(super) bob: String,
     pub(super) org: String,
     repository: String,
+    repository_id: Uuid,
 }
 
 impl AccessFixture {
@@ -131,6 +134,7 @@ impl AccessFixture {
             bob,
             org,
             repository,
+            repository_id: id,
         }
     }
 
@@ -226,6 +230,181 @@ async fn owner_inspects_configured_roles_and_a_team_revocation_invalidates_the_p
     let blocked = f.h.json(&path, &f.alice).await;
     assert_eq!(blocked["account"], "suspended");
     assert_eq!(blocked["items"][0]["access"], "read");
+    f.h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn outside_collaborators_follow_current_membership_and_repository_grants() {
+    let f = AccessFixture::new().await;
+    let path = format!("{}/outside-collaborators", f.org);
+    assert_eq!(f.get(&path, &f.bob).await.status(), StatusCode::NOT_FOUND);
+    assert_eq!(f.h.json(&path, &f.alice).await["items"], json!([]));
+
+    f.h.write(
+        Method::DELETE,
+        &format!("{}/members/{}", f.org, f.member),
+        &f.alice,
+        json!({"version":1}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let direct = format!("{}/members", f.repository);
+    let page = f.h.json(&direct, &f.alice).await;
+    let repository = f.repository_id;
+    let update = |revision: Value, members: Value| json!({"expected_revision":revision,"members":members,"groups":page["groups"]});
+    let existing_bob = page["members"][0].clone();
+    let outside =
+        json!({"name":"Visiting engineer","subject":"unlisted-subject","access":"triage"});
+    repository_write(
+        &f.h,
+        Method::PUT,
+        &direct,
+        &f.alice,
+        repository,
+        update(page["revision"].clone(), json!([existing_bob, outside])),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    let listing =
+        f.h.json(&format!("{path}?limit=1&q=library"), &f.alice)
+            .await;
+    let cursor = listing["next"].as_str().unwrap();
+    let following =
+        f.h.json(
+            &format!("{path}?limit=1&q=library&after={cursor}"),
+            &f.alice,
+        )
+        .await;
+    let names = [&listing["items"][0], &following["items"][0]];
+    assert!(
+        names
+            .iter()
+            .any(|row| row["name"] == "Bob" && row["access"] == "read")
+    );
+    assert!(
+        names
+            .iter()
+            .any(|row| row["name"] == "Visiting engineer" && row["access"] == "triage")
+    );
+    assert!(
+        names
+            .iter()
+            .all(|row| row["repository_id"] == json!(repository))
+    );
+    assert_eq!(following["next"], Value::Null);
+    for page in [listing.clone(), following] {
+        let wire = page.to_string();
+        assert!(!wire.contains("bob-id"));
+        assert!(!wire.contains("unlisted-subject"));
+        assert!(!wire.contains("release-admins"));
+    }
+    assert_eq!(
+        f.get(&format!("{path}?after={cursor}&q=visiting"), &f.alice)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(f.get(&path, &f.bob).await.status(), StatusCode::NOT_FOUND);
+    let repo = f.repository.strip_prefix("/api/repos/").unwrap();
+    let (owner, name) = repo.split_once('/').unwrap();
+    assert!(
+        f.h.write(
+            Method::POST,
+            "/api/git-token",
+            &f.bob,
+            json!({"owner":owner,"repository":name,"access":"read"})
+        )
+        .await
+        .status()
+        .is_success()
+    );
+
+    let current = f.h.json(&direct, &f.alice).await;
+    repository_write(
+        &f.h,
+        Method::PUT,
+        &direct,
+        &f.alice,
+        repository,
+        update(current["revision"].clone(), json!([outside])),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        f.get(&format!("{path}?after={cursor}&q=library"), &f.alice)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        f.h.json(&path, &f.alice).await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    f.h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires agent-browser and the built embedded UI; uses an isolated OIDC/native Cell fixture"]
+async fn native_browser_removes_a_repository_grant_from_the_outside_collaborator_view() {
+    let f = AccessFixture::new().await;
+    f.h.write(
+        Method::DELETE,
+        &format!("{}/members/{}", f.org, f.member),
+        &f.alice,
+        json!({"version":1}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    *f.h.provider.mode.lock().await = "owner".into();
+    let browser = Browser::new("outside-collaborators");
+    let root = format!("{}/-/organizations/{}", f.h.origin, f.organization);
+    browser.run(&["open", &root]).await;
+    browser.sign_in().await;
+    for (ready, role, label) in [
+        (
+            "nav[aria-label='People'] a[href*='people=outside']",
+            "link",
+            "Outside collaborators",
+        ),
+        (
+            "a[aria-label='Manage library access for Bob']",
+            "link",
+            "Manage library access for Bob",
+        ),
+        ("button[aria-label='Remove Bob']", "button", "Remove Bob"),
+        (
+            "[role=region][aria-label='Remove member']",
+            "button",
+            "Remove member",
+        ),
+        (".member-save-bar button", "button", "Save access"),
+    ] {
+        browser.run(&["wait", ready]).await;
+        browser
+            .run(&["find", "role", role, "click", "--name", label, "--exact"])
+            .await;
+    }
+    browser.run(&["wait", "--text", "Access updated."]).await;
+    browser
+        .run(&["open", &format!("{root}?tab=people&people=outside")])
+        .await;
+    browser
+        .run(&["wait", "--text", "No matching outside collaborator grants."])
+        .await;
+    assert_eq!(
+        f.h.json(&format!("{}/members", f.repository), &f.alice)
+            .await["members"],
+        json!([])
+    );
+    drop(browser);
     f.h.close().await;
 }
 

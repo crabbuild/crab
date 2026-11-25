@@ -1492,8 +1492,8 @@ Commands are `create`, `edit`, `planning`, `repository`, `item`, `create_issue`
 and `remove`.
 Project definitions, properties and links carry the captured project version.
 Item commands carry their own row revision, with zero for a new item. An item's
-source identity cannot be replaced. A repository with retained project items
-cannot be unlinked.
+linked source identity is fixed. A repository with retained project items cannot
+be unlinked.
 
 Repository links and work references use stable UUIDs, with source kind/number
 stored only in that project. They never copy titles, source state, assignees or
@@ -1522,9 +1522,12 @@ result. A stale comparison can retry the same request. Adding an equivalent
 address returns the existing placement outcome without exposing restricted
 source addresses or replacing the item's fields.
 
-For `create_issue`, the Organization Cell reserves a new item under the
-actor and payload digest. The reservation pins the linked repository and
-ownership epoch. The Repository Cell commits the issue, optional issue
+For `create_issue`, the Organization Cell reserves a new item or a saved draft
+under the actor and payload digest. Conversion includes `draft_version` and
+reserves that revision against edits and removal. A committed issue replaces
+the draft in place and advances its revision. A rejected or cancelled
+publication leaves the saved draft in place. The reservation pins the linked
+repository and ownership epoch. The Repository Cell commits the issue, optional issue
 type, and a separate publication receipt in one transaction. Replaying or
 cancelling the browser request first recovers that receipt. A committed
 issue can be linked after source access changes, while a fresh publication
@@ -1655,8 +1658,8 @@ organization status command is `cells organization-projects-status
 --organization UUID --actor OWNER_UUID`. Status reports outdated, migrating
 with copied count/revision, or ready. Update all peers and the UI together.
 
-Item create uses revision zero; edit, removal and repository draft conversion use
-the item row's revision. The native transaction advances both that item revision
+Item create uses revision zero. Edit, removal and draft conversion use the item
+row's revision. The native transaction advances both that item revision
 and the project collection revision. Two different items can change independently;
 same-item stale edits return permanent `item_conflict` decisions containing only
 the project/item UUID and current item revision. Tombstones prevent a delayed

@@ -29,8 +29,10 @@ pub(in crate::api) enum AuditAction {
     TeamMembership,
     TeamCreationPolicy,
     RepositoryPolicyChanged,
+    ProjectPolicyChanged,
     RepositoryRegistered,
     RepositoryAccessChanged,
+    OutsideCollaboratorsRemoved,
     RepositoryTransferredIn,
     RepositoryTransferredOut,
 }
@@ -82,6 +84,16 @@ impl From<organization::Event> for RawEvent {
         event.action = match value.action {
             Action::Created => AuditAction::OrganizationCreated,
             Action::RepositoryPolicyChanged => AuditAction::RepositoryPolicyChanged,
+            Action::ProjectPolicyChanged {
+                before,
+                after,
+                affected_projects,
+            } => {
+                event.detail = Some(format!(
+                    "{before:?} → {after:?} · {affected_projects} Projects"
+                ));
+                AuditAction::ProjectPolicyChanged
+            }
             Action::Automation { identity, action } => {
                 use organization::automation::Audit;
                 let label = match action {
@@ -229,6 +241,7 @@ impl From<audit::Entry> for RawEvent {
         let action = match entry.action {
             audit::Action::Registered => AuditAction::RepositoryRegistered,
             audit::Action::AccessChanged => AuditAction::RepositoryAccessChanged,
+            audit::Action::OutsideCollaboratorsRemoved => AuditAction::OutsideCollaboratorsRemoved,
             audit::Action::TransferredIn => AuditAction::RepositoryTransferredIn,
             audit::Action::TransferredOut => AuditAction::RepositoryTransferredOut,
         };
@@ -248,11 +261,25 @@ impl From<audit::Entry> for RawEvent {
                 account: None,
                 team: None,
                 project: None,
-                repository: Some(AuditRepository {
-                    id: entry.repository,
-                    name: entry.name,
+                repository: entry
+                    .repository
+                    .map(|(id, name)| AuditRepository { id, name }),
+                detail: entry.removal.map(|(collaborators, grants, repositories)| {
+                    let people = if collaborators == 1 {
+                        "collaborator"
+                    } else {
+                        "collaborators"
+                    };
+                    let grant = if grants == 1 { "grant" } else { "grants" };
+                    let repo = if repositories == 1 {
+                        "repository"
+                    } else {
+                        "repositories"
+                    };
+                    format!(
+                        "{collaborators} {people} · {grants} direct {grant} · {repositories} {repo}"
+                    )
                 }),
-                detail: None,
             },
         }
     }

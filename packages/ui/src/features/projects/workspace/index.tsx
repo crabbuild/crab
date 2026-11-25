@@ -1,10 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeftIcon,
-  CalendarRangeIcon,
-  Columns3Icon,
   FolderKanbanIcon,
-  ListIcon,
   PlusIcon,
   Settings2Icon,
   UsersIcon,
@@ -14,7 +11,7 @@ import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsContent } from "@/components/ui/tabs";
 import {
   Empty,
   EmptyHeader,
@@ -23,9 +20,10 @@ import {
   EmptyDescription,
 } from "@/components/ui/empty";
 import { DiscussionMarkdown } from "@/components/discussion/markdown";
-import type { OrganizationView } from "@/lib/contracts";
+import type { OrganizationProjectWorkspace } from "@/lib/contracts";
 import { useProjectCommands } from "../commands";
 import { ProjectHistory } from "../history";
+import { ProjectViewTabs } from "../view-tabs";
 import { DraftRecovery } from "../drafts";
 import { checkpointDraft, itemDraft, readDraft } from "../draft-storage";
 import {
@@ -48,6 +46,7 @@ import { ProjectBoard } from "../board";
 import { ProjectTable, ProjectRoadmap } from "../views";
 import { FieldSelect } from "@/components/ui/field-select";
 import { ProjectProperties } from "./forms";
+import { ProjectAccess } from "./access";
 import { ProjectLibrary } from "./library";
 import { WorkspaceItemEditor } from "./item";
 import { Repositories } from "./repositories";
@@ -68,20 +67,24 @@ export function OrganizationProjects({
   project?: string;
   url: URL;
 }) {
-  const own = useRequest<OrganizationView>(
-    `/api/organizations/${organization}`,
+  const own = useRequest<OrganizationProjectWorkspace>(
+    projectEndpoint({ organization }, "context"),
   );
   return (
     <Result state={own}>
-      {({ organization: record }) => (
+      {({ name, can_create }) => (
         <div className="organization-project-shell">
           <aside className="organization-project-nav">
-            <Link
-              className="organization-project-name"
-              href={`/-/organizations/${organization}`}
-            >
-              {record.name}
-            </Link>
+            {can_create ? (
+              <Link
+                className="organization-project-name"
+                href={`/-/organizations/${organization}`}
+              >
+                {name}
+              </Link>
+            ) : (
+              <span className="organization-project-name">{name}</span>
+            )}
             <nav aria-label="Organization workspace">
               <Button asChild variant="secondary">
                 <Link href={workspaceHref(organization)} aria-current="page">
@@ -89,12 +92,14 @@ export function OrganizationProjects({
                   Projects
                 </Link>
               </Button>
-              <Button asChild variant="ghost">
-                <Link href={`/-/organizations/${organization}?tab=people`}>
-                  <UsersIcon data-icon="inline-start" />
-                  People
-                </Link>
-              </Button>
+              {can_create && (
+                <Button asChild variant="ghost">
+                  <Link href={`/-/organizations/${organization}?tab=people`}>
+                    <UsersIcon data-icon="inline-start" />
+                    People
+                  </Link>
+                </Button>
+              )}
             </nav>
           </aside>
           <section
@@ -169,12 +174,19 @@ function PlanningWorkspace({
   const generation = useRef(commands.generation);
   const [editing, setEditing] = useState<ProjectItemSelection>();
   const [settings, setSettings] = useState(false);
+  const [access, setAccess] = useState(false);
   const [properties, setProperties] = useState(false);
   const overview = url.searchParams.get("view") === "overview";
   const selected =
     project.definition.views.find(
       (view) => view.id === url.searchParams.get("pv"),
     ) ?? project.definition.views[0];
+  const activeView =
+    url.searchParams.get("view") === "history"
+      ? "history"
+      : overview
+        ? "overview"
+        : selected.id;
   const requestedLayout = url.searchParams.get("layout");
   const layout =
     requestedLayout === "table" ||
@@ -335,7 +347,7 @@ function PlanningWorkspace({
               "Give this project a clear outcome and bring its work together."}
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           {detail.can_manage && (
             <Button
               variant="outline"
@@ -344,6 +356,16 @@ function PlanningWorkspace({
             >
               <Settings2Icon data-icon="inline-start" />
               Settings
+            </Button>
+          )}
+          {detail.can_admin && (
+            <Button
+              variant="outline"
+              disabled={commands.locked}
+              onClick={() => setAccess(true)}
+            >
+              <UsersIcon data-icon="inline-start" />
+              Manage access
             </Button>
           )}
           {editable && (
@@ -364,13 +386,7 @@ function PlanningWorkspace({
         }}
       />
       <Tabs
-        value={
-          url.searchParams.get("view") === "history"
-            ? "history"
-            : overview
-              ? "overview"
-              : selected.id
-        }
+        value={activeView}
         onValueChange={(value) =>
           filters({
             view:
@@ -384,28 +400,25 @@ function PlanningWorkspace({
           })
         }
       >
-        <TabsList
-          variant="line"
-          className="project-view-tabs"
-          aria-label="Project views"
-        >
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="history">History</TabsTrigger>
-          {project.definition.views.map((view) => {
-            const Icon =
-              view.layout === "board"
-                ? Columns3Icon
-                : view.layout === "roadmap"
-                  ? CalendarRangeIcon
-                  : ListIcon;
-            return (
-              <TabsTrigger value={view.id} key={view.id}>
-                <Icon data-icon="inline-start" />
-                {view.name}
-              </TabsTrigger>
-            );
-          })}
-        </TabsList>
+        <ProjectViewTabs
+          project={project}
+          active={activeView}
+          overview
+          target={
+            detail.can_manage && !project.archived
+              ? { organization }
+              : undefined
+          }
+          editable={editable}
+          preserveSelection={() => {
+            if (
+              !overview &&
+              activeView !== "history" &&
+              url.searchParams.get("pv") !== activeView
+            )
+              filters({ pv: activeView });
+          }}
+        />
         <TabsContent value="history">
           <ProjectHistory
             target={{ organization }}
@@ -433,7 +446,7 @@ function PlanningWorkspace({
                   </Button>
                 )}
               <Result state={resource}>
-                {({ page }) =>
+                {({ page, can_manage: canManageItems }) =>
                   overview ? (
                     <section className="workspace-project-overview">
                       <h2>About this project</h2>
@@ -559,12 +572,16 @@ function PlanningWorkspace({
                           {page.total === 1 ? "item" : "items"}
                         </span>
                       </div>
-                      {page.items.length || createInGroup ? (
+                      {layout === "board" ||
+                      page.items.length ||
+                      createInGroup ? (
                         <View
                           page={page}
-                          editable={editable}
+                          viewId={selected.id}
+                          editable={editable && canManageItems}
                           bulkTarget={
                             layout !== "roadmap" &&
+                            canManageItems &&
                             detail.can_manage &&
                             !project.archived
                               ? { organization }
@@ -735,8 +752,16 @@ function PlanningWorkspace({
           target={{ organization }}
           project={project}
           issueTypes
+          canArchive={detail.can_admin === true}
           typeChoices={detail.issue_types ?? []}
           onClose={() => setSettings(false)}
+        />
+      )}
+      {access && detail.can_admin && (
+        <ProjectAccess
+          organization={organization}
+          project={project}
+          onClose={() => setAccess(false)}
         />
       )}
     </section>

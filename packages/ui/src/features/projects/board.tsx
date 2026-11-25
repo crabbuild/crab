@@ -1,4 +1,4 @@
-import { ChevronDownIcon, PencilIcon } from "lucide-react";
+import { ChevronDownIcon, PencilIcon, TriangleAlertIcon } from "lucide-react";
 import { AssigneeAvatars } from "@/components/discussion/metadata";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -30,10 +30,12 @@ import {
 } from "./grouping";
 import { ItemTitle, LinkedItems } from "./views";
 import { ProjectIssueType } from "./issue-type";
+import { ColumnLimitControl } from "./column-limit";
 
 export function ProjectBoard({
   repo,
   page,
+  viewId,
   editable,
   onEdit,
   groupBy = "status",
@@ -46,6 +48,7 @@ export function ProjectBoard({
 }: {
   repo?: Pick<Repository, "id" | "owner" | "name">;
   page: ItemPage;
+  viewId: string;
   editable: boolean;
   onEdit: (row: Row) => void;
   groupBy?: GroupBy;
@@ -59,6 +62,10 @@ export function ProjectBoard({
   const byType = groupBy === "issue_type";
   const canSelect = !!bulkTarget && !byType;
   const columns = projectGroups(page, groupBy);
+  const savedBoard = page.project.definition.views.find(
+    (view) => view.id === viewId && view.layout === "board",
+  );
+  const limits = savedBoard?.column_limits?.[groupBy];
   const types = page.issue_types ?? [];
   const selection = useProjectSelection(page);
   const { chosen, stale, clear } = selection;
@@ -136,6 +143,9 @@ export function ProjectBoard({
       <div className="project-board" role="region" aria-label="Project board">
         {columns.map(({ key, name, count, rows }) => {
           const column = selection.groupState(rows);
+          const limit =
+            limits && Object.hasOwn(limits, key) ? limits[key] : undefined;
+          const overLimit = limit !== undefined && count > limit;
           return (
             <section
               key={key}
@@ -160,7 +170,22 @@ export function ProjectBoard({
                   <span className="project-status-dot" />
                 )}
                 <h2>{name}</h2>
-                <Badge variant="secondary">{count}</Badge>
+                <Badge variant={overLimit ? "warning" : "secondary"}>
+                  {overLimit && <TriangleAlertIcon aria-hidden="true" />}
+                  {limit === undefined ? (
+                    count
+                  ) : (
+                    <>
+                      <span aria-hidden="true">
+                        {count} / {limit}
+                      </span>
+                      <span className="sr-only">
+                        {count} items, limit {limit}
+                        {overLimit ? ", over limit" : ""}
+                      </span>
+                    </>
+                  )}
+                </Badge>
                 <AddToProjectGroup
                   grouping={groupBy}
                   value={key}
@@ -168,6 +193,21 @@ export function ProjectBoard({
                   onAdd={editable ? onAddGroupItem : undefined}
                   onCreateIssue={editable ? onAddGroupIssue : undefined}
                 />
+                {bulkTarget && savedBoard && (
+                  <ColumnLimitControl
+                    key={`${savedBoard.id}:${groupBy}`}
+                    target={bulkTarget}
+                    project={page.project}
+                    column={{
+                      view: savedBoard.id,
+                      group_by: groupBy,
+                      value: key,
+                    }}
+                    name={name}
+                    limit={limit}
+                    editable={editable}
+                  />
+                )}
               </header>
               <div className="project-board-cards">
                 {rows.map((row) => (

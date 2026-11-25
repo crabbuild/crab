@@ -127,7 +127,7 @@ impl Read for ResolveReviewTeams {
     }
 }
 
-fn active_team_rows(
+pub(super) fn active_team_rows(
     context: &Transaction<'_>,
     actor: Uuid,
     include_names: bool,

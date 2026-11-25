@@ -178,7 +178,7 @@ async fn publish_batch(
             Error::Archived => WriteError::from(ReceiveError::Archived),
             error => WriteError::from(error),
         })?;
-    let source = comparison(server, discussion, &pull).await?;
+    let source = comparison(server, principal, discussion, &pull).await?;
     if !source.live || source.head_oid != batch.head.to_string() {
         return Err(WriteError::Conflict);
     }

@@ -366,6 +366,12 @@ impl Mutation for DismissReview {
             Action::ReviewDismissed,
         )?;
         context.put_document(&key, &Submission { digest })?;
+        webhooks::review(
+            context,
+            &existing.review,
+            version,
+            webhooks::ReviewAction::Dismissed,
+        )?;
         advance_revision(context)?;
         Ok(MutationResult::Success(Outcome::Dismissed))
     }

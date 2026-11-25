@@ -190,3 +190,59 @@ test("Files changed uses ownership from the same inspected base and head", async
   await page.getByText("Code owner requirements", { exact: true }).click();
   await expect(page.getByText("@release-owner", { exact: true })).toBeVisible();
 });
+
+test("merged pull requests show saved ownership rules and the original policy file", async ({
+  page,
+}) => {
+  const fixture = await mockPullRequest(page);
+  fixture.lifecycle.state = "merged";
+  fixture.lifecycle.branchesAvailable = false;
+  const { base_oid, head_oid } = fixture.pull();
+  const resource = "/api/repos/team/project/pulls/1/codeowners";
+  await page.route(
+    (url) => url.pathname === resource,
+    (route) => {
+      expect(route.request().headers()["x-crab-repository-id"]).toBe(
+        fixture.lifecycle.repositoryId,
+      );
+      return route.fulfill({
+        json: {
+          path: ".github/CODEOWNERS",
+          base_oid,
+          head_oid,
+          invalid_lines: 0,
+          problem: null,
+          affected_paths: 1,
+          groups: [
+            {
+              line: 1,
+              owners: ["@merge-owner"],
+              paths: ["README.md"],
+              affected: 1,
+            },
+          ],
+        },
+      });
+    },
+  );
+  await page.route(
+    (url) => url.pathname === `${resource}/source`,
+    (route) =>
+      route.fulfill({
+        contentType: "text/plain",
+        body: "/README.md @merge-owner\n",
+      }),
+  );
+  await page.goto("/team/project/pull/1/files");
+  await expect(page.getByText("Code owners cover 1 path")).toBeVisible();
+  await page.getByRole("button", { name: "Code owner rules at merge" }).click();
+  await expect(page.getByText("@merge-owner", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("Awaiting approval", { exact: false }),
+  ).toHaveCount(0);
+  await page.getByRole("link", { name: "View CODEOWNERS at merge" }).click();
+  await expect(page).toHaveURL(new RegExp(`${resource}/source`));
+  await expect(page.getByText("/README.md @merge-owner")).toBeVisible();
+  await page.goBack();
+  await expect(page.getByText("Code owners cover 1 path")).toBeVisible();
+});

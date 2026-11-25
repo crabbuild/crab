@@ -25,7 +25,6 @@ import { ReviewReplies } from "./replies";
 import {
   canApplySuggestion,
   SuggestionCommit,
-  useSuggestionBatch,
   type SuggestionBatch,
 } from "./suggestion";
 
@@ -47,6 +46,7 @@ export function LinkedReviewThread({
   number,
   reply,
   refresh,
+  suggestions,
 }: {
   repo: Repository;
   pull: PullRequest;
@@ -54,14 +54,11 @@ export function LinkedReviewThread({
   number: number;
   reply?: number;
   refresh: () => void;
+  suggestions: SuggestionBatch;
 }) {
   const thread = useRequest<PullReviewThread>(
     endpoint(repo, `pulls/${pull.number}/threads/${number}`),
   );
-  const suggestions = useSuggestionBatch(repo, pull, csrf, () => {
-    thread.retry();
-    refresh();
-  });
   return (
     <section
       className="inline-review-list"
@@ -81,6 +78,10 @@ export function LinkedReviewThread({
       <SuggestionCommit
         suggestions={suggestions}
         branch={branch(pull.head_ref)}
+        onSaved={() => {
+          thread.retry();
+          refresh();
+        }}
       />
       <Result state={thread} timingLabel="Review conversation">
         {(data) => (

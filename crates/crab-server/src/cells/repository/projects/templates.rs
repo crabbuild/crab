@@ -152,6 +152,7 @@ pub(crate) fn templates() -> Vec<Template> {
                         show_issue_type: false,
                         issue_type_filter: None,
                         group_by: None,
+                        column_limits: Default::default(),
                     })
                     .collect(),
                 is_template: false,

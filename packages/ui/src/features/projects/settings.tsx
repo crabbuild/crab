@@ -32,12 +32,14 @@ export function ProjectSettings({
   project,
   issueTypes,
   typeChoices,
+  canArchive = true,
   onClose,
 }: {
   target: import("./model").ProjectTarget;
   project: Project;
   issueTypes: boolean;
   typeChoices: IssueType[];
+  canArchive?: boolean;
   onClose: () => void;
 }) {
   const saved = useProjectDraft(
@@ -116,7 +118,7 @@ export function ProjectSettings({
                   .map((s) => s.trim())
                   .filter(Boolean),
               },
-              archived,
+              archived: canArchive ? archived : project.archived,
             } as const;
             const checkpoint = saved.checkpoint();
             if (!checkpoint) return;
@@ -203,24 +205,28 @@ export function ProjectSettings({
                       </FieldDescription>
                     </>
                   )}
-                  <Field orientation="horizontal">
-                    <Checkbox
-                      id={`${id}-archived`}
-                      checked={archived}
-                      onCheckedChange={(v) => setArchived(v === true)}
-                    />
-                    <FieldLabel htmlFor={`${id}-archived`}>
-                      Archive project
-                    </FieldLabel>
-                  </Field>
-                  <FieldDescription>
-                    Archived projects retain their items and become read-only
-                    until reopened.
-                  </FieldDescription>
+                  {canArchive && (
+                    <>
+                      <Field orientation="horizontal">
+                        <Checkbox
+                          id={`${id}-archived`}
+                          checked={archived}
+                          onCheckedChange={(v) => setArchived(v === true)}
+                        />
+                        <FieldLabel htmlFor={`${id}-archived`}>
+                          Archive project
+                        </FieldLabel>
+                      </Field>
+                      <FieldDescription>
+                        Archived projects retain their items and become
+                        read-only until reopened.
+                      </FieldDescription>
+                    </>
+                  )}
                   <FieldDescription>
                     {"repo" in target
                       ? "Access follows this repository’s members and SSO group grants."
-                      : "Organization members can view this project. Its creator and organization owners manage planning. Repository permissions still protect linked work."}
+                      : "Project roles govern planning access. Linked work follows its repository permissions."}
                   </FieldDescription>
                 </FieldGroup>
               </TabsContent>

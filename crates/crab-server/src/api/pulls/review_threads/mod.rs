@@ -132,19 +132,28 @@ async fn load_pull(
 
 async fn comparison(
     server: &Server,
+    principal: &Principal,
     repo: &Repository,
     pull: &pull_storage::PullRequest,
 ) -> Result<Comparison> {
+    if pull.merge.is_some() {
+        let (base_oid, head_oid) =
+            super::merged_comparison::anchors(server, principal, repo, pull).await?;
+        // The immutable comparison OIDs already bind every saved anchor to
+        // its original Git tree. A completed PR has no live suggestion target.
+        return Ok(Comparison {
+            base_oid,
+            head_oid,
+            repository: None,
+            live: false,
+        });
+    }
     let repository = PullGit::open(server, repo, pull.head_repository).await.ok();
     let current = repository
         .as_ref()
         .and_then(|repository| current_branches(repository, pull));
     let live = current.is_some();
-    let (base_tip, head_oid) = pull
-        .merge
-        .as_ref()
-        .map(|merge| (merge.base_oid.clone(), merge.head_oid.clone()))
-        .or(current)
+    let (base_tip, head_oid) = current
         .or_else(|| {
             repository.as_ref().map(|_| {
                 let (base, head) = pull.comparison_snapshot();
@@ -339,7 +348,7 @@ async fn list(
     let repo = repo.as_ref();
     let actor = app::actor(&principal)?;
     let pull = load_pull(&server, repo, app::number(id)?).await?;
-    let comparison = comparison(&server, repo, &pull).await?;
+    let comparison = comparison(&server, &principal, repo, &pull).await?;
     let path = params
         .path_hex
         .as_deref()
@@ -411,7 +420,7 @@ async fn navigation(
     let around = params.around.map(app::number).transpose()?;
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let pull = load_pull(&server, &repo, app::number(id)?).await?;
-    let comparison = comparison(&server, &repo, &pull).await?;
+    let comparison = comparison(&server, &principal, &repo, &pull).await?;
     let routed = app::repository_cell(&server, &repo)?;
     let summary = app::query_output(
         routed
@@ -446,7 +455,7 @@ async fn detail(
     let repo = repo.as_ref();
     let actor = app::actor(&principal)?;
     let pull = load_pull(&server, repo, app::number(id)?).await?;
-    let comparison = comparison(&server, repo, &pull).await?;
+    let comparison = comparison(&server, &principal, repo, &pull).await?;
     let thread = storage::thread(&server, repo, pull.number, app::number(thread)?)
         .await?
         .ok_or(Error::NotFound)?;
@@ -583,7 +592,7 @@ async fn create(
         {
             return Err(Error::RequestConflict);
         }
-        let comparison = comparison(&server, repo, &pull).await?;
+        let comparison = comparison(&server, &principal, repo, &pull).await?;
         let status = comparison_status(&existing, &comparison, None, None, false);
         let reaction = reactions::one(
             &server,
@@ -615,7 +624,7 @@ async fn create(
             )),
         ));
     }
-    let comparison = comparison(&server, repo, &pull).await?;
+    let comparison = comparison(&server, &principal, repo, &pull).await?;
     let mut prepared = prepare_thread(&server, pull.number, &actor, &comparison, input).await?;
     prepared.can_post_locked = app::membership(&server, &principal, repo)
         .await?
@@ -699,7 +708,7 @@ async fn edit(
         },
     )
     .await?;
-    let comparison = comparison(&server, repo, &pull).await?;
+    let comparison = comparison(&server, &principal, repo, &pull).await?;
     let status = comparison_status(&updated, &comparison, None, None, false);
     let reaction = reactions::one(
         &server,

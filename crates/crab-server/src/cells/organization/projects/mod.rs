@@ -4,15 +4,22 @@ use super::*;
 use crate::cells::repository::projects as planning;
 use std::collections::BTreeMap;
 
+mod access;
 mod commands;
 mod history;
 mod issue_creation;
+mod policy;
 mod reads;
 use crate::cells::planning as ledger;
+pub(crate) use access::{
+    AccessActor, AccessRole, AccessTarget, CollaboratorInspection, GetAccess, GetWorkspace,
+    InspectCollaborators, ProjectCaller, WorkspaceAccess,
+};
 pub(crate) use commands::{AttachmentCheck, Change, Command, Outcome, Request};
 pub(crate) use history::{GetHistory, HistoryQuery};
 pub(in crate::cells) use issue_creation::due;
 pub(crate) use issue_creation::{ResolveInput, ResolveIssue};
+pub(crate) use policy::{GetDefaultAccess, Preview as DefaultAccessPreview};
 pub(crate) use reads::{
     BulkSourceQuery, BulkSources, Get, GetAttachmentSources, Items, ItemsQuery, List, ListQuery,
     MatchedItems, ProjectKey, Sources, SourcesQuery, View, WorkSource,
@@ -59,6 +66,16 @@ pub(crate) struct Project {
     pub updated_at: u64,
     pub created_by: Uuid,
     pub creator_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_repository: Option<DefaultRepository>,
+    #[serde(default, skip_serializing_if = "access::Policy::is_default")]
+    access: access::Policy,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DefaultRepository {
+    pub id: Uuid,
+    pub ownership_epoch: u32,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -89,12 +106,8 @@ fn epoch(context: &Transaction<'_>, person: Uuid) -> Result<u64> {
         .transpose()?
         .ok_or(Error::AccessDenied)
 }
-fn can_manage(context: &Transaction<'_>, person: Uuid, project: &Project) -> Result<bool> {
-    let Some(member) = member(context, person)?.filter(|member| member.active) else {
-        return Ok(false);
-    };
-    Ok(member.role == Role::Owner
-        || (person == project.created_by && epoch(context, person)? == project.creator_epoch))
+fn can_manage(context: &Transaction<'_>, person: AccessActor, project: &Project) -> Result<bool> {
+    Ok(access::effective_role(context, person, project)? >= AccessRole::Write)
 }
 fn load(context: &Transaction<'_>, project: Uuid) -> Result<Option<Project>> {
     context
@@ -110,6 +123,10 @@ fn load(context: &Transaction<'_>, project: Uuid) -> Result<Option<Project>> {
                 || record.version == 0
                 || record.version > MAX_VERSION
                 || !record.definition.valid()
+                || !record.access.valid()
+                || record
+                    .default_repository
+                    .is_some_and(|default| default.id.is_nil())
             {
                 return Err(Error::Invalid("organization project record is invalid"));
             }
@@ -201,6 +218,10 @@ pub(in crate::cells::organization) fn handles(operation: u32, mutation: bool) ->
                 | Sources::ID
                 | GetAttachmentSources::ID
                 | BulkSources::ID
+                | GetAccess::ID
+                | GetDefaultAccess::ID
+                | GetWorkspace::ID
+                | InspectCollaborators::ID
         )
     }
 }
@@ -217,11 +238,12 @@ pub(in crate::cells::organization) fn authorize(
     }
     #[derive(Deserialize)]
     struct Person {
-        actor: Uuid,
+        actor: AccessActor,
+        project: Option<Uuid>,
     }
     let who: Person = serde_json::from_value(input.clone())?;
-    actor(who.actor)?;
-    let membership = member(context, who.actor)?;
+    actor(who.actor.id())?;
+    let membership = member(context, who.actor.id())?;
     if operation == Prepare::ID {
         return if membership.is_some_and(|member| member.active && member.role == Role::Owner) {
             Ok(())
@@ -234,24 +256,61 @@ pub(in crate::cells::organization) fn authorize(
         let request: Request = serde_json::from_value(input.clone())?;
         // Minimal, actor-bound terminal outcomes remain recoverable after access
         // removal. No protected project or source content passes this exception.
-        if membership.is_some() && commands::recover(context, &request)?.is_some() {
+        if commands::recover(context, &request)?
+            .is_some_and(|receipt| membership.is_some() || receipt != Outcome::RequestConflict)
+        {
             return Ok(());
         }
-        if request.cancel && membership.is_some() {
+        if request.cancel && (membership.is_some() || who.actor.guest()) {
             return Ok(());
         }
-        if !membership.is_some_and(|member| member.active) {
-            return Err(Error::AccessDenied);
-        }
-        if let Some(project) = request.command.project()
-            && let Some(project) = load(context, project)?
-            && !can_manage(context, who.actor, &project)?
+        let active = membership.as_ref().filter(|member| member.active);
+        if let Some(id) = request.command.project() {
+            let Some(project) = load(context, id)? else {
+                return Err(Error::AccessDenied);
+            };
+            let required = match request.command {
+                Command::LinkTeam { team, .. } => {
+                    if !teams::view(context, who.actor.id(), team)?
+                        .is_some_and(|team| team.can_manage)
+                    {
+                        return Err(Error::AccessDenied);
+                    }
+                    AccessRole::Admin
+                }
+                Command::SetAccess {
+                    target: AccessTarget::Team { .. },
+                    ..
+                } if active.is_none() => return Err(Error::AccessDenied),
+                Command::SetAccess { .. } | Command::SetDefaultRepository { .. } => {
+                    AccessRole::Admin
+                }
+                Command::Edit { archived, .. } if archived != project.archived => AccessRole::Admin,
+                _ => AccessRole::Write,
+            };
+            if access::effective_role(context, who.actor, &project)? < required {
+                return Err(Error::AccessDenied);
+            }
+        } else if active.is_none()
+            || (matches!(request.command, Command::SetDefaultAccess { .. })
+                && !active.is_some_and(|member| member.role == Role::Owner))
         {
             return Err(Error::AccessDenied);
         }
         return Ok(());
     }
-    if !membership.is_some_and(|member| member.active) {
+    let active = membership.is_some_and(|member| {
+        member.active && (operation != GetDefaultAccess::ID || member.role == Role::Owner)
+    });
+    let guest = who.actor.guest() && !matches!(operation, GetDefaultAccess::ID);
+    if !(active || guest) {
+        return Err(Error::AccessDenied);
+    }
+    if !matches!(operation, Get::ID | Items::ID | GetAccess::ID)
+        && let Some(id) = who.project
+        && let Some(project) = load(context, id)?
+        && access::effective_role(context, who.actor, &project)? == AccessRole::None
+    {
         return Err(Error::AccessDenied);
     }
     Ok(())

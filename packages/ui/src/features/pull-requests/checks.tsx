@@ -114,7 +114,7 @@ export function CheckRuns({
   oid,
   selected,
   before,
-  fork,
+  scopeToPull,
   githubActionsRef,
   candidate = false,
 }: {
@@ -123,11 +123,11 @@ export function CheckRuns({
   oid: string;
   selected?: number;
   before?: number;
-  fork?: boolean;
+  scopeToPull?: boolean;
   githubActionsRef?: string | null;
   candidate?: boolean;
 }) {
-  const scope = fork ? String(pull) : undefined;
+  const scope = scopeToPull ? String(pull) : undefined;
   const page = useRequest<CheckPage>(
     endpoint(repo, `commits/${oid}/check-runs`, {
       limit: "50",

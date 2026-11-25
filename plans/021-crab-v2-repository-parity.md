@@ -15,13 +15,23 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
 - Protected merge checks direct reviewer grants, evaluates same-name statuses
   and check runs together, leases both refs and reconciles with a durable receipt.
   The prior tag's pending records still use their tagged retry contract.
+- Merged pull requests retain access to check runs and commit statuses for
+  the exact reviewed head and, when published, the tested candidate. The
+  Checks tab separates these commits after squash or rebase and branch
+  cleanup. Files changed, inline review navigation, and paginated original
+  commits use the pre-merge comparison while its objects remain in storage.
+  Commit links open individual diffs within the recorded PR range. The active
+  v2 inventory preserves the original objects through pack replacement and
+  recovery-history pruning.
 - Writers can restore a missing head branch from a completed pull request.
   The panel shows the saved commit. Publication checks the current source
   repository, write grant and ref rules, and requires the branch name to be
   unused. Git objects must still be retained. Completed PRs can also delete
   a head that still matches the recorded commit. Current protection and open
-  base or head dependencies can prevent deletion. Automatic cleanup after
-  merge and retargeting dependent PRs remain open.
+  base or head dependencies can prevent deletion. The source repository can
+  opt in to automatic cleanup after merge. For a same-repository merged PR,
+  cleanup can move eligible dependent PRs to the recorded base before deleting
+  the old branch.
 - Reopening a closed PR checks both branch names under publication leases,
   including through the bulk and direct update paths. A rejected reopen rolls
   back its comment or other bulk edits in the same native transaction.
@@ -48,6 +58,8 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   and repository-scoped attachments.
 - Writers can apply selected suggestions across several files in one commit.
   The head, comment versions, file blobs, and line ranges are checked before publication.
+  The originating browser tab retains the exact request across reloads, so a
+  writer can recover its commit after a lost reply and a later head advance.
 - Browser creation provisions empty private repositories in personal and
   organization namespaces. Organization owners inherit current Admin access.
   Retrying setup recovers the same catalog UUID after a lost response.
@@ -130,7 +142,10 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   scoped to the operator's repository, workflow, and branch binding. Candidate
   checkout and check results use the exact queued SHA. Signed outbound Git and
   PR webhooks include exact head changes on open PRs, including updates from
-  private forks. Live GitHub qualification remains open.
+  private forks. Review subscriptions deliver signed events for published
+  reviews, summary edits, and explicit dismissals with the reviewed commit
+  and exact review revision. Private draft saves generate no delivery.
+  Live GitHub qualification remains open.
 - Repository admins can configure fast-forward, merge commit, squash and rebase.
   Squash and rebase use the protected merge and retry path. Rebase compares the
   final tree with the three-way merge result before publishing.
@@ -171,6 +186,9 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   classic protections and matching repository or organization branch rulesets.
   The effective policy applies when preparing candidates and at Git publication,
   including retries of unpublished direct merges.
+  On required branches, writers can request **Merge when ready**. A durable
+  request waits for the exact head to pass current reviews and checks before
+  receiving a queue position and undergoing candidate CI.
   Required workflows can start automatically within the configured build limit.
   Candidate checks show the bound run and its GitHub Actions link. Repository
   settings choose merge commit, squash, or rebase for queued changes while
@@ -195,7 +213,9 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   approvals before merge publication. Ready PR creation and transitions out
   of draft request owners and deliver deduplicated inbox notifications.
   The repository file browser links ownership to the rule at the displayed
-  commit. Verified email owner lookup remains open.
+  commit. Merged PRs show ownership from the saved comparison and open the
+  exact policy text after branch cleanup. Verified email owner lookup remains
+  open.
 
 - Team maintainers can distribute review requests by repository-scoped
   rotation or fewest open requests and exclude selected members from both

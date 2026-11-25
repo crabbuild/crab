@@ -40,8 +40,9 @@ pub(crate) use invitations::{
     InvitationKey, InvitationState, InvitationView, Invite, InviteInput, ListInvitations,
 };
 pub(crate) use reads::{
-    ActivityQuery, Caller, Collection, FindMembers, GetMember, GetOrganization, ListActivity,
-    ListMembers, MemberKey, Page, PageCursor, PageQuery, PeopleQuery,
+    ActivityQuery, Caller, Collection, FindMembers, GetMember, GetOrganization, InspectMemberships,
+    ListActivity, ListMembers, MemberKey, MembershipInspection, Page, PageCursor, PageQuery,
+    PeopleQuery,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -210,6 +211,11 @@ pub(crate) enum Action {
         member_creation: bool,
     },
     RepositoryPolicyChanged,
+    ProjectPolicyChanged {
+        before: projects::AccessRole,
+        after: projects::AccessRole,
+        affected_projects: usize,
+    },
     Edited {
         name: bool,
         description: bool,
@@ -374,6 +380,7 @@ pub(in crate::cells) fn authorize(
         (GetOrganization::ID | ListMembers::ID | FindMembers::ID, false) => false,
         (
             GetMember::ID
+            | InspectMemberships::ID
             | ListActivity::ID
             | ListInvitations::ID
             | FindInvitations::ID
@@ -464,6 +471,12 @@ pub(in crate::cells) fn dispatch_read(
         }
         projects::GetPreparation::ID => invoke_read::<projects::GetPreparation>(context, input),
         projects::GetHistory::ID => invoke_read::<projects::GetHistory>(context, input),
+        projects::GetAccess::ID => invoke_read::<projects::GetAccess>(context, input),
+        projects::GetDefaultAccess::ID => invoke_read::<projects::GetDefaultAccess>(context, input),
+        projects::GetWorkspace::ID => invoke_read::<projects::GetWorkspace>(context, input),
+        projects::InspectCollaborators::ID => {
+            invoke_read::<projects::InspectCollaborators>(context, input)
+        }
         projects::List::ID => invoke_read::<projects::List>(context, input),
         development::List::ID => invoke_read::<development::List>(context, input),
         development::Get::ID => invoke_read::<development::Get>(context, input),
@@ -524,6 +537,7 @@ pub(in crate::cells) fn dispatch_read(
         ListMembers::ID => invoke_read::<ListMembers>(context, input),
         FindMembers::ID => invoke_read::<FindMembers>(context, input),
         GetMember::ID => invoke_read::<GetMember>(context, input),
+        InspectMemberships::ID => invoke_read::<InspectMemberships>(context, input),
         ListActivity::ID => invoke_read::<ListActivity>(context, input),
         GetInvitation::ID => invoke_read::<GetInvitation>(context, input),
         ListInvitations::ID => invoke_read::<ListInvitations>(context, input),

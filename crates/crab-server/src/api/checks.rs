@@ -339,7 +339,9 @@ async fn create(
         return Ok((StatusCode::CREATED, Json(detail_view(&run, &output)?)));
     }
 
-    input.head_sha = scope.require_commit(&server, repo, parsed_oid).await?;
+    input.head_sha = scope
+        .require_commit(&server, repo, parsed_oid, statuses::CommitAccess::Write)
+        .await?;
     if !principal.can_write(repo.id) {
         return Err(Error::CheckPermission);
     }
@@ -367,7 +369,12 @@ async fn list(
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
     let oid = statuses::CommitScope { pull: params.pull }
-        .require_commit(&server, repo, statuses::parse_oid(&oid)?)
+        .require_commit(
+            &server,
+            repo,
+            statuses::parse_oid(&oid)?,
+            statuses::CommitAccess::Read,
+        )
         .await?;
     let limit = params.limit.unwrap_or(30);
     if !(1..=50).contains(&limit)
@@ -417,7 +424,12 @@ async fn detail(
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
     let oid = scope
-        .require_commit(&server, repo, statuses::parse_oid(&oid)?)
+        .require_commit(
+            &server,
+            repo,
+            statuses::parse_oid(&oid)?,
+            statuses::CommitAccess::Read,
+        )
         .await?;
     app::actor(&principal)?;
     let routed = crate::app::repository_cell(&server, repo)?;
@@ -493,7 +505,9 @@ async fn edit(
         return Ok(Json(detail_view(&run, &output)?));
     }
 
-    let oid = scope.require_commit(&server, repo, parsed_oid).await?;
+    let oid = scope
+        .require_commit(&server, repo, parsed_oid, statuses::CommitAccess::Write)
+        .await?;
     if !principal.can_write(repo.id) {
         return Err(Error::CheckPermission);
     }

@@ -40,12 +40,7 @@ pub(super) async fn change_base(
             ])
             .await;
         let reference = format!("refs/heads/{branch}");
-        let option =
-            format!("!!document.querySelector('#change-pull-base option[value=\"{reference}\"]')");
-        browser.run(&["wait", "--fn", &option]).await;
-        browser
-            .run(&["select", "#change-pull-base", &reference])
-            .await;
+        browser.choose_select("#change-pull-base", &reference).await;
         browser.run(&["wait", "--text", "2 changed files"]).await;
         let preview = browser
             .run(&["get", "text", "[aria-label='New comparison']"])

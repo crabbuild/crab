@@ -6,6 +6,7 @@ use std::{
 use axum::{
     Extension, Json, Router,
     extract::{Path, State},
+    response::{IntoResponse, Response},
     routing::get,
 };
 use crab_remote_git::{
@@ -13,9 +14,11 @@ use crab_remote_git::{
     Revision, TreeChange,
 };
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     RepositoryAccess,
+    api::read_admission,
     app::{self, Error, Membership, Result},
     auth::Principal,
     cells::{
@@ -38,6 +41,7 @@ use super::{
 
 mod file;
 mod patterns;
+mod saved;
 
 const FILES: [&str; 3] = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"];
 const MAX_BYTES: u64 = 3 * 1024 * 1024;
@@ -52,7 +56,8 @@ pub(super) struct Report {
     invalid_lines: usize,
     groups: Vec<Group>,
     affected_paths: usize,
-    missing_paths: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    missing_paths: Option<usize>,
     problem: Option<&'static str>,
 }
 
@@ -60,12 +65,59 @@ impl Report {
     pub(super) fn unavailable() -> Self {
         Self {
             problem: Some("Code owners could not be evaluated for this comparison."),
+            missing_paths: Some(0),
             ..Self::default()
         }
     }
 
     pub(super) fn satisfied(&self) -> bool {
-        self.missing_paths == 0 && self.problem.is_none()
+        self.missing_paths == Some(0) && self.problem.is_none()
+    }
+
+    fn coverage(
+        &mut self,
+        groups: Vec<MatchedRule>,
+        owners: Option<&BTreeMap<String, ResolvedOwner>>,
+    ) {
+        self.missing_paths = owners.map(|_| 0);
+        for group in groups {
+            let (approved, has_eligible_owner) = match owners {
+                Some(owners) => {
+                    let mut eligible = group
+                        .rule
+                        .owners
+                        .iter()
+                        .filter_map(|owner| owners.get(owner))
+                        .peekable();
+                    let has_owner = eligible.peek().is_some();
+                    (Some(eligible.any(|owner| owner.approved)), Some(has_owner))
+                }
+                None => (None, None),
+            };
+            self.affected_paths += group.affected;
+            if approved == Some(false)
+                && let Some(missing) = &mut self.missing_paths
+            {
+                *missing += group.affected;
+            }
+            self.groups.push(Group {
+                line: group.rule.line,
+                owners: group
+                    .rule
+                    .owners
+                    .into_iter()
+                    .take(8)
+                    .map(|owner| owner.chars().take(160).collect())
+                    .collect(),
+                paths: group.paths,
+                affected: group.affected,
+                approved,
+                has_eligible_owner,
+            });
+        }
+        self.groups
+            .sort_by_key(|group| (group.approved, group.line));
+        self.groups.truncate(MAX_GROUPS_SHOWN);
     }
 }
 
@@ -75,8 +127,10 @@ struct Group {
     owners: Vec<String>,
     paths: Vec<String>,
     affected: usize,
-    approved: bool,
-    has_eligible_owner: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approved: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_eligible_owner: Option<bool>,
 }
 
 pub(super) fn routes() -> Router<Arc<Server>> {
@@ -85,41 +139,71 @@ pub(super) fn routes() -> Router<Arc<Server>> {
             "/api/repos/{owner}/{name}/pulls/{number}/codeowners",
             get(get_owners),
         )
+        .route(
+            "/api/repos/{owner}/{name}/pulls/{number}/codeowners/source",
+            get(saved::source),
+        )
         .route("/api/repos/{owner}/{name}/file-codeowners", get(file::show))
 }
 
 async fn get_owners(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
-    Path((owner, name, number)): Path<(String, String, u64)>,
-) -> Result<Json<Report>> {
-    let repo = app::repository(&server, &principal, &(owner, name))?;
-    let pull = storage::pull(&server, &repo, app::number(number)?)
+    Path(address): Path<(String, String, u64)>,
+) -> std::result::Result<Response, Response> {
+    let admission = read_admission::acquire_bulk(&server).map_err(|_| read_admission::busy())?;
+    let (repo, pull) = load_pull(&server, &principal, address)
+        .await
+        .map_err(IntoResponse::into_response)?;
+    let report = if let Some(merge) = &pull.merge {
+        saved::coverage(&server, &principal, &repo, &pull, merge).await?
+    } else {
+        live_report(&server, &principal, &repo, &pull)
+            .await
+            .map_err(IntoResponse::into_response)?
+    };
+    Ok(read_admission::retain(
+        Json(report).into_response(),
+        admission,
+    ))
+}
+
+async fn load_pull(
+    server: &Server,
+    principal: &Principal,
+    (owner, name, number): (String, String, u64),
+) -> Result<(Arc<Repository>, PullRequest)> {
+    let repo = app::repository(server, principal, &(owner, name))?;
+    let pull = storage::pull(server, &repo, app::number(number)?)
         .await?
         .ok_or(Error::NotFound)?;
-    let git = PullGit::open(&server, &repo, pull.head_repository).await?;
-    let tips = pull
-        .merge
-        .as_ref()
-        .map(|merge| (merge.base_oid.clone(), merge.head_oid.clone()))
-        .or_else(|| git.tips(&pull.base_ref, &pull.head_ref));
-    let Some((base, head)) = tips else {
-        return Ok(Json(Report::unavailable()));
+    Ok((repo, pull))
+}
+
+async fn live_report(
+    server: &Server,
+    principal: &Principal,
+    repo: &Repository,
+    pull: &PullRequest,
+) -> Result<Report> {
+    let git = PullGit::open(server, repo, pull.head_repository).await?;
+    let Some((base, head)) = git.tips(&pull.base_ref, &pull.head_ref) else {
+        return Ok(Report::unavailable());
     };
-    let membership = app::membership(&server, &principal, &repo).await?;
-    let eligible = membership.merge_reviewers(&server).await?;
+    let membership = app::membership(server, principal, repo).await?;
+    let eligible = membership.merge_reviewers(server).await?;
     let report = evaluate(
-        &server,
-        &repo,
+        server,
+        repo,
         &git,
         &membership,
         &eligible,
-        &pull,
+        pull,
         (&base, &head),
     )
     .await?;
-    app::membership(&server, &principal, &repo).await?;
-    Ok(Json(report))
+    app::membership(server, principal, repo).await?;
+    Ok(report)
 }
 
 pub(super) async fn evaluate(
@@ -152,37 +236,7 @@ pub(super) async fn evaluate(
         &approvals,
     )
     .await?;
-    for group in groups {
-        let eligible = group
-            .rule
-            .owners
-            .iter()
-            .filter_map(|owner| owners.get(owner));
-        let has_eligible_owner = eligible.clone().next().is_some();
-        let approved = eligible.into_iter().any(|owner| owner.approved);
-        report.affected_paths += group.affected;
-        if !approved {
-            report.missing_paths += group.affected;
-        }
-        report.groups.push(Group {
-            line: group.rule.line,
-            owners: group
-                .rule
-                .owners
-                .into_iter()
-                .take(8)
-                .map(|owner| owner.chars().take(160).collect())
-                .collect(),
-            paths: group.paths,
-            affected: group.affected,
-            approved,
-            has_eligible_owner,
-        });
-    }
-    report
-        .groups
-        .sort_by_key(|group| (group.approved, group.line));
-    report.groups.truncate(MAX_GROUPS_SHOWN);
+    report.coverage(groups, Some(&owners));
     Ok(report)
 }
 
@@ -278,16 +332,8 @@ async fn match_comparison(
             .base
             .snapshot(&Revision::parse(base)?, &operation)
             .await?;
-        let Some(policy) = load_policy(&base, &operation).await? else {
+        let Some(text) = report_policy(&mut report, load_policy(&base, &operation).await?) else {
             return Ok(None);
-        };
-        report.path = Some(policy.path);
-        let text = match policy.text {
-            Ok(text) => text,
-            Err(problem) => {
-                report.problem = Some(problem);
-                return Ok(None);
-            }
         };
         let revision = Revision::parse(head)?;
         if let Some(fork) = &git.fork {
@@ -311,7 +357,28 @@ async fn match_comparison(
         Ok(Some((text, delta.changes)))
     }
     .await;
-    let Some((text, changes)) = operation.finish(loaded).await.map_err(crate::Error::from)? else {
+    let loaded = operation.finish(loaded).await.map_err(crate::Error::from)?;
+    match_loaded(report, loaded, cancel).await
+}
+
+fn report_policy(report: &mut Report, policy: Option<PolicySource>) -> Option<String> {
+    let policy = policy?;
+    report.path = Some(policy.path);
+    match policy.text {
+        Ok(text) => Some(text),
+        Err(problem) => {
+            report.problem = Some(problem);
+            None
+        }
+    }
+}
+
+async fn match_loaded(
+    mut report: Report,
+    loaded: Option<(String, Vec<TreeChange>)>,
+    cancel: CancellationToken,
+) -> Result<(Report, Vec<MatchedRule>)> {
+    let Some((text, changes)) = loaded else {
         return Ok((report, Vec::new()));
     };
     let matched = tokio::task::spawn_blocking(move || match_rules(&text, &changes, &cancel))
@@ -387,7 +454,7 @@ struct MatchedRule {
 fn match_rules(
     text: &str,
     changes: &[TreeChange],
-    cancel: &tokio_util::sync::CancellationToken,
+    cancel: &CancellationToken,
 ) -> std::result::Result<(usize, Vec<MatchedRule>), &'static str> {
     let parsed = patterns::Rules::parse(text)?;
     let mut matches = BTreeMap::<usize, (usize, Vec<String>)>::new();

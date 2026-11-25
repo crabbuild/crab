@@ -392,9 +392,11 @@ export function History({
 export function CommitList({
   repo,
   commits,
+  commitHref,
 }: {
   repo: Pick<Repository, "owner" | "name">;
   commits: Commit[];
+  commitHref?: (oid: string) => string;
 }) {
   return (
     <ol className="commit-list">
@@ -408,10 +410,13 @@ export function CommitList({
             <div>
               <Link
                 className="commit-subject"
-                href={repoHref(repo, {
-                  view: "commit",
-                  rev: commit.oid,
-                })}
+                href={
+                  commitHref?.(commit.oid) ??
+                  repoHref(repo, {
+                    view: "commit",
+                    rev: commit.oid,
+                  })
+                }
               >
                 {subject || "Untitled commit"}
               </Link>
@@ -420,9 +425,13 @@ export function CommitList({
                 {date(commit.author_seconds)}
               </p>
             </div>
-            <Link className="oid" href={repoHref(repo, { rev: commit.oid })}>
-              {short(commit.oid)}
-            </Link>
+            {commitHref ? (
+              <code className="oid">{short(commit.oid)}</code>
+            ) : (
+              <Link className="oid" href={repoHref(repo, { rev: commit.oid })}>
+                {short(commit.oid)}
+              </Link>
+            )}
           </li>
         );
       })}

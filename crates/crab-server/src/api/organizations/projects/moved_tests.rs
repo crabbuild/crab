@@ -270,6 +270,19 @@ async fn project_keeps_planning_fields_and_edits_after_the_issue_moves() {
     assert!(hidden["source_repository"].is_null());
     assert!(hidden["repository"].is_null());
     assert!(hidden["work"].is_null());
+    let history = h
+        .json(&format!("{root}/{project}/history?after=0"), &alice)
+        .await;
+    for event in history["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["target"]["id"] == json!(item))
+    {
+        assert_eq!(event["target"]["restricted"], true);
+        assert!(event["target"]["source"].is_null());
+        assert_eq!(event["changes"], json!([]));
+    }
     let choices = h.json(&filters, &alice).await;
     assert!(
         choices["items"]

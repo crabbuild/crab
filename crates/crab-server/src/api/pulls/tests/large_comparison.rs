@@ -414,7 +414,7 @@ async fn native_large_pull_opens_a_file_and_publishes_an_exact_review_anchor() {
     browser
         .run(&[
             "wait", "--fn",
-            "document.activeElement?.id === 'review-thread-2' && document.getElementById('review-thread-2')?.closest('details[open]') !== null",
+            "document.activeElement?.id === 'review-thread-2' && document.activeElement.closest('.inline-review-outdated[data-state=\"open\"]') !== null",
         ])
         .await;
     drop(browser);
@@ -599,7 +599,7 @@ async fn commit_suggestions_across_pages(
     git(source, &["commit", "-m", "Add later work"]).await;
     let later = git(source, &["rev-parse", "HEAD"]).await;
     assert!(with_http_token(source, token, &["push", remote, "HEAD:refs/heads/feature"]).await);
-    click(&browser, "button", "Refresh").await;
+    browser.run(&["reload"]).await;
     browser.run(&["wait", "--text", "517 changed files"]).await;
     click(&browser, "button", "Resume suggestion commit").await;
     click(&browser, "button", "Retry suggestion commit").await;

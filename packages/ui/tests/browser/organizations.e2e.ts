@@ -8,6 +8,7 @@ import type {
   MemberRepositoryAccess,
   OrganizationMembership,
   Organization,
+  OrganizationProjectPolicy,
   OrganizationRole,
 } from "@/lib/contracts";
 
@@ -24,6 +25,7 @@ async function fixture(page: Page) {
     writes: unknown[];
     fail: boolean;
     metadataVisible: boolean;
+    projectPolicy: OrganizationProjectPolicy;
     policy: {
       version: number;
       member_creation: boolean;
@@ -51,6 +53,12 @@ async function fixture(page: Page) {
     writes: [],
     fail: false,
     metadataVisible: true,
+    projectPolicy: {
+      version: 0,
+      role: "read",
+      affected_projects: 1,
+      scope: "fixture-scope",
+    },
     policy: { version: 0, member_creation: false, baseline: null },
   };
   await page.route("**/api/**", async (route) => {
@@ -86,6 +94,29 @@ async function fixture(page: Page) {
         });
     }
     const base = `/api/organizations/${id}`;
+    if (path === `${base}/project-policy`)
+      return route.fulfill({ json: state.projectPolicy });
+    if (path === `${base}/projects/commands` && method === "POST") {
+      const { command } = request.postDataJSON();
+      expect(command.kind).toBe("set_default_access");
+      const { version, scope } = state.projectPolicy;
+      if (command.version !== version || command.scope !== scope)
+        return route.fulfill({
+          json: {
+            outcome: "rejected",
+            reason:
+              "The default role or affected Projects changed. Review the current settings before saving.",
+          },
+        });
+      state.projectPolicy = {
+        ...state.projectPolicy,
+        role: command.role,
+        version: version + 1,
+      };
+      return route.fulfill({
+        json: { outcome: "applied", project: null, version: version + 1 },
+      });
+    }
     if (path === `${base}/repository-policy`) {
       if (method === "PUT") {
         const input = request.postDataJSON();
@@ -236,6 +267,230 @@ test("organization owners save repository policy from settings", async ({
     baseline: "read",
   });
   await expectNoAccessibilityViolations(page);
+});
+
+test("organization Project policy requires a new confirmation when the inheriting set changes", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  await page.goto(`${root}?tab=settings`);
+  const access = page.getByRole("combobox", { name: "Default Project access" });
+  const review = page.getByRole("button", { name: "Review change" });
+  const dialog = page.getByRole("dialog", {
+    name: "Change default Project access?",
+  });
+  const confirm = dialog.getByRole("button", {
+    name: "Change default to No access",
+  });
+
+  await access.click();
+  await page.getByRole("option", { name: "No access", exact: true }).click();
+  await review.click();
+  await expect(dialog).toContainText("This affects 1 existing Project");
+  expect(state.writes).toHaveLength(0);
+  state.projectPolicy = {
+    ...state.projectPolicy,
+    affected_projects: 2,
+    scope: "updated-scope",
+  };
+  await confirm.click();
+  await expect(
+    page.getByRole("region", { name: "Project policy" }).getByRole("alert"),
+  ).toContainText("affected Projects changed");
+  await expect(access).toHaveText("Read");
+  expect(state.projectPolicy.role).toBe("read");
+
+  await access.click();
+  await page.getByRole("option", { name: "No access", exact: true }).click();
+  await review.click();
+  await expect(dialog).toContainText("This affects 2 existing Projects");
+  await confirm.click();
+  await expect.poll(() => state.projectPolicy.role).toBe("none");
+  await expect(access).toHaveText("No access");
+  await expect(access).toBeEnabled();
+  await expect(review).toBeDisabled();
+});
+
+test("owners can find outside repository collaborators and open the access editor", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  let reads = 0;
+  await page.route(
+    `**/api/organizations/${id}/outside-collaborators*`,
+    (route) => {
+      reads++;
+      const query = new URL(route.request().url()).searchParams;
+      return route.fulfill({
+        json: {
+          items: query.get("q")
+            ? [
+                {
+                  collaborator: "visiting-engineer",
+                  name: "Visiting engineer",
+                  profile: null,
+                  owner: "team",
+                  repository: "library",
+                  repository_id: "01900000-0000-7000-8000-000000000015",
+                  access: "triage",
+                },
+              ]
+            : [],
+          next: query.get("q") ? null : "page-two",
+          revision: 1,
+        },
+      });
+    },
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(root);
+  await page
+    .getByRole("link", { name: "Outside collaborators", exact: true })
+    .click();
+  await expect(
+    page.getByText("No outside collaborator grants on this page."),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Next page" })).toBeEnabled();
+  await page
+    .getByRole("searchbox", { name: "Find outside collaborators" })
+    .fill("library");
+  await page
+    .getByRole("search", { name: "Outside collaborator search" })
+    .getByRole("button", { name: "Search", exact: true })
+    .click();
+  const grants = page.getByRole("list", {
+    name: "Outside collaborator grants",
+  });
+  await expect(grants).toContainText("Visiting engineer");
+  await expect(grants).toContainText("Triage");
+  await expect(
+    grants.getByRole("link", {
+      name: "Manage library access for Visiting engineer",
+    }),
+  ).toHaveAttribute("href", "/team/library/settings/access");
+  await expectNoAccessibilityViolations(page);
+  await page.reload();
+  await expect(
+    page.getByRole("searchbox", { name: "Find outside collaborators" }),
+  ).toHaveValue("library");
+  await expect(grants).toContainText("Visiting engineer");
+  const ownerReads = reads;
+  state.role = "member";
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "Organization members" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Outside collaborators", exact: true }),
+  ).toHaveCount(0);
+  expect(reads).toBe(ownerReads);
+});
+
+test("bulk outside removal reviews the exact effect and recovers a lost reply after reload", async ({
+  page,
+}) => {
+  await fixture(page);
+  const base = `/api/organizations/${id}/outside-collaborators`;
+  const person = "a".repeat(64);
+  const plan = {
+    organization_revision: 1,
+    catalog_revision: 6,
+    collaborators: [person],
+    confirmation: "b".repeat(64),
+  };
+  const impact = { collaborators: 1, grants: 2, repositories: 2 };
+  const calls: unknown[] = [];
+  let committed = false;
+  await page.route(`**${base}/removal-preview`, async (route) => {
+    expect(route.request().postDataJSON()).toEqual({ collaborators: [person] });
+    await route.fulfill({
+      json: { plan, impact, repository_names: ["library", "tools"] },
+    });
+  });
+  await page.route(`**${base}/removals`, async (route) => {
+    calls.push(route.request().postDataJSON());
+    if (committed) return route.fulfill({ json: impact });
+    committed = true;
+    await route.abort();
+  });
+  await page.route(new RegExp(`${base}(?:\\?.*)?$`), (route) =>
+    route.fulfill({
+      json: {
+        items: committed
+          ? []
+          : ["library", "tools"].map((repository) => ({
+              collaborator: person,
+              repository,
+              owner: "team",
+              repository_id: repository,
+              name: "Visiting engineer",
+              profile: null,
+              access: "read",
+            })),
+        next: null,
+        revision: 1,
+      },
+    }),
+  );
+  await page.goto(`${root}?tab=people&people=outside`);
+  await page
+    .getByRole("checkbox", { name: "Select Visiting engineer from library" })
+    .check();
+  await expect(
+    page.getByRole("checkbox", { name: "Select Visiting engineer from tools" }),
+  ).toBeChecked();
+  await page
+    .getByRole("button", { name: "Remove from all repositories" })
+    .click();
+  const dialog = page.getByRole("dialog", {
+    name: "Remove outside collaborators?",
+  });
+  await expect(dialog).toContainText(
+    "Remove 2 direct grants for 1 collaborator across 2 repositories.",
+  );
+  await expect(
+    dialog.getByRole("list", { name: "Affected repositories" }),
+  ).toContainText("tools");
+  expect(calls).toEqual([]);
+  await dialog
+    .getByRole("button", { name: "Remove outside collaborators" })
+    .click();
+  await expect(page.getByRole("alert")).toContainText("The response was lost");
+  await page.reload();
+  await page.getByRole("button", { name: "Retry removal" }).click();
+  await expect(
+    page.getByText("Removed 2 direct grants across 2 repositories."),
+  ).toBeVisible();
+  expect(calls).toEqual([plan, plan]);
+  await page.reload();
+  await expect(
+    page.getByText("No matching outside collaborator grants."),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry removal" })).toHaveCount(
+    0,
+  );
+});
+
+test("audit filters submit the selected action with a repository name", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.route(`**/api/organizations/${id}/audit-log*`, (route) =>
+    route.fulfill({ json: { items: [], next: null } }),
+  );
+  await page.goto(root);
+  await page.getByRole("link", { name: "Audit log", exact: true }).click();
+  const action = page.locator("#audit-action");
+  await action.click();
+  await page
+    .getByRole("option", { name: "Repository access changed", exact: true })
+    .click();
+  await page.locator("#audit-repository").fill("library");
+  await expect(action).toHaveText("Repository access changed");
+  await page.getByRole("button", { name: "Apply filters" }).click();
+  await expect(page).toHaveURL(
+    /action=repository_access_changed.*repository=library/,
+  );
 });
 
 test("owners see identity-provider management and blocked access in People", async ({

@@ -132,6 +132,8 @@ struct Enable {
     #[serde(default)]
     queue: bool,
     #[serde(default)]
+    when_ready: bool,
+    #[serde(default)]
     message: String,
 }
 
@@ -141,7 +143,11 @@ struct Disable {
     request_id: Uuid,
 }
 
-async fn current(server: &Server, repo: &Repository, pull: u64) -> Result<Option<cell::State>> {
+pub(super) async fn current(
+    server: &Server,
+    repo: &Repository,
+    pull: u64,
+) -> Result<Option<cell::State>> {
     let routed = app::repository_cell(server, repo)?;
     app::query_output(
         routed
@@ -190,7 +196,8 @@ async fn view(
         && pull.state == PullState::Open
         && pull.merge_pending.is_none()
         && !settings::load_lifecycle(server, repo).await?.archived;
-    let can_enqueue = if available && (queue_required || settings.merge_queue) {
+    let (can_enqueue, can_wait_for_queue) = if available && (queue_required || settings.merge_queue)
+    {
         let tips = match PullGit::open(server, repo, pull.head_repository).await {
             Ok(git) => git.tips(&pull.base_ref, &pull.head_ref),
             Err(Error::NotFound) => None,
@@ -200,25 +207,31 @@ async fn view(
             Some((base, head)) if base != head => {
                 let report =
                     queue_requirements(server, repo, pull, &grant, (&base, &head), None).await?;
-                !report.checks.is_empty()
-                    && report.satisfied
-                    && report.permits_method(settings.merge_queue_method)
+                let available = !report.checks.is_empty()
+                    && !report.updates_restricted
+                    && report.permits_method(settings.merge_queue_method);
+                (
+                    available && report.satisfied,
+                    available && queue_required && !report.satisfied,
+                )
             }
-            _ => false,
+            _ => (false, false),
         }
     } else {
-        false
+        (false, false)
     };
     Ok(Json(json!({
         "can_enable": settings.auto_merge && available && !queue_required,
         "can_enqueue": can_enqueue,
+        "can_wait_for_queue": can_wait_for_queue,
         "queue_method": settings.merge_queue_method,
         "queue_builds": settings.merge_queue_builds,
         "queue_timeout_minutes": settings.merge_queue_timeout_minutes,
         "can_disable": active && pull.merge_pending.is_none() && (can_write || super::same_author(&pull.author, &actor)),
         "request": state.map(|state| json!({"request_id": state.job.id, "method": state.job.method,
             "head_oid": state.job.head_oid, "scheduled_by": state.job.actor.name, "stopped": state.stopped,
-            "queue": state.job.queue.is_some(), "first": state.first,
+            "queue": state.job.queue.is_some(),
+            "waiting_for_queue": state.job.waiting_for_queue(), "first": state.first,
             "testing": state.ahead.is_some() && state.job.queue.and_then(|queue| queue.testing)
                 .is_some_and(|attempt| attempt.order_revision == state.order_revision)})),
     })))
@@ -258,6 +271,9 @@ async fn enable(
             "The merge queue prepares its own candidate and commit message",
         ));
     }
+    if input.when_ready && !input.queue {
+        return Err(Error::Invalid("Merge when ready requires the merge queue"));
+    }
     let message = |head: &str| {
         if input.queue {
             Ok(String::new())
@@ -282,7 +298,8 @@ async fn enable(
         if saved.job.actor.issuer != actor.issuer
             || saved.job.actor.subject != actor.subject
             || saved.job.method != input.method
-            || saved.job.queue.is_some() != input.queue
+            || saved.job.uses_queue() != input.queue
+            || saved.job.when_ready != input.when_ready
             || saved.job.head_oid != input.head_oid
             || saved.job.initial_base_oid != input.base_oid
             || saved.job.initial_version != input.version
@@ -293,7 +310,10 @@ async fn enable(
         return view(&server, &repo, &principal, &pull).await;
     }
     let _read = crate::api::read_admission::acquire_bulk(&server).map_err(|_| Error::MergeBusy)?;
-    let configured = merge_methods::load_for_ref(&server, &repo, &pull.base_ref).await?;
+    let (configured, queue_policy) = tokio::try_join!(
+        merge_methods::load_for_ref(&server, &repo, &pull.base_ref),
+        settings::queue_policy(&server, &repo, &pull.base_ref),
+    )?;
     let git = PullGit::open(&server, &repo, pull.head_repository).await?;
     if input.request_id.is_nil()
         || pull.version != input.version
@@ -306,6 +326,11 @@ async fn enable(
         return Err(Error::AutoMergeChanged);
     }
     if input.queue {
+        if input.when_ready && !queue_policy.required() {
+            return Err(Error::Invalid(
+                "Merge when ready is available on branches that require the merge queue",
+            ));
+        }
         let grant = app::membership(&server, &principal, &repo).await?;
         let report = queue_requirements(
             &server,
@@ -317,7 +342,9 @@ async fn enable(
         )
         .await?;
         report.require_method(input.method)?;
-        report.enforce()?;
+        if !input.when_ready || report.updates_restricted {
+            report.enforce()?;
+        }
         if report.checks.is_empty() {
             return Err(Error::MergeCandidateChecks);
         }
@@ -332,9 +359,7 @@ async fn enable(
         Change::Arm {
             queue: input.queue,
             configured_queue_required: settings::configured_queue_required(&repo, &pull.base_ref),
-            ruleset_queue_required: settings::queue_policy(&server, &repo, &pull.base_ref)
-                .await?
-                .ruleset,
+            ruleset_queue_required: queue_policy.ruleset,
             version: input.version,
             job: Job {
                 pull: number,
@@ -359,6 +384,7 @@ async fn enable(
                 comparison_revision: pull.retargeted_base.as_ref().map(|base| base.revision),
                 method: input.method,
                 message: message(&pull.head_ref)?,
+                when_ready: input.when_ready,
                 queue: None,
             },
         },
@@ -446,6 +472,9 @@ async fn durable_principal(
 
 fn matches_attempt(state: &cell::State, pending: &PullMerge) -> bool {
     let job = &state.job;
+    if job.waiting_for_queue() {
+        return false;
+    }
     let tested = pending
         .tested_candidate
         .then_some(pending.commit_oid.as_str());

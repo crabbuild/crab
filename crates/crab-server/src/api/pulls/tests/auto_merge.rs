@@ -11,6 +11,8 @@ const REPO: &str = "/api/repos/team/private";
 const PULL: &str = "/api/repos/team/private/pulls/1";
 const AUTO: &str = "/api/repos/team/private/pulls/1/auto-merge";
 
+mod deferred;
+
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduled_merge_waits_for_checks_and_disarms_after_revocation_and_head_movement() {
     let h = Harness::new(false).await;

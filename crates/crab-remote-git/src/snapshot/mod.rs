@@ -43,6 +43,11 @@ pub struct RemoteGitSnapshot {
     pub(crate) commit_graph: Option<Arc<CommitGraphIndex>>,
 }
 
+enum AheadHistory<'a> {
+    Page(&'a PageRequest),
+    Commit(ObjectId),
+}
+
 impl RemoteGitSnapshot {
     /// Return the pinned manifest generation.
     #[must_use]
@@ -111,9 +116,45 @@ impl RemoteGitSnapshot {
         operation: &OperationContext,
         base_operation: &OperationContext,
     ) -> Result<Page<Commit>> {
+        self.walk_ahead_history(base, AheadHistory::Page(page), operation, base_operation)
+            .await
+    }
+
+    /// Read a commit only if it is in the head-only history of two authorized snapshots.
+    /// The operations must belong to their respective snapshots. An excluded or
+    /// unreachable ID returns no commit without resolving it from the inventory.
+    pub async fn ahead_commit_across_captures(
+        &self,
+        base: &Self,
+        commit: ObjectId,
+        operation: &OperationContext,
+        base_operation: &OperationContext,
+    ) -> Result<Option<Commit>> {
+        let result = self
+            .walk_ahead_history(
+                base,
+                AheadHistory::Commit(commit),
+                operation,
+                base_operation,
+            )
+            .await?;
+        Ok(result.items.into_iter().next())
+    }
+
+    async fn walk_ahead_history(
+        &self,
+        base: &Self,
+        selection: AheadHistory<'_>,
+        operation: &OperationContext,
+        base_operation: &OperationContext,
+    ) -> Result<Page<Commit>> {
         self.ensure_operation(operation)?;
         base.ensure_operation(base_operation)?;
-        let (skip, order) = match page.after() {
+        let (limit, cursor, target) = match selection {
+            AheadHistory::Page(page) => (page.limit(), page.after(), None),
+            AheadHistory::Commit(oid) => (1, None, Some(oid)),
+        };
+        let (skip, order) = match cursor {
             Some(cursor) => {
                 let decoded = cursor.decode_ahead_history()?;
                 if decoded.start != self.commit_oid || decoded.base != base.commit_oid {
@@ -182,7 +223,7 @@ impl RemoteGitSnapshot {
             if shared {
                 continue;
             }
-            if traversed >= skip && items.len() == page.limit() {
+            if traversed >= skip && items.len() == limit {
                 has_next = true;
                 break;
             }
@@ -192,7 +233,7 @@ impl RemoteGitSnapshot {
             };
             let commit = &commit.value;
             queue_all_parents(&mut pending, commit, ordering_graph, operation).await?;
-            if traversed >= skip {
+            if traversed >= skip && target.is_none_or(|target| target == oid) {
                 operation
                     .charge(
                         BudgetDimension::ResponseBytes,
@@ -204,6 +245,9 @@ impl RemoteGitSnapshot {
                     source,
                 })?;
                 items.push(commit.clone());
+                if target.is_some() {
+                    break;
+                }
             }
             traversed = traversed.checked_add(1).ok_or(Error::LimitExceeded {
                 limit: "history commits",

@@ -18,7 +18,9 @@ pub(super) fn append(
         crate::cells::planning::Event {
             project: project.id,
             version: project.version,
-            actor: crate::cells::planning::Actor::Account { id: input.actor },
+            actor: crate::cells::planning::Actor::Account {
+                id: input.actor.id(),
+            },
             at_ms: context.now_ms(),
             target,
             changes: crate::cells::planning::changes(before, after),
@@ -28,7 +30,7 @@ pub(super) fn append(
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HistoryQuery {
-    pub actor: Uuid,
+    pub actor: AccessActor,
     pub project: Uuid,
     pub before: Option<u64>,
     pub after: Option<u64>,

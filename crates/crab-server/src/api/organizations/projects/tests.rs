@@ -6,6 +6,132 @@ use crate::cells::{
 use crate::test_support::http::Harness;
 use reqwest::Method;
 
+#[tokio::test]
+async fn organization_saved_view_settings_are_readable_by_members_and_editable_by_managers() {
+    let h = Harness::new(false).await;
+    let (organization, owner, member) =
+        crate::test_support::http::organizations::bootstrap(&h).await;
+    let alice = h.login().await;
+    let root = format!("/api/organizations/{organization}/projects");
+    let commands = format!("{root}/commands");
+    let project = Uuid::now_v7();
+    let response = h
+        .write(
+            Method::POST,
+            &commands,
+            &alice,
+            json!({"request_id":Uuid::now_v7(),"command":{
+                "kind":"create","id":project,"name":"Support triage","template":"board"
+            }}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(response["outcome"], "applied");
+    let path = format!("{root}/{project}");
+    let original = h.json(&path, &alice).await;
+    let view = &original["project"]["definition"]["views"][0]["id"];
+    let setup = h.server.cells().unwrap();
+    let address = Address::Organization(organization);
+    let ChangeOutcome::Applied(invitation) = app::command_output(
+        setup
+            .command::<Invite>(
+                address,
+                app::mutation_identity().unwrap(),
+                InviteInput {
+                    actor: owner,
+                    recipient: member,
+                    version: 0,
+                    role: Role::Member,
+                },
+            )
+            .await,
+    )
+    .unwrap() else {
+        panic!("Member invitation was rejected");
+    };
+    setup
+        .command::<DecideInvitation>(
+            address,
+            app::mutation_identity().unwrap(),
+            Decision {
+                actor: member,
+                version: invitation.version,
+                accept: true,
+            },
+        )
+        .await
+        .unwrap();
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    let column = |version: u64, limit: Value| {
+        json!({"request_id":Uuid::now_v7(),"command":{
+            "kind":"column_limit","project":project,"version":version,
+            "column":{"view":view,"group_by":"status","value":"Todo","limit":limit}
+        }})
+    };
+    assert_eq!(
+        h.write(Method::POST, &commands, &bob, column(1, json!(4)))
+            .await
+            .status(),
+        axum::http::StatusCode::FORBIDDEN
+    );
+    let write = column(1, json!(4));
+    let save = |body: Value| {
+        let (h, commands, alice) = (&h, &commands, &alice);
+        async move {
+            h.write(Method::POST, commands, alice, body)
+                .await
+                .error_for_status()
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let saved = save(write.clone()).await;
+    assert_eq!(
+        saved,
+        json!({"outcome":"applied","project":project,"version":2})
+    );
+    assert_eq!(save(write).await, saved);
+    let visible = h.json(&path, &bob).await;
+    assert_eq!(visible["can_manage"], false);
+    assert_eq!(
+        visible["project"]["definition"]["views"][0]["column_limits"],
+        json!({"status":{"Todo":4}})
+    );
+    assert_eq!(save(column(2, Value::Null)).await["outcome"], "applied");
+    assert!(
+        h.json(&path, &bob).await["project"]["definition"]["views"][0]
+            .get("column_limits")
+            .is_none()
+    );
+    let views = original["project"]["definition"]["views"]
+        .as_array()
+        .unwrap();
+    let reordered = views.iter().rev().cloned().collect::<Vec<_>>();
+    let order = reordered.iter().map(|view| &view["id"]).collect::<Vec<_>>();
+    let reorder = json!({"request_id":Uuid::now_v7(),"command":{
+        "kind":"reorder_views","project":project,"version":3,"order":order
+    }});
+    assert_eq!(
+        h.write(Method::POST, &commands, &bob, reorder.clone())
+            .await
+            .status(),
+        axum::http::StatusCode::FORBIDDEN
+    );
+    assert_eq!(save(reorder).await["outcome"], "applied");
+    assert_eq!(
+        h.json(&path, &bob).await["project"]["definition"]["views"],
+        json!(reordered)
+    );
+    h.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bulk_project_planning_rechecks_access_to_every_source() {
     let h = Harness::new(true).await;

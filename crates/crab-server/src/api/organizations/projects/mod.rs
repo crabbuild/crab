@@ -1,4 +1,4 @@
-use super::{actor, issue_types, read_error};
+use super::{actor, issue_types, read_error, target};
 use crate::{
     api::write::ResponseError,
     app::{self, Error, Result},
@@ -20,8 +20,14 @@ use axum::{
 use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 use uuid::Uuid;
+#[cfg(test)]
+mod access_tests;
+mod authority;
 mod history;
 mod issue_creation;
 #[cfg(test)]
@@ -33,9 +39,25 @@ mod work;
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new()
         .route("/api/organizations/{id}/projects", get(list))
+        .route(
+            "/api/organizations/{id}/projects/context",
+            get(authority::workspace),
+        )
+        .route(
+            "/api/organizations/{id}/project-policy",
+            get(default_access),
+        )
         .route("/api/organizations/{id}/projects/commands", post(change))
         .route("/api/organizations/{id}/projects/cancel", post(cancel))
         .route("/api/organizations/{id}/projects/{project}", get(detail))
+        .route(
+            "/api/organizations/{id}/projects/{project}/access",
+            get(access),
+        )
+        .route(
+            "/api/organizations/{id}/projects/{project}/collaborators",
+            get(authority::candidates),
+        )
         .route(
             "/api/organizations/{id}/projects/{project}/history",
             get(history::read),
@@ -54,6 +76,105 @@ pub(super) fn routes() -> Router<Arc<Server>> {
         )
         .layer(axum::extract::DefaultBodyLimit::max(96 * 1024))
 }
+async fn default_access(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<projects::DefaultAccessPreview>> {
+    let actor = actor(&server, &principal).await?;
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let preview = cells
+        .query::<projects::GetDefaultAccess>(
+            target(id)?,
+            None,
+            crate::cells::organization::Caller { actor },
+        )
+        .await
+        .map_err(read_error)?
+        .output;
+    app::account(&principal)?;
+    Ok(Json(preview))
+}
+async fn access(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((id, project)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>> {
+    let actor = actor(&server, &principal).await?;
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let read = || async {
+        let actor = authority::viewer(&server, &principal, id, actor).await?;
+        cells
+            .query::<projects::GetAccess>(
+                Address::Organization(id),
+                None,
+                projects::ProjectKey { actor, project },
+            )
+            .await
+            .map_err(read_error)?
+            .output
+            .ok_or(Error::NotFound)
+    };
+    let initial = read().await?;
+    let ids: Vec<_> = initial
+        .grants
+        .iter()
+        .filter_map(|grant| match grant.target {
+            projects::AccessTarget::Member { id } | projects::AccessTarget::Outside { id } => {
+                Some(id)
+            }
+            _ => None,
+        })
+        .collect();
+    if ids.is_empty() {
+        app::account(&principal)?;
+        return Ok(Json(serde_json::to_value(initial)?));
+    }
+    let profiles = app::query_output(
+        cells
+            .query::<crate::cells::directory::LookupProfiles>(Address::Directory, None, ids.clone())
+            .await,
+    )?;
+    if profiles.len() != ids.len() {
+        return Err(Error::CellContract(
+            "Project access profile count is invalid",
+        ));
+    }
+    let names: BTreeMap<_, _> = ids
+        .into_iter()
+        .zip(profiles)
+        .filter_map(|(id, profile)| profile.map(|profile| (id, profile.name)))
+        .collect();
+    let eligible = authority::eligible(
+        &server,
+        id,
+        initial
+            .grants
+            .iter()
+            .filter_map(|grant| match grant.target {
+                projects::AccessTarget::Outside { id } if grant.active => Some(id),
+                _ => None,
+            })
+            .collect(),
+    )
+    .await?;
+    let mut current = read().await?;
+    if current.version != initial.version {
+        return Err(Error::PageChanged);
+    }
+    for grant in &mut current.grants {
+        match grant.target {
+            projects::AccessTarget::Member { id } => grant.label = names.get(&id).cloned(),
+            projects::AccessTarget::Outside { id } => {
+                grant.label = names.get(&id).cloned();
+                grant.active &= eligible.contains(&id);
+            }
+            _ => (),
+        }
+    }
+    app::account(&principal)?;
+    Ok(Json(serde_json::to_value(current)?))
+}
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Collection {
@@ -61,6 +182,9 @@ struct Collection {
     search: String,
     after: Option<Uuid>,
     revision: Option<u64>,
+    team: Option<Uuid>,
+    repository: Option<Uuid>,
+    linkable: bool,
 }
 fn public_project(project: &projects::Project) -> Value {
     // Creator membership incarnations protect writes inside the native Cell;
@@ -73,7 +197,10 @@ async fn list(
     Path(id): Path<Uuid>,
     Query(input): Query<Collection>,
 ) -> Result<Json<Value>> {
-    let actor = actor(&server, &principal).await?;
+    let actor = authority::caller(&server, &principal, id).await?;
+    if let Some(repository) = input.repository {
+        owned_repository(&server, &principal, id, repository).await?;
+    }
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     let page = cells
         .query::<projects::List>(
@@ -85,22 +212,37 @@ async fn list(
                 search: input.search,
                 after: input.after,
                 revision: input.revision,
+                team: input.team,
+                repository: input.repository,
+                linkable: input.linkable,
             },
         )
         .await
         .map_err(read_error)?
         .output;
+    if let Some(repository) = input.repository {
+        owned_repository(&server, &principal, id, repository).await?;
+    }
     app::account(&principal)?;
+    if actor.guest()
+        && !authority::viewer(&server, &principal, id, actor.id())
+            .await?
+            .guest()
+    {
+        return Err(Error::PageChanged);
+    }
     Ok(Json(
-        json!({"items":page.items.iter().map(public_project).collect::<Vec<_>>(),"next":page.next,"revision":page.revision,"can_create":true}),
+        json!({"items":page.items.iter().map(public_project).collect::<Vec<_>>(),"next":page.next,"revision":page.revision,"can_create":page.can_create}),
     ))
 }
 async fn project(
     server: &Server,
+    principal: &Principal,
     organization: Uuid,
-    actor: Uuid,
+    actor: projects::AccessActor,
     id: Uuid,
 ) -> Result<projects::View> {
+    let actor = authority::viewer(server, principal, organization, actor.id()).await?;
     server
         .cells()
         .ok_or(Error::CellUnavailable)?
@@ -130,6 +272,39 @@ async fn accessible(
         Err(error) => Err(error),
     }
 }
+async fn owned_repository(
+    server: &Server,
+    principal: &Principal,
+    organization: Uuid,
+    repository: Uuid,
+) -> Result<Arc<Repository>> {
+    let repo = server
+        .repositories
+        .by_id(repository)
+        .filter(|repo| repo.organization == Some(organization))
+        .ok_or(Error::NotFound)?;
+    let current = if principal.is_local() {
+        // Local operators bypass repository grant lookup, but a discovery
+        // link still needs the current Catalog identity and ownership epoch.
+        let snapshot = server
+            .catalog()
+            .ok_or(Error::NotFound)?
+            .membership(&repo.config.owner, &repo.config.name)
+            .await
+            .map_err(app::repository_access_error)?;
+        if snapshot.name != repo.config.name {
+            return Err(Error::NotFound);
+        }
+        app::membership_snapshot(server, principal, &repo, snapshot).await?
+    } else {
+        app::membership(server, principal, &repo).await?
+    };
+    current
+        .principal
+        .can_read(repository)
+        .then_some(repo)
+        .ok_or(Error::NotFound)
+}
 fn repository(repo: &Repository) -> Value {
     json!({"id":repo.id,"owner":repo.config.owner,"name":repo.config.name})
 }
@@ -138,8 +313,8 @@ async fn detail(
     Extension(principal): Extension<Principal>,
     Path((id, selected)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Value>> {
-    let actor = actor(&server, &principal).await?;
-    let view = project(&server, id, actor, selected).await?;
+    let actor = actor(&server, &principal).await?.into();
+    let view = project(&server, &principal, id, actor, selected).await?;
     let profiles = app::query_output(
         server
             .cells()
@@ -175,7 +350,7 @@ async fn detail(
     } else {
         Vec::new()
     };
-    let current = project(&server, id, actor, selected).await?;
+    let current = project(&server, &principal, id, actor, selected).await?;
     if let Some(repo) = type_source {
         match app::membership(&server, &principal, &repo).await {
             Ok(_) => (),
@@ -183,12 +358,37 @@ async fn detail(
             Err(error) => return Err(error),
         }
     }
-    app::account(&principal)?;
     if current.project.version != view.project.version {
         return Err(Error::PageChanged);
     }
+    let configured = current.project.default_repository;
+    let mut default_repository = None;
+    if let Some(default) = configured
+        && let Some(index) = repositories
+            .iter()
+            .position(|entry| entry["id"] == json!(default.id))
+    {
+        match owned_repository(&server, &principal, id, default.id).await {
+            Ok(repo) if repo.ownership_epoch == default.ownership_epoch => {
+                if crate::repository::settings::load_lifecycle(&server, &repo)
+                    .await?
+                    .archived
+                {
+                    repositories[index]["can_create_issue"] = json!(false);
+                } else {
+                    default_repository = Some(default.id);
+                }
+            }
+            Ok(_) => (),
+            Err(Error::NotFound) => {
+                repositories.remove(index);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    app::account(&principal)?;
     Ok(Json(
-        json!({"project":public_project(&current.project),"can_manage":current.can_manage,"repositories":repositories,"restricted_repositories":view.repositories.len()-repositories.len(),"lead":profiles.first().cloned().flatten(),"issue_types":types}),
+        json!({"project":public_project(&current.project),"can_manage":current.can_manage,"can_admin":current.can_admin,"repositories":repositories,"restricted_repositories":view.repositories.len()-repositories.len(),"lead":profiles.first().cloned().flatten(),"issue_types":types,"default_repository":default_repository,"default_repository_configured":configured.is_some()}),
     ))
 }
 #[derive(Default, Deserialize)]
@@ -209,7 +409,7 @@ async fn filter_repositories(
     Extension(principal): Extension<Principal>,
     Path((organization, selected)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Value>> {
-    let actor = actor(&server, &principal).await?;
+    let actor = authority::caller(&server, &principal, organization).await?;
     let locations = placements::resolve(
         &server,
         &principal,
@@ -222,7 +422,7 @@ async fn filter_repositories(
         },
     )
     .await?;
-    let view = project(&server, organization, actor, selected).await?;
+    let view = project(&server, &principal, organization, actor, selected).await?;
     if view.project.version != locations.project_version {
         return Err(Error::PageChanged);
     }
@@ -238,7 +438,7 @@ async fn filter_repositories(
         .try_filter_map(futures_util::future::ok)
         .try_collect()
         .await?;
-    let current = project(&server, organization, actor, selected).await?;
+    let current = project(&server, &principal, organization, actor, selected).await?;
     app::account(&principal)?;
     if current.project.version != locations.project_version {
         return Err(Error::PageChanged);
@@ -258,7 +458,7 @@ async fn items(
     Query(input): Query<Filter>,
 ) -> Result<Json<Value>> {
     let group_by_type = input.group_by == Some(source::grouping::GroupBy::IssueType);
-    let actor = actor(&server, &principal).await?;
+    let actor = authority::caller(&server, &principal, id).await?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     let type_scope = type_filter::resolve(&server, &principal, id, selected, actor, &input).await?;
     let page = cells
@@ -308,11 +508,23 @@ async fn items(
         filter.verify(&server, &principal, id).await?;
     }
     sources.recheck_moves(&server).await?;
-    let current = project(&server, id, actor, selected).await?;
+    let current = project(&server, &principal, id, actor, selected).await?;
     app::account(&principal)?;
     if current.project.version != page.view.project.version {
         return Err(Error::PageChanged);
     }
+    let free_form_group = match input.group_by {
+        Some(source::grouping::GroupBy::Field(id)) => current
+            .project
+            .definition
+            .fields
+            .iter()
+            .find(|field| field.id == id)
+            .filter(|field| !matches!(field.definition, source::FieldKind::Select { .. }))
+            .map(|field| field.id),
+        _ => None,
+    };
+    let mut visible_groups = BTreeSet::new();
     let rows = page.items.into_iter().map(|entry| {
         let record = entry.record;
         let mut item = record.item;
@@ -322,6 +534,11 @@ async fn items(
             item.subject = None;
             item.title = "Private or unavailable item".into();
             item.body.clear();
+            item.values.clear();
+        } else if let Some(field) = free_form_group
+            && let Some(value) = item.values.get(&field)
+        {
+            visible_groups.insert(value.clone());
         }
         let details = summary.map(|row| &row.details);
         let issue_type = summary.and_then(|row| row.issue_type.as_ref());
@@ -346,6 +563,13 @@ async fn items(
             "more_links": details.is_some_and(|details| details.more_links),
         })
     }).collect::<Vec<_>>();
+    let mut group_counts = page.group_counts;
+    if free_form_group.is_some()
+        && let Some(counts) = &mut group_counts
+    {
+        // Free-form group names can themselves contain private item content.
+        counts.retain(|value, _| value.is_empty() || visible_groups.contains(value));
+    }
     let mut issue_type_counts = type_scope
         .as_ref()
         .and_then(|filter| filter.issue_type_counts.clone());
@@ -361,7 +585,7 @@ async fn items(
         }
     }
     Ok(Json(
-        json!({"page":{"project":public_project(&current.project),"items":rows,"next":page.next,"counts":page.counts,"total":page.total,"revision":page.view.project.version,"issue_types":sources.types.unwrap_or_default(),"type_cursor":type_scope.map(|filter| filter.cursor),"group_counts":issue_type_counts.or(page.group_counts)},"can_manage":current.can_manage}),
+        json!({"page":{"project":public_project(&current.project),"items":rows,"next":page.next,"counts":page.counts,"total":page.total,"revision":page.view.project.version,"issue_types":sources.types.unwrap_or_default(),"type_cursor":type_scope.map(|filter| filter.cursor),"group_counts":issue_type_counts.or(group_counts)},"can_manage":current.can_manage}),
     ))
 }
 #[derive(Deserialize)]
@@ -377,8 +601,8 @@ async fn candidates(
     Path((id, selected)): Path<(Uuid, Uuid)>,
     Query(input): Query<CandidateFilter>,
 ) -> Result<Json<Value>> {
-    let actor = actor(&server, &principal).await?;
-    let view = project(&server, id, actor, selected).await?;
+    let actor = actor(&server, &principal).await?.into();
+    let view = project(&server, &principal, id, actor, selected).await?;
     if !view.can_manage || !view.repositories.contains(&input.repository) {
         return Err(Error::NotFound);
     }
@@ -401,7 +625,7 @@ async fn candidates(
     accessible(&server, &principal, input.repository)
         .await?
         .ok_or(Error::NotFound)?;
-    let current = project(&server, id, actor, selected).await?;
+    let current = project(&server, &principal, id, actor, selected).await?;
     app::account(&principal)?;
     if current.project.version != view.project.version || !current.can_manage {
         return Err(Error::PageChanged);
@@ -427,10 +651,24 @@ async fn submit(
             .await
             .map(Json);
     }
-    if !cancel && matches!(input.command, Command::BulkFields { .. }) {
-        // Serialize source checks with transfers in this organization. The
-        // native write also compares every stored placement revision.
+    let actor = authority::viewer(&server, &principal, id, actor).await?;
+    if !cancel
+        && (actor.guest()
+            || matches!(
+                input.command,
+                Command::BulkFields { .. }
+                    | Command::SetAccess {
+                        target: projects::AccessTarget::Outside { .. },
+                        ..
+                    }
+                    | Command::LinkRepository { .. }
+                    | Command::SetDefaultRepository { .. }
+            ))
+    {
+        // Repository access and ownership can change guest qualification and
+        // source selection. Check both under the publication policy lease.
         return super::properties::policy_write(server, id, move |server, _, cancel| async move {
+            let actor = authority::viewer(&server, &principal, id, actor.id()).await?;
             let output =
                 submit_change(&server, &principal, id, actor, &input, false, Some(&cancel)).await?;
             checked_outcome(output)
@@ -460,7 +698,7 @@ async fn bulk_sources_allowed(
     server: &Server,
     principal: &Principal,
     organization: Uuid,
-    actor: Uuid,
+    actor: projects::AccessActor,
     project: Uuid,
     items: &[crate::cells::planning::bulk::Edit],
 ) -> Result<bool> {
@@ -504,7 +742,7 @@ async fn submit_change(
     server: &Server,
     principal: &Principal,
     id: Uuid,
-    actor: Uuid,
+    actor: projects::AccessActor,
     input: &Submission,
     cancel: bool,
     policy: Option<&tokio_util::sync::CancellationToken>,
@@ -512,6 +750,7 @@ async fn submit_change(
     use crate::cells::repository::{
         collaboration::SubjectKind, issues::transfer::publication::Destination,
     };
+    let mut source_epoch = None;
     let (source_allowed, attachment) = if cancel {
         (false, None)
     } else {
@@ -520,6 +759,32 @@ async fn submit_change(
                 accessible(server, principal, *repository).await?.is_some(),
                 None,
             ),
+            Command::LinkRepository { repository, .. } => {
+                let allowed = match owned_repository(server, principal, id, *repository).await {
+                    Ok(_) => true,
+                    Err(Error::NotFound) => false,
+                    Err(error) => return Err(error),
+                };
+                (allowed, None)
+            }
+            Command::SetDefaultRepository {
+                repository: Some(repository),
+                ..
+            } => {
+                match owned_repository(server, principal, id, *repository).await {
+                    Ok(repo) => {
+                        if !crate::repository::settings::load_lifecycle(server, &repo)
+                            .await?
+                            .archived
+                        {
+                            source_epoch = Some(repo.ownership_epoch);
+                        }
+                    }
+                    Err(Error::NotFound) => (),
+                    Err(error) => return Err(error),
+                }
+                (source_epoch.is_some(), None)
+            }
             Command::BulkFields { project, items } => (
                 bulk_sources_allowed(server, principal, id, actor, *project, items).await?,
                 None,
@@ -581,6 +846,19 @@ async fn submit_change(
             _ => (true, None),
         }
     };
+    let eligible_outside = match input.command {
+        Command::SetAccess {
+            target: projects::AccessTarget::Outside { id: outsider },
+            role: Some(role),
+            ..
+        } if !cancel && role != projects::AccessRole::None => {
+            authority::eligible(server, id, vec![outsider])
+                .await?
+                .into_iter()
+                .next()
+        }
+        _ => None,
+    };
     app::account(principal)?;
     if policy.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
         return Err(Error::MergeBusy);
@@ -598,7 +876,8 @@ async fn submit_change(
                     cancel,
                     source_allowed,
                     attachment,
-                    source_epoch: None,
+                    source_epoch,
+                    eligible_outside,
                 },
             )
             .await,

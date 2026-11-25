@@ -264,8 +264,8 @@ async fn deliver(
             }
             ("push", json!({"updates":updates}))
         }
-        event @ Event::PullRequest { .. } => (
-            "pull_request",
+        event => (
+            event.name(),
             serde_json::to_value(event).map_err(Error::Json)?,
         ),
     };

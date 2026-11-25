@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { BrowseRepositories } from "@/features/repository/catalog-browse";
+import { ProjectLibrary } from "@/features/projects/workspace/library";
 import { navigate } from "@/lib/api";
 import type { TeamView } from "@/lib/contracts";
 import { teamHref, type Draft } from "./model";
@@ -76,7 +77,8 @@ export function TeamDetail({
   const tab = url.searchParams.get("view");
   const settings = tab === "settings";
   const repositories = tab === "repositories";
-  const members = !settings && !repositories;
+  const projects = tab === "projects";
+  const members = !settings && !repositories && !projects;
   const failure = commands.failure?.body.command;
   const conflict =
     commands.conflict && failure?.kind === "edit" && failure.team === team;
@@ -142,6 +144,14 @@ export function TeamDetail({
                   Repositories
                 </Link>
               </Button>
+              <Button asChild variant={projects ? "secondary" : "ghost"}>
+                <Link
+                  href={teamHref(organization, team, "projects")}
+                  aria-current={projects ? "page" : undefined}
+                >
+                  Projects
+                </Link>
+              </Button>
               {view.can_manage && (
                 <Button asChild variant={settings ? "secondary" : "ghost"}>
                   <Link
@@ -185,6 +195,12 @@ export function TeamDetail({
                   scope={{ kind: "team", organization, team }}
                 />
               </section>
+            ) : projects ? (
+              <ProjectLibrary
+                organization={organization}
+                url={url}
+                scope={{ target: { team }, canLink: view.can_manage }}
+              />
             ) : members ? (
               <TeamMembers
                 organization={organization}

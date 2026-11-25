@@ -41,6 +41,8 @@ import { OrganizationIssueTypes } from "./issue-types";
 import { organizationHref } from "./directory";
 import { TeamPicker } from "@/features/settings/team-picker";
 import { RepositoryPolicySettings } from "./repository-policy";
+import { ProjectPolicySettings } from "./project-policy";
+import { OutsideCollaborators } from "./outside-collaborators";
 export { OrganizationInvitation } from "./invitations";
 
 const adminTabs = [
@@ -67,6 +69,7 @@ export function OrganizationPage({
   const endpoint = `/api/organizations/${id}`;
   const own = useRequest<OrganizationView>(endpoint);
   const tab = url.searchParams.get("tab") ?? "people";
+  const outside = url.searchParams.get("people") === "outside";
   const [notice, setNotice] = useState("");
   return (
     <section className="mx-auto w-full max-w-6xl p-4 sm:p-8">
@@ -191,16 +194,62 @@ export function OrganizationPage({
                   commands={commands}
                 />
               ) : tab === "people" ? (
-                <People
-                  id={id}
-                  endpoint={endpoint}
-                  csrf={csrf}
-                  owner={role === "owner"}
-                  onChanged={(message) => {
-                    setNotice(message);
-                    own.retry();
-                  }}
-                />
+                <>
+                  {role === "owner" && (
+                    <nav
+                      aria-label="People"
+                      className="mb-4 flex flex-wrap gap-2"
+                    >
+                      <Button
+                        asChild
+                        size="sm"
+                        variant={outside ? "ghost" : "secondary"}
+                      >
+                        <Link
+                          href={organizationHref(organization, "?tab=people")}
+                          aria-current={outside ? undefined : "page"}
+                        >
+                          Members
+                        </Link>
+                      </Button>
+                      <Button
+                        asChild
+                        size="sm"
+                        variant={outside ? "secondary" : "ghost"}
+                      >
+                        <Link
+                          href={organizationHref(
+                            organization,
+                            "?tab=people&people=outside",
+                          )}
+                          aria-current={outside ? "page" : undefined}
+                        >
+                          Outside collaborators
+                        </Link>
+                      </Button>
+                    </nav>
+                  )}
+                  {role === "owner" && outside ? (
+                    <OutsideCollaborators
+                      key={`${id}:${actor}`}
+                      endpoint={endpoint}
+                      url={url}
+                      csrf={csrf}
+                      actor={actor}
+                    />
+                  ) : (
+                    <People
+                      id={id}
+                      endpoint={endpoint}
+                      csrf={csrf}
+                      owner={role === "owner"}
+                      onChanged={(message) => {
+                        setNotice(message);
+                        own.retry();
+                      }}
+                    />
+                  )}
+                </>
               ) : role === "owner" && tab === "invitations" ? (
                 <Invitations endpoint={endpoint} id={id} csrf={csrf} />
               ) : role === "owner" && tab === "rulesets" ? (
@@ -234,6 +283,7 @@ export function OrganizationPage({
                     }}
                   />
                   <RepositoryPolicySettings organization={id} csrf={csrf} />
+                  <ProjectPolicySettings organization={id} />
                 </div>
               ) : (
                 <div className="notice error" role="alert">

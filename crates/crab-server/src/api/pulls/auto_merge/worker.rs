@@ -151,13 +151,13 @@ async fn reconcile(
         Some(Stop::Merged)
     } else if principal.is_none() {
         Some(Stop::PermissionChanged)
-    } else if queue_required && job.queue.is_none() {
+    } else if queue_required && !job.uses_queue() {
         Some(Stop::QueueRequired)
-    } else if job.queue.is_some() && !job.queue_method_matches(&configured) {
+    } else if job.uses_queue() && !job.queue_method_matches(&configured) {
         Some(Stop::MethodDisabled)
     } else if !job.enabled(&configured, queue_required) {
         Some(Stop::Disabled)
-    } else if job.queue.is_none() && !configured.enabled.contains(&job.method) {
+    } else if !job.uses_queue() && !configured.enabled.contains(&job.method) {
         Some(Stop::MethodDisabled)
     } else if pull.state != PullState::Open
         || pull.draft
@@ -208,8 +208,17 @@ async fn reconcile(
     let Some((base_oid, head_oid)) = git.tips(&pull.base_ref, &pull.head_ref) else {
         return stop(server, repo, number, job.id, Stop::HeadChanged).await;
     };
-    if head_oid != job.head_oid || (job.queue.is_some() && base_oid == head_oid) {
+    if head_oid != job.head_oid || (job.uses_queue() && base_oid == head_oid) {
         return stop(server, repo, number, job.id, Stop::HeadChanged).await;
+    }
+    if job.waiting_for_queue() {
+        let grant = app::membership(server, &principal, repo).await?;
+        let report =
+            queue_requirements(server, repo, &pull, &grant, (&base_oid, &head_oid), None).await?;
+        if report.checks.is_empty() || !report.satisfied || !report.permits_method(job.method) {
+            return Ok(());
+        }
+        return enqueue_when_ready(server, repo, &principal, &pull, job, &cancel).await;
     }
     if job.queue.is_some() {
         let Some(base) =
@@ -276,4 +285,80 @@ async fn reconcile(
     };
     merge::finish_locked(server, &principal, repo, number, &record, cancel).await?;
     stop(server, repo, number, job.id, Stop::Merged).await
+}
+
+async fn enqueue_when_ready(
+    server: &Server,
+    repo: &Repository,
+    principal: &Principal,
+    pull: &PullRequest,
+    job: &Job,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    use super::super::git::{fork_repository, with_comparison_leases};
+
+    let fork = pull
+        .head_repository
+        .map(|id| fork_repository(server, repo, id))
+        .transpose()?;
+    with_comparison_leases(
+        repo,
+        fork.as_deref(),
+        pull.base_ref.clone(),
+        pull.head_ref.clone(),
+        cancel,
+        |refs| async move {
+            let refs = &refs;
+            // A passing observation only triggers admission. Hold the Git
+            // and ruleset leases while checking the comparison being queued.
+            settings::with_ruleset_lease(
+                server,
+                settings::RulesetScope::Repository(repo),
+                refs,
+                |policy| async move {
+                    let git = PullGit::open(server, repo, pull.head_repository).await?;
+                    let Some((base, head)) = git.tips(&pull.base_ref, &pull.head_ref) else {
+                        return Ok(());
+                    };
+                    if head != job.head_oid || head == base {
+                        return Ok(());
+                    }
+                    let grant = app::membership(server, principal, repo).await?;
+                    if !grant.principal.can_write(repo.id) {
+                        return Ok(());
+                    }
+                    let report =
+                        queue_requirements(server, repo, pull, &grant, (&base, &head), None)
+                            .await?;
+                    if report.checks.is_empty()
+                        || !report.satisfied
+                        || !report.permits_method(job.method)
+                    {
+                        return Ok(());
+                    }
+                    let queue_policy = settings::queue_policy(server, repo, &pull.base_ref).await?;
+                    if refs.is_cancelled() || policy.is_cancelled() {
+                        return Err(Error::MergeBusy);
+                    }
+                    change(
+                        server,
+                        repo,
+                        Change::Enqueue {
+                            pull: pull.number,
+                            id: job.id,
+                            version: pull.version,
+                            configured_queue_required: settings::configured_queue_required(
+                                repo,
+                                &pull.base_ref,
+                            ),
+                            ruleset_queue_required: queue_policy.ruleset,
+                        },
+                    )
+                    .await
+                },
+            )
+            .await
+        },
+    )
+    .await
 }

@@ -38,6 +38,7 @@ mod codeowners;
 pub(crate) use branch_update::authorize_branch_update;
 pub(super) mod comments;
 mod git;
+mod merged_comparison;
 pub(super) use git::review_head;
 mod merge;
 mod merge_methods;
@@ -64,10 +65,25 @@ pub(super) async fn require_check_head(
     repo: &Repository,
     number: u64,
     oid: gix_hash::ObjectId,
+    access: statuses::CommitAccess,
 ) -> Result<String> {
     let pull = storage::pull(server, repo, app::number(number)?)
         .await?
         .ok_or(Error::CommitNotFound)?;
+    if matches!(access, statuses::CommitAccess::Read)
+        && let Some(merge) = &pull.merge
+    {
+        // A squash or rebase can leave the reviewed head unreachable after
+        // cleanup. The completed merge authorizes only its recorded reports.
+        let requested = oid.to_string();
+        return if requested == merge.head_oid
+            || merge.tested_candidate && requested == merge.commit_oid
+        {
+            Ok(requested)
+        } else {
+            Err(Error::CommitNotFound)
+        };
+    }
     if pull.head_repository.is_none() {
         return statuses::require_commit(server, repo, oid).await;
     }
@@ -131,6 +147,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             get(detail).patch(edit),
         )
         .merge(comments::routes())
+        .merge(merged_comparison::routes())
         .merge(head_branch::routes())
         .merge(branch_update::routes())
         .merge(base::routes())
@@ -202,10 +219,15 @@ async fn pull_view(
     )?;
     let auto_merge_configured =
         merge_methods.auto_merge_generation > 0 || merge_methods.merge_queue_generation > 0;
-    let merge_queued = pull.state == PullState::Open
-        && auto_merge::active_queue(server, repo, pull.number)
-            .await?
-            .is_some();
+    let automatic = if pull.state == PullState::Open {
+        auto_merge::current(server, repo, pull.number).await?
+    } else {
+        None
+    };
+    let merge_queued = automatic
+        .as_ref()
+        .is_some_and(|state| state.stopped.is_none() && state.job.queue.is_some());
+    let merge_queue_requested = automatic.is_some_and(|state| state.job.when_ready);
     let configured_methods = merge_methods.enabled;
     let merge_methods: Vec<_> = configured_methods
         .iter()
@@ -338,6 +360,7 @@ async fn pull_view(
         "bypass_merge_methods": bypass_merge_methods,
         "auto_merge_configured": auto_merge_configured,
         "merge_queued": merge_queued,
+        "merge_queue_requested": merge_queue_requested,
         "merge_queue_required": requirements.queue_required,
         "merge_requirements": {
             "bypass_options": if bypass_merge_methods.is_empty() { &[] } else { requirements.bypass_options.as_slice() },
@@ -528,7 +551,7 @@ async fn requirements(
                 }
             },
             async {
-                if !rule.required_code_owner_reviews {
+                if !rule.required_code_owner_reviews || pull.merge.is_some() {
                     return Ok(None);
                 }
                 let Some(base_oid) = base_oid else {

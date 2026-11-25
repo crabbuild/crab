@@ -24,7 +24,7 @@ async fn organization_project_recovers_the_issue_after_the_repository_commits() 
     let root = format!("{org}/projects");
     let project = project_with_issue(&h, &alice, &root, repo, true, false).await;
     let organization = org.rsplit('/').next().unwrap().parse().unwrap();
-    let actor = h.json(&org, &alice).await["actor"]
+    let actor: Uuid = h.json(&org, &alice).await["actor"]
         .as_str()
         .unwrap()
         .parse()
@@ -45,12 +45,13 @@ async fn organization_project_recovers_the_issue_after_the_repository_commits() 
                 Address::Organization(organization),
                 app::mutation_identity().unwrap(),
                 workspace::Request {
-                    actor,
+                    actor: actor.into(),
                     request_id: body["request_id"].as_str().unwrap().parse().unwrap(),
                     command: serde_json::from_value(body["command"].clone()).unwrap(),
                     source_allowed: true,
                     attachment: None,
                     source_epoch: Some(epoch),
+                    eligible_outside: None,
                     cancel: false,
                 },
             )
@@ -296,4 +297,114 @@ async fn native_browser_creates_an_issue_in_an_organization_project_group() {
         h.json(&format!("/api/repos/{key}/issues/2"), &alice).await["issue_type"]["name"],
         "Feature"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires agent-browser and built embedded UI; uses real OIDC/native Cells"]
+async fn native_browser_converts_an_organization_project_draft_in_place() {
+    let (h, alice, org, repo, key) = fixture().await;
+    let root = format!("{org}/projects");
+    let project = project_with_issue(&h, &alice, &root, repo, true, false).await;
+    let commands = format!("{root}/commands");
+    let submit = async |command| {
+        h.write(
+            Method::POST,
+            &commands,
+            &alice,
+            json!({"request_id":Uuid::now_v7(),"command":command}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()
+    };
+    let item = Uuid::now_v7();
+    let draft = json!({
+        "id":item,"subject":null,"title":"Coordinate rollout","body":"Notify each service owner.",
+        "status":"In progress","priority":2,"start":"2026-11-24","end":"2026-11-30","values":{}
+    });
+    assert_eq!(
+        submit(json!({"kind":"item","project":project,"version":0,"repository":null,"item":draft}))
+            .await["outcome"],
+        "applied"
+    );
+    let stale = submit(
+        json!({"kind":"create_issue","project":project,"repository":repo,
+        "draft_version":2,"item":draft,"type_id":null}),
+    )
+    .await;
+    assert_eq!(stale["outcome"], "item_conflict");
+    assert_eq!(stale["version"], 1);
+
+    let browser = Browser::new("project-convert");
+    let organization = org.rsplit('/').next().unwrap();
+    browser.run(&["set", "viewport", "1280", "900"]).await;
+    browser
+        .run(&[
+            "open",
+            &format!(
+                "{}/-/organizations/{organization}/projects/{project}",
+                h.origin
+            ),
+        ])
+        .await;
+    browser.sign_in().await;
+    browser
+        .run(&["wait", "[aria-label='Edit Coordinate rollout']"])
+        .await;
+    browser
+        .run(&["click", "[aria-label='Edit Coordinate rollout']"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "tab",
+            "click",
+            "--name",
+            "Convert to issue",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "[aria-label='Issue repository']"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Create issue",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", &format!("a[href='/{key}/issues/2']")])
+        .await;
+
+    let issue = h.json(&format!("/api/repos/{key}/issues/2"), &alice).await;
+    assert_eq!(issue["title"], draft["title"]);
+    assert_eq!(issue["body"], draft["body"]);
+    let page = h
+        .json(&format!("{root}/{project}/items?repository={repo}"), &alice)
+        .await;
+    assert_eq!(page["page"]["total"], 2);
+    let row = page["page"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["item"]["id"] == draft["id"])
+        .unwrap();
+    assert_eq!(row["version"], 2);
+    assert_eq!(row["source_repository"], repo.to_string());
+    assert_eq!(row["item"]["subject"], json!({"kind":"issue","number":2}));
+    for field in ["status", "priority", "start", "end", "values"] {
+        assert_eq!(row["item"][field], draft[field], "{field}");
+    }
+    drop(browser);
+    h.close().await;
 }

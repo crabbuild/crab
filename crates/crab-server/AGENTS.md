@@ -81,6 +81,9 @@ merge admission and publication under the per-PR merge lease. FIFO queue
 entries share this worker. The Cell assigns order per target branch, admits
 tests within the configured build window, and guards merge reservation for
 the first entry. `auto_merge/queue.rs` reconciles candidate checks and retries.
+A merge-when-ready request waits outside the queue index. The worker rechecks
+its exact head and current eligibility under the ref and ruleset leases.
+The Cell allocates its position and transitions the active request together.
 An administrator's priority change advances the branch queue's order
 revision in the same Cell transaction as the move. Candidate sources, CI
 admission, and begin-merge compare that revision so a stale worker cannot
@@ -129,8 +132,9 @@ approved destination before signing and sending. Public Git ref writes from HTTP
 reserve before publication and recover through the immutable plan receipt.
 `webhooks/sync.rs` expands committed branch updates into signed PR deliveries
 using bounded open-pull pages. A private fork reserves this work in its upstream
-Cell. Page advancement and delivery records commit together. PR mutations queue
-lifecycle events in their Cell transaction.
+Cell. Page advancement and delivery records commit together. PR, issue,
+top-level comment, and review mutations queue events in their own Cell
+transaction. Private pending reviews queue only on publication.
 Private `cells prepare-review-state` installs the empty feature relation on
 existing repositories, without rewriting reviews or receipts. `reviews/pending.rs`
 owns private drafts and atomic review publication through the existing review
@@ -225,6 +229,12 @@ not grant native Organization or team authority. Tests stay with these owners.
 grant inspection from a catalog revision and the Organization Cell's current
 team memberships. Its native read shares the same team-epoch predicate as
 repository authorization. The public view omits provider identity and claims.
+`api/organizations/outside_collaborators.rs` checks direct catalog grants
+against current Organization membership, with both revisions bound to the
+continuation. `catalog/outside_removal.rs` commits confirmed organization-wide
+revocations and their audit receipt in one catalog CAS. Membership changes,
+invitation decisions, and ref publication share the organization policy lease
+with this write. Repository settings own changes to individual grants.
 `api/organizations/audit/` pages and exports owner-only audit history from
 immutable Organization events and catalog membership events. `catalog/audit.rs`
 records event-time scope and chain links in the catalog CAS outbox. Never
@@ -532,11 +542,34 @@ boundary. Native and HTTP tests stay with those owners. Private preparation
 reuses `server/management/lifecycle.rs` and `cli/lifecycle.rs` through
 `cells prepare-projects`. The browser owner is `packages/ui/src/features/projects/`;
 its account/repository-bound command provider stays above route loading.
+`cells/repository/projects/grouping.rs` owns advisory board column limits for
+both Project scopes. Changes use the Project revision, submission receipt, and
+history. Reordering uses the same boundary and requires an exact permutation
+of the saved view UUIDs.
 
 `cells/organization/projects/` owns organization project definitions, planning
 properties, UUID-bound repository links/items, creator membership incarnations
 and permanent submissions. `api/organizations/projects/` composes independent
-source grants with bounded current work enrichment. Both project scopes share
+source grants with bounded current work enrichment. `projects/access.rs` owns
+Project base roles, membership-incarnation grants, and effective team access.
+`api/organizations/projects/authority.rs` qualifies outside Project
+collaborators against current direct organization repository grants. The
+Organization Cell owns their per-Project role and prevents it from surviving a
+new membership incarnation. Guest writes and qualification changes share the
+organization policy lease used by repository access updates and transfers.
+`projects/policy.rs` owns the organization default and binds confirmation to
+the exact set of inheriting Projects.
+Team Project listings and linking use the same Project policy and call the
+team owner for visibility and current maintainer authority.
+Repository Project discovery uses the existing link relation and rechecks
+current repository access and ownership. Linking from a repository shares the
+organization policy lease with ownership and repository grant changes.
+The Project's default issue repository shares that lease. Its link and the
+ownership-bound choice commit in the same native transaction.
+Draft conversion reserves its item revision against edits and removal.
+Only the destination issue receipt can replace its source and advance the
+item revision in the Organization Cell.
+Project access cannot authorize a linked repository. Both project scopes share
 canonical source metadata in `cells/repository/projects/reads.rs`; never copy
 source titles/states into organization records or treat project access as a
 repository grant. Private preparation is `cells prepare-organization-projects`.

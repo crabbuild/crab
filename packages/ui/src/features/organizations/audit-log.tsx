@@ -36,8 +36,10 @@ const actions: Record<AuditAction, string> = {
   team_membership: "Team membership changed",
   team_creation_policy: "Team creation policy changed",
   repository_policy_changed: "Repository policy changed",
+  project_policy_changed: "Project default access changed",
   repository_registered: "Repository registered",
   repository_access_changed: "Repository access changed",
+  outside_collaborators_removed: "Outside collaborators removed",
   repository_transferred_in: "Repository transferred in",
   repository_transferred_out: "Repository transferred out",
 };
