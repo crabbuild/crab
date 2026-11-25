@@ -311,9 +311,9 @@ with an external identity provider and CI. This order reflects workflow
 criticality and adoption dependencies.
 
 Repository-scoped SARIF uploads now create exact-commit check runs with
-visible findings, source-line links, and required-check enforcement. Alert
-history, baseline comparison, and audited policy exceptions remain separate
-delivery work.
+visible findings, source-line links, and required-check enforcement. PR Checks
+compare fingerprinted findings against the exact base scan. Alert history
+and audited policy exceptions remain separate delivery work.
 
 | Priority | Remaining delivery | Acceptance evidence |
 | --- | --- | --- |

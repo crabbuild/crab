@@ -1,5 +1,6 @@
 mod codec;
 pub(crate) mod required;
+pub(crate) mod scans;
 pub(in crate::cells::repository) mod summary;
 
 use super::*;
@@ -66,6 +67,10 @@ pub(crate) struct CheckRunRecord {
 pub(crate) struct CheckRunDetail {
     pub run: CheckRunRecord,
     pub output: CheckOutputRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan: Option<scans::Scan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_comparison: Option<scans::Comparison>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -83,6 +88,8 @@ pub(crate) struct CreateCheckRunInput {
     pub oid: String,
     pub name: String,
     pub report: CheckReportInput,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan: Option<scans::Scan>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -116,6 +123,8 @@ pub(crate) enum UpdateCheckRunOutcome {
 pub(crate) struct CheckRunKey {
     pub oid: String,
     pub number: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -152,6 +161,9 @@ impl Mutation for CreateCheckRun {
         validate_oid(&input.oid)?;
         validate_name(&input.name)?;
         validate_check_report(&input.report)?;
+        if let Some(scan) = &input.scan {
+            scan.validate(&input)?;
+        }
         let digest = create_submission_digest(&input)?;
         let existing = context.sql(&SqlBatch {
             statements: vec![statement(
@@ -225,12 +237,17 @@ impl Mutation for CreateCheckRun {
             )],
         })?;
         insert_check_version(context, &run, &input.report.output)?;
+        if let Some(scan) = &input.scan {
+            scans::save(context, &run, scan)?;
+        }
         summary::refresh(context, &run.oid)?;
         advance_revision(context)?;
         Ok(MutationResult::Success(CreateCheckRunOutcome::Created(
             Box::new(CheckRunDetail {
                 run,
                 output: input.report.output,
+                scan: input.scan,
+                scan_comparison: None,
             }),
         )))
     }
@@ -336,6 +353,8 @@ impl Mutation for UpdateCheckRun {
             Box::new(CheckRunDetail {
                 run,
                 output: input.report.output,
+                scan: None,
+                scan_comparison: None,
             }),
         )))
     }
@@ -401,7 +420,12 @@ impl Read for GetCheckRun {
     ) -> crate::cells::Result<Self::Output> {
         validate_oid(&input.oid)?;
         validate_number(input.number)?;
-        load_current_check(context, &input.oid, input.number)
+        let mut detail = load_current_check(context, &input.oid, input.number)?;
+        if let (Some(baseline), Some(detail)) = (input.baseline, detail.as_mut()) {
+            validate_oid(&baseline)?;
+            detail.scan_comparison = scans::compare(context, detail, &baseline)?;
+        }
+        Ok(detail)
     }
 }
 

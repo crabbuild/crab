@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use url::Url;
 
@@ -59,6 +59,7 @@ struct Tool {
 #[derive(Deserialize)]
 struct Driver {
     name: String,
+    guid: Option<String>,
     #[serde(default)]
     rules: Vec<Rule>,
 }
@@ -93,6 +94,10 @@ struct Finding {
     level: Option<Level>,
     baseline_state: Option<Baseline>,
     message: Message,
+    #[serde(default)]
+    fingerprints: BTreeMap<String, String>,
+    #[serde(default)]
+    partial_fingerprints: BTreeMap<String, String>,
     #[serde(default)]
     locations: Vec<Location>,
 }
@@ -223,9 +228,12 @@ impl Upload {
         let mut failed_runs = 0;
         let mut annotations = Vec::new();
         let mut unlocated = String::new();
+        let mut evidence = Vec::new();
+        let mut tools = BTreeSet::new();
         for run in &self.sarif.runs {
             let driver = &run.tool.driver;
             validate_plain(&driver.name, 200, "A SARIF run requires a valid tool name")?;
+            tools.insert((&driver.name, &driver.guid));
             let failed = run.invocations.iter().any(|row| !row.execution_successful);
             let configured = run
                 .invocations
@@ -308,11 +316,31 @@ impl Upload {
                     .or(finding.message.markdown.as_deref())
                     .ok_or(Error::Invalid("A SARIF finding requires an inline message"))?;
                 validate_markdown(message, 4 * 1024, true)?;
-                if let Some((path, start_line, end_line)) = finding
+                let location = finding
                     .locations
                     .iter()
-                    .find_map(|location| location.annotation(run, root))
-                {
+                    .find_map(|location| location.annotation(run, root));
+                let finding_rule = if external_rule {
+                    None
+                } else {
+                    rule_id
+                        .map(|rule| {
+                            serde_json::to_vec(&(&driver.name, &driver.guid, rule))
+                                .map(|data| *blake3::hash(&data).as_bytes())
+                        })
+                        .transpose()?
+                };
+                let fingerprint = fingerprint(
+                    finding_rule,
+                    finding,
+                    location.as_ref().map(|item| item.0.as_str()),
+                )?;
+                evidence.push(check_scans::Finding {
+                    rule: finding_rule,
+                    fingerprint,
+                    annotated: location.is_some(),
+                });
+                if let Some((path, start_line, end_line)) = location {
                     annotations.push(CheckAnnotation {
                         path,
                         start_line,
@@ -347,7 +375,7 @@ impl Upload {
         Ok(NewCheckRun {
             request_id: self.request_id,
             head_sha: self.head_sha,
-            name: format!("Code scanning / {}", self.category),
+            name: format!("{}{}", check_scans::CHECK_PREFIX, self.category),
             status: CheckStatus::Completed,
             conclusion: Some(if failed {
                 CheckConclusion::Failure
@@ -363,8 +391,47 @@ impl Upload {
                 steps: vec![],
                 annotations,
             },
+            scan: Some(check_scans::Scan {
+                tools: *blake3::hash(&serde_json::to_vec(&tools)?).as_bytes(),
+                complete: failed_runs == 0,
+                findings: evidence,
+            }),
         })
     }
+}
+
+fn fingerprint(
+    rule: Option<[u8; 32]>,
+    finding: &Finding,
+    path: Option<&str>,
+) -> Result<Option<check_scans::Fingerprint>> {
+    let Some(rule) = rule else { return Ok(None) };
+    let primary = finding
+        .partial_fingerprints
+        .get("primaryLocationLineHash")
+        .filter(|value| !value.trim().is_empty());
+    let (method, data) = if let Some((path, primary)) = path.zip(primary) {
+        (
+            check_scans::Method::PrimaryLocation,
+            serde_json::to_vec(&(rule, path, primary))?,
+        )
+    } else if !finding.fingerprints.is_empty()
+        && finding
+            .fingerprints
+            .iter()
+            .all(|(key, value)| !key.trim().is_empty() && !value.trim().is_empty())
+    {
+        (
+            check_scans::Method::Full,
+            serde_json::to_vec(&(rule, &finding.fingerprints))?,
+        )
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(check_scans::Fingerprint {
+        method,
+        digest: *blake3::hash(&data).as_bytes(),
+    }))
 }
 
 fn resolve_rule<'a>(

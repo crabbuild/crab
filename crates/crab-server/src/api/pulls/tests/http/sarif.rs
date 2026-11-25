@@ -102,8 +102,19 @@ fn report(oid: &str, results: Value) -> Value {
 
 fn finding() -> Value {
     json!([{"ruleId":"AUDIT-1","level":"error","message":{"text":"Review this example finding."},
+        "partialFingerprints":{"primaryLocationLineHash":"stable-1"},
         "locations":[{"physicalLocation":{"artifactLocation":{"uri":"README.md"},
             "region":{"startLine":2}}}]}])
+}
+
+fn mixed_findings() -> Value {
+    let mut mixed = finding();
+    mixed[0]["locations"][0]["physicalLocation"]["region"]["startLine"] = json!(1);
+    let mut introduced = finding()[0].clone();
+    introduced["ruleId"] = json!("AUDIT-2");
+    introduced["partialFingerprints"]["primaryLocationLineHash"] = json!("stable-2");
+    mixed.as_array_mut().unwrap().push(introduced);
+    mixed
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -125,6 +136,10 @@ async fn sarif_uses_exact_commit_authority_and_gates_required_merges() {
     assert_eq!(failure["conclusion"], "failure");
     assert_eq!(failure["name"], CHECK);
     assert_eq!(f.upload(input.clone()).await.1, failure);
+    let mut changed_fingerprint = input.clone();
+    changed_fingerprint["sarif"]["runs"][0]["results"][0]["partialFingerprints"]["primaryLocationLineHash"] =
+        json!("changed");
+    assert_eq!(f.upload(changed_fingerprint).await.0, StatusCode::CONFLICT);
     let mut collision = input;
     collision["sarif"]["runs"][0]["results"] = json!([]);
     assert_eq!(f.upload(collision).await.0, StatusCode::CONFLICT);
@@ -149,10 +164,79 @@ async fn sarif_uses_exact_commit_authority_and_gates_required_merges() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn sarif_comparison_uses_the_latest_matching_scan_on_the_exact_base() {
+    let f = Fixture::new().await;
+    let pull = f.h.json(&format!("{ROOT}/1"), &f.alice).await;
+    let base = pull["base_oid"].as_str().unwrap();
+    let (status, head) = f.upload(report(&f.head, mixed_findings())).await;
+    assert_eq!(status, StatusCode::CREATED, "{head}");
+    let comparison = async |baseline: &str| {
+        f.h.json(
+            &format!(
+                "/api/repos/team/private/commits/{}/check-runs/{}?baseline={baseline}",
+                f.head, head["id"]
+            ),
+            &f.alice,
+        )
+        .await
+    };
+    assert_eq!(
+        comparison(base).await["scan_comparison"]["state"],
+        "missing"
+    );
+    assert_eq!(
+        comparison(&"a".repeat(40)).await["scan_comparison"]["state"],
+        "unreachable"
+    );
+    let mut unrelated = report(base, finding());
+    unrelated["category"] = json!("other");
+    assert_eq!(f.upload(unrelated).await.0, StatusCode::CREATED);
+    assert_eq!(
+        comparison(base).await["scan_comparison"]["state"],
+        "missing"
+    );
+    let baseline_report = report(base, finding());
+    let (status, archived) = f.upload(baseline_report.clone()).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let check = comparison(base).await;
+    assert_eq!(
+        check["scan_comparison"],
+        json!({
+            "baseline_sha":base,"state":"ready","introduced":1,"existing":1,"unclassified":0,
+            "annotations":["existing","introduced"]
+        })
+    );
+    assert_eq!(check["conclusion"], "failure");
+    assert_eq!(f.merge().await, StatusCode::CONFLICT);
+    let mut changed_tool = report(base, finding());
+    changed_tool["sarif"]["runs"][0]["tool"]["driver"]["name"] = json!("Different scanner");
+    assert_eq!(f.upload(changed_tool).await.0, StatusCode::CREATED);
+    assert_eq!(
+        comparison(base).await["scan_comparison"]["state"],
+        "tools_changed"
+    );
+    let mut failed = report(base, json!([]));
+    failed["sarif"]["runs"][0]["invocations"] = json!([{"executionSuccessful":false}]);
+    assert_eq!(f.upload(failed).await.0, StatusCode::CREATED);
+    assert_eq!(f.upload(baseline_report).await.1["id"], archived["id"]);
+    assert_eq!(
+        comparison(base).await["scan_comparison"]["state"],
+        "incomplete"
+    );
+    f.h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Chromium and the built embedded UI"]
 async fn native_browser_shows_sarif_findings_and_opens_the_scanned_line() {
     let f = Fixture::new().await;
-    let (status, result) = f.upload(report(&f.head, finding())).await;
+    let pull = f.h.json(&format!("{ROOT}/1"), &f.alice).await;
+    let base = pull["base_oid"].as_str().unwrap();
+    assert_eq!(
+        f.upload(report(base, finding())).await.0,
+        StatusCode::CREATED
+    );
+    let (status, result) = f.upload(report(&f.head, mixed_findings())).await;
     assert_eq!(status, StatusCode::CREATED, "{result}");
     let browser = Browser::new("sarif");
     browser
@@ -163,6 +247,10 @@ async fn native_browser_shows_sarif_findings_and_opens_the_scanned_line() {
         .await;
     browser.sign_in().await;
     browser.run(&["wait", "--text", "Error · AUDIT-1"]).await;
+    browser
+        .run(&["wait", "--text", "1 new · 1 existing · 0 unclassified"])
+        .await;
+    browser.run(&["wait", "--fn", "Array.from(document.querySelectorAll('[aria-label=Annotations] li')).map(row => row.querySelector('span')?.textContent).join(',') === 'Existing,New'"]).await;
     browser
         .run(&["wait", "--text", "Review this example finding."])
         .await;

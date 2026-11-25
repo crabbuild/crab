@@ -5562,6 +5562,21 @@ mapping. Unmapped or unlocated findings still count and appear in the check
 details. PR **Checks** links annotations from a branch in the repository to
 the reported commit and line.
 
+PR **Checks** also compares a head or tested merge report to the exact base
+shown in that view. The details API accepts `baseline=<sha>` for any readable
+base commit in the repository. Crab uses the latest SARIF upload for that
+commit from the same reporting identity and category. Scanner execution must
+have completed on both commits with the same tool set. Findings can still
+cause either check to fail.
+
+Crab matches findings by tool, rule, and SARIF fingerprint. It uses
+`partialFingerprints.primaryLocationLineHash` with the repository-relative
+path when available and falls back to full fingerprints. Findings without
+usable evidence and duplicate fingerprints with ambiguous matches remain
+unclassified. The comparison shows counts for every finding and labels
+source annotations. Required checks still use the conclusion of the scan for
+the exact commit being evaluated.
+
 ### Send repository webhooks
 
 Add up to 20 distinct approved receivers per repository UUID in the server configuration. Set

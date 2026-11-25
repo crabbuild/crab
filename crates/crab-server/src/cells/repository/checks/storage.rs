@@ -46,7 +46,7 @@ pub(super) fn load_check_version(
     result[0]
         .rows
         .first()
-        .map(|row| check_detail_from_row(row))
+        .map(|row| check_detail_from_row(context, row))
         .transpose()?
         .ok_or(crate::cells::Error::Invalid(
             "repository check submission has no result row",
@@ -67,11 +67,14 @@ pub(super) fn load_current_check(
     result[0]
         .rows
         .first()
-        .map(|row| check_detail_from_row(row))
+        .map(|row| check_detail_from_row(context, row))
         .transpose()
 }
 
-fn check_detail_from_row(row: &[SqlValue]) -> crate::cells::Result<CheckRunDetail> {
+fn check_detail_from_row(
+    context: &Transaction<'_>,
+    row: &[SqlValue],
+) -> crate::cells::Result<CheckRunDetail> {
     let run = check_run_from_row(row)?;
     let output = decode_check_output(result_blob(row, 16)?)?;
     if output.title != run.output_title {
@@ -79,7 +82,17 @@ fn check_detail_from_row(row: &[SqlValue]) -> crate::cells::Result<CheckRunDetai
             "repository check output title does not match its run",
         ));
     }
-    Ok(CheckRunDetail { run, output })
+    let scan = if run.status == 2 && run.name.starts_with(scans::CHECK_PREFIX) {
+        scans::load(context, run.number)?
+    } else {
+        None
+    };
+    Ok(CheckRunDetail {
+        run,
+        output,
+        scan,
+        scan_comparison: None,
+    })
 }
 
 pub(super) fn check_run_from_row(row: &[SqlValue]) -> crate::cells::Result<CheckRunRecord> {
@@ -293,6 +306,10 @@ pub(super) fn create_submission_digest(
     hash_text(&mut hasher, &input.oid);
     hash_text(&mut hasher, &input.name);
     hash_report(&mut hasher, &input.report)?;
+    if let Some(scan) = &input.scan {
+        hasher.update(b"\0crab.code-scan.v1\0");
+        hasher.update(&serde_json::to_vec(scan)?);
+    }
     Ok(hasher.finalize())
 }
 

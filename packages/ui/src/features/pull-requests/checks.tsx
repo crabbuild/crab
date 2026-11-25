@@ -67,7 +67,34 @@ interface CheckRun {
   created_at: number;
   updated_at: number;
   output?: CheckOutput;
+  scan_comparison?: ScanComparison;
 }
+
+type FindingState = "introduced" | "existing" | "unclassified";
+
+type ScanComparison = { baseline_sha: string } & (
+  | {
+      state: "ready";
+      introduced: number;
+      existing: number;
+      unclassified: number;
+      annotations: FindingState[];
+    }
+  | { state: "missing" | "incomplete" | "tools_changed" | "unreachable" }
+);
+
+const findingLabels: Record<FindingState, string> = {
+  introduced: "New",
+  existing: "Existing",
+  unclassified: "Unclassified",
+};
+
+const comparisonMessages = {
+  missing: "No matching scan has been reported for this base commit.",
+  incomplete: "At least one scan did not finish successfully.",
+  tools_changed: "The scans used different tools.",
+  unreachable: "This base commit is unavailable.",
+};
 
 interface CheckPage {
   sha: string;
@@ -112,6 +139,7 @@ export function CheckRuns({
   repo,
   pull,
   oid,
+  baseOid,
   selected,
   before,
   scopeToPull,
@@ -122,6 +150,7 @@ export function CheckRuns({
   repo: Repository;
   pull: number;
   oid: string;
+  baseOid: string;
   selected?: number;
   before?: number;
   scopeToPull?: boolean;
@@ -146,14 +175,25 @@ export function CheckRuns({
       : undefined,
   );
   const active = page.data && (selected ?? page.data.items[0]?.id);
+  const activeRun = page.data?.items.find((run) => run.id === active);
+  const baseline =
+    activeRun && !activeRun.name.startsWith("Code scanning / ")
+      ? undefined
+      : baseOid;
   const detail = useRequest<CheckRun>(
     active
-      ? endpoint(repo, `commits/${oid}/check-runs/${active}`, { pull: scope })
+      ? endpoint(repo, `commits/${oid}/check-runs/${active}`, {
+          pull: scope,
+          baseline,
+        })
       : null,
     repo.id,
     undefined,
     live
-      ? { revision: page.data?.items.find((run) => run.id === active)?.version }
+      ? {
+          revision: activeRun?.version,
+          interval: baseline ? () => 15_000 : undefined,
+        }
       : undefined,
   );
   const checkHref = (filters: Record<string, string> = {}) =>
@@ -292,6 +332,7 @@ function CheckRunDetail({
 }) {
   const output = run.output;
   if (!output) return null;
+  const comparison = run.scan_comparison;
   return (
     <article className="check-run-content">
       <header className={`check-run-heading ${outcome(run)}`}>
@@ -313,11 +354,33 @@ function CheckRunDetail({
           </a>
         )}
       </header>
+      {comparison && (
+        <section
+          aria-label="Scan comparison"
+          className="grid gap-1 rounded-md border p-3 text-sm"
+        >
+          <p>
+            Compared with base{" "}
+            <code title={comparison.baseline_sha}>
+              {short(comparison.baseline_sha)}
+            </code>
+          </p>
+          <p className="text-muted-foreground">
+            {comparison.state === "ready"
+              ? `${comparison.introduced} new · ${comparison.existing} existing · ${comparison.unclassified} unclassified`
+              : comparisonMessages[comparison.state]}
+          </p>
+        </section>
+      )}
       {output.annotations.length > 0 && (
         <section className="check-annotations" aria-label="Annotations">
           <h4>Annotations</h4>
           <ul>
             {output.annotations.map((annotation, index) => {
+              const finding =
+                comparison?.state === "ready"
+                  ? comparison.annotations[index]
+                  : undefined;
               const severity = {
                 failure: "Error",
                 warning: "Warning",
@@ -342,6 +405,11 @@ function CheckRunDetail({
                       {severity}
                       {annotation.title && ` · ${annotation.title}`}
                     </strong>
+                    {finding && (
+                      <span className="text-xs text-muted-foreground">
+                        {findingLabels[finding]}
+                      </span>
+                    )}
                     {href ? (
                       <Link className="wrap-anywhere underline" href={href}>
                         <code>{location}</code>

@@ -10,6 +10,9 @@ Owns the repository HTTP application, native Git endpoints, authentication, and 
 `api/checks/sarif.rs` normalizes scanner uploads into the exact-commit check
 owner. Finding output and replay use existing check records. Required checks
 evaluate the resulting conclusion through the existing provider policy.
+`cells/repository/checks/scans.rs` owns code-scanning evidence and the latest
+report index by author, category, and commit. Evidence and its pointer commit
+with the immutable check. Comparisons are read-only and bind two exact SHAs.
 
 ## Read first
 

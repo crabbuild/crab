@@ -19,6 +19,11 @@ against state written by 0.1.2 are not qualified.
 
 ## Execution and persistence
 
+SARIF fingerprint evidence and its latest-report pointer are written with the
+check submission in the Repository Cell. Existing check output encoding stays
+compatible and needs no preparation. Upgrade serving peers together before
+publishing scans with comparison evidence.
+
 The private single-container profile uses `cells.durability = "object"`, requiring
 bucket proof before native mutation acknowledgement. It generates and preserves
 its peer CA/key in the named data volume and prepares Directory through the
