@@ -1,6 +1,12 @@
 import type { BranchProtection } from "@/lib/contracts";
 import type { PropertyOverrides } from "@/features/organizations/property-fields";
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 export type RepositoryVisibility = "private" | "public";
 
@@ -149,6 +155,7 @@ export interface Timing {
 export interface Loaded<T> {
   data?: T;
   error?: string;
+  unavailable?: boolean;
   loading: boolean;
   timing?: Timing;
 }
@@ -304,6 +311,15 @@ export async function request<T>(
   return withAbort<T>(shared, signal);
 }
 
+class RequestFailure extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
 async function parseResponse<T>(response: Response): Promise<T> {
   if (response.status === 401)
     window.dispatchEvent(new Event("crab-session-expired"));
@@ -314,14 +330,18 @@ async function parseResponse<T>(response: Response): Promise<T> {
   } catch {
     if (!response.ok) {
       const message = text.trim().slice(0, 512);
-      throw new Error(message || `Request failed (${response.status})`);
+      throw new RequestFailure(
+        message || `Request failed (${response.status})`,
+        response.status,
+      );
     }
     throw new Error(`Server returned invalid JSON (${response.status})`);
   }
   if (!response.ok) {
     const failure = body as { error?: { message?: string } };
-    throw new Error(
+    throw new RequestFailure(
       failure.error?.message ?? `Request failed (${response.status})`,
+      response.status,
     );
   }
   return body as T;
@@ -423,6 +443,7 @@ export function useRequest<T>(
   url: string | null,
   repositoryId?: string,
   load = request<T>,
+  live?: { interval?: (data: T) => number | null; revision?: string | number },
 ): Loaded<T> & { retry: () => void } {
   const [attempt, setAttempt] = useState(0);
   const retry = useCallback(() => setAttempt((value) => value + 1), []);
@@ -431,29 +452,87 @@ export function useRequest<T>(
   >({
     loading: true,
   });
+  const watch = live?.interval !== undefined;
+  const revision = live?.revision;
+  const interval = useEffectEvent((data: T) => live?.interval?.(data) ?? null);
   useEffect(() => {
-    const controller = new AbortController();
     if (!url) {
       setState({ loading: false, url, repositoryId });
       return;
     }
-    setState({ loading: true, url, repositoryId });
-    load(url, controller.signal, repositoryId)
-      .then((result) => {
-        if (!controller.signal.aborted)
-          setState({ ...result, loading: false, url, repositoryId });
-      })
-      .catch((error: unknown) => {
-        if (!controller.signal.aborted)
+    const address = url;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    let busy = false;
+    let last: T | undefined;
+    // Preserve same-address controls during a revision read, and keep denied
+    // content hidden until a new response proves the address is available.
+    setState((previous) =>
+      previous.url === address &&
+      previous.repositoryId === repositoryId &&
+      (previous.unavailable ||
+        (revision !== undefined && previous.data !== undefined))
+        ? previous
+        : { loading: true, url: address, repositoryId },
+    );
+
+    async function read(quiet: boolean) {
+      if (busy || controller.signal.aborted || (quiet && document.hidden))
+        return;
+      busy = true;
+      let backedOff = false;
+      try {
+        const signal = quiet
+          ? AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)])
+          : controller.signal;
+        const result = await load(address, signal, repositoryId);
+        if (controller.signal.aborted) return;
+        last = result.data;
+        setState({ ...result, loading: false, url: address, repositoryId });
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        const denied =
+          error instanceof RequestFailure &&
+          error.status >= 400 &&
+          error.status < 500 &&
+          error.status !== 429;
+        if (!quiet || last === undefined || denied) {
+          last = undefined;
           setState({
             loading: false,
             error: error instanceof Error ? error.message : "Request failed",
-            url,
+            unavailable: denied,
+            url: address,
             repositoryId,
           });
-      });
-    return () => controller.abort();
-  }, [url, repositoryId, attempt, load]);
+        } else backedOff = true;
+      } finally {
+        busy = false;
+        if (
+          watch &&
+          !controller.signal.aborted &&
+          !document.hidden &&
+          last !== undefined
+        ) {
+          const delay = backedOff ? 15_000 : interval(last);
+          if (delay !== null) timer = setTimeout(() => void read(true), delay);
+        }
+      }
+    }
+
+    function visibilityChanged() {
+      clearTimeout(timer);
+      if (!document.hidden) void read(true);
+    }
+    if (watch) document.addEventListener("visibilitychange", visibilityChanged);
+    void read(false);
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+      if (watch)
+        document.removeEventListener("visibilitychange", visibilityChanged);
+    };
+  }, [url, repositoryId, attempt, load, watch, revision]);
   // Never paint the preceding route's data while the new effect is pending.
   return {
     ...(state.url === url && state.repositoryId === repositoryId

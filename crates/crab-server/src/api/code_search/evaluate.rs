@@ -3,8 +3,9 @@ use crab_remote_git::TreeEntry;
 use std::borrow::Cow;
 
 impl Pattern {
-    pub(super) fn repository_facts(&self, repo: &Repository) -> Facts {
-        self.query.facts(|term| term.repository_fact(repo))
+    pub(super) fn repository_facts(&self, repo: &Repository, archived: Option<bool>) -> Facts {
+        self.query
+            .facts(|term| term.repository_fact(repo, archived))
     }
 
     pub(super) fn file_facts(&self, path: &[u8], scope: &Facts) -> Facts {

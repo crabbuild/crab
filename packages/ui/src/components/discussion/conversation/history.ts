@@ -110,6 +110,10 @@ export function useConversation(
     newer: bounds.has_later,
     initialized: Boolean(settled || resource.error),
     upsert,
+    // Background changes can refresh the latest view without discarding pages
+    // someone deliberately loaded or moving them away from an older permalink.
+    refreshLatest:
+      kind === "initial" && !bounds.has_later ? resource.retry : undefined,
     posted(value: Comment) {
       if (bounds.has_later) return;
       const entry: Entry = { kind: "comment", value };

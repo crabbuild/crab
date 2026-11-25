@@ -44,9 +44,11 @@ interface Ruleset {
   restrict_creations: boolean;
   restrict_updates?: boolean;
   restrict_deletions: boolean;
+  force_pushes?: "allow" | "block";
   require_pull_request: boolean;
   required_approvals: number;
   required_code_owner_reviews: boolean;
+  require_last_push_approval?: boolean;
   require_conversation_resolution: boolean;
   require_up_to_date?: boolean;
   require_merge_queue?: boolean;
@@ -120,9 +122,11 @@ export function OrganizationRulesets({
 }
 
 const pullRules = {
+  force_pushes: undefined,
   require_pull_request: false,
   required_approvals: 0,
   required_code_owner_reviews: false,
+  require_last_push_approval: false,
   require_conversation_resolution: false,
   require_up_to_date: false,
   require_merge_queue: false,
@@ -407,11 +411,14 @@ function RulesetSummary({
         {rule.restrict_creations && <li>Restrict creations</li>}
         {rule.restrict_updates && <li>Restrict updates</li>}
         {rule.restrict_deletions && <li>Restrict deletions</li>}
+        {rule.force_pushes === "allow" && <li>Allow force pushes</li>}
+        {rule.force_pushes === "block" && <li>Block force pushes</li>}
         {rule.require_linear_history && <li>Require linear history</li>}
         {(rule.require_pull_request ||
           rule.require_merge_queue ||
           rule.required_approvals > 0 ||
           rule.required_code_owner_reviews ||
+          rule.require_last_push_approval ||
           rule.require_conversation_resolution ||
           rule.required_checks.length > 0 ||
           rule.required_integrations.length > 0) && (
@@ -424,6 +431,9 @@ function RulesetSummary({
           </li>
         )}
         {rule.required_code_owner_reviews && <li>Require code owner review</li>}
+        {rule.require_last_push_approval && (
+          <li>Require approval of the most recent reviewable push</li>
+        )}
         {rule.require_conversation_resolution && (
           <li>Require conversation resolution</li>
         )}
@@ -503,6 +513,7 @@ function RulesetForm({
     rule.require_merge_queue ||
     Number(approvals) > 0 ||
     rule.required_code_owner_reviews ||
+    rule.require_last_push_approval ||
     rule.require_conversation_resolution ||
     hasRequiredChecks;
   const restrictDismissal = rule.review_dismissal !== undefined;
@@ -671,6 +682,34 @@ function RulesetForm({
           />{" "}
           Restrict deletions
         </label>
+        {branch && (
+          <div className="grid gap-1">
+            <label htmlFor="ruleset-force-pushes">Force pushes</label>
+            <FieldSelect
+              id="ruleset-force-pushes"
+              aria-describedby="ruleset-force-push-help"
+              value={rule.force_pushes ?? "default"}
+              options={{
+                default: "Use repository policy",
+                allow: "Allow force pushes",
+                block: "Block force pushes",
+              }}
+              onValueChange={(value) =>
+                change({
+                  force_pushes:
+                    value === "allow" || value === "block" ? value : undefined,
+                })
+              }
+            />
+            <p
+              id="ruleset-force-push-help"
+              className="text-sm text-muted-foreground"
+            >
+              Allow history rewrites on matching branches. A matching block rule
+              takes precedence unless a bypass applies.
+            </p>
+          </div>
+        )}
         <label className="flex items-center gap-2">
           <Checkbox
             checked={Boolean(rule.require_linear_history)}
@@ -710,6 +749,15 @@ function RulesetForm({
                 }
               />{" "}
               Require code owner review
+            </label>
+            <label className="flex items-center gap-2">
+              <Checkbox
+                checked={Boolean(rule.require_last_push_approval)}
+                onCheckedChange={(checked) =>
+                  change({ require_last_push_approval: checked === true })
+                }
+              />
+              Require approval of the most recent reviewable push
             </label>
             <label className="flex items-center gap-2">
               <Checkbox

@@ -48,10 +48,20 @@ test("an owner confirms publication and a signed-out visitor can find the code",
     branches_available: true,
     rollup: null,
   };
+  let guestPullReads = 0;
+  const privatePullReads: string[] = [];
   async function install(target: Page, admin: boolean) {
     await target.route("**/api/**", async (route) => {
       const request = route.request();
       const { pathname } = new URL(request.url());
+      if (!admin && pathname.endsWith("/pulls/1")) guestPullReads += 1;
+      if (
+        !admin &&
+        /\/pulls\/1\/(reviewers|merge-candidate|auto-merge|pending-review)$|\/check-runs(?:\/\d+)?$/.test(
+          pathname,
+        )
+      )
+        privatePullReads.push(pathname);
       if (pathname === "/api/session")
         return route.fulfill({
           json: {
@@ -163,6 +173,7 @@ test("an owner confirms publication and a signed-out visitor can find the code",
   const guest = await guestContext.newPage();
   try {
     await install(guest, false);
+    await guest.clock.install();
     await guest.goto("/");
     await guest
       .getByRole("link", { name: "Browse public repositories" })
@@ -218,6 +229,11 @@ test("an owner confirms publication and a signed-out visitor can find the code",
     await expect(
       guest.getByRole("button", { name: "Comment", exact: true }),
     ).toHaveCount(0);
+    await guest.clock.fastForward(30_000);
+    expect(guestPullReads).toBe(1);
+    await guest.goto("/org-crab/library/pull/1/checks");
+    await expect(guest.getByText("Pull request description")).toBeVisible();
+    expect(privatePullReads).toEqual([]);
   } finally {
     await guestContext.close();
   }

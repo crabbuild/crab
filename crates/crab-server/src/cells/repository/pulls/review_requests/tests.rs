@@ -107,6 +107,7 @@ fn review(subject: &str, state: ReviewState) -> CreatePullReviewInput {
         body: "Review feedback".into(),
         state,
         commit_oid: "b".repeat(40),
+        comparison: None,
     }
 }
 

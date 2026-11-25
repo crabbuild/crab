@@ -1,4 +1,5 @@
 use super::*;
+use crate::cells::repository::push_attribution::RefVersion;
 use uuid::Uuid;
 
 pub(crate) mod list;
@@ -21,6 +22,8 @@ pub(crate) struct Job {
     pub head_ref: String,
     pub head_repository: Option<Uuid>,
     pub head_oid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracked_head: Option<TrackedHead>,
     pub initial_base_oid: String,
     pub initial_version: u64,
     pub generation: u64,
@@ -33,6 +36,12 @@ pub(crate) struct Job {
     pub when_ready: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<QueueEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct TrackedHead {
+    pub oid: String,
+    pub version: RefVersion,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -114,6 +123,13 @@ pub(crate) enum Change {
         #[serde(default)]
         ruleset_queue_required: bool,
     },
+    Follow {
+        pull: u64,
+        id: Uuid,
+        version: u64,
+        previous: RefVersion,
+        head: TrackedHead,
+    },
     Enqueue {
         pull: u64,
         id: Uuid,
@@ -175,6 +191,12 @@ impl QueueSettings {
 }
 
 impl Job {
+    pub(crate) fn current_head_oid(&self) -> &str {
+        self.tracked_head
+            .as_ref()
+            .map_or(&self.head_oid, |head| &head.oid)
+    }
+
     pub(crate) fn uses_queue(&self) -> bool {
         self.when_ready || self.queue.is_some()
     }
@@ -218,6 +240,10 @@ impl Job {
         digest.update(self.candidate_id(order_revision).as_bytes());
         digest.update(&version.to_be_bytes());
         digest.update(base.as_bytes());
+        if let Some(head) = &self.tracked_head {
+            digest.update(b"\0head-transaction\0");
+            digest.update(head.version.transaction.as_bytes());
+        }
         if let Some(tested) = tested {
             digest.update(b"\0tested\0");
             digest.update(tested.as_bytes());
@@ -439,6 +465,10 @@ impl Mutation for Edit {
                 validate_oid(&job.initial_base_oid)?;
                 if job.id.is_nil()
                     || job.queue.is_some()
+                    || job
+                        .tracked_head
+                        .as_ref()
+                        .is_some_and(|head| queue || head.oid != job.head_oid)
                     || (job.when_ready && !queue)
                     || job.message.chars().count() > 256
                     || (queue && (!job.method.supports_queue() || !job.message.is_empty()))
@@ -449,6 +479,9 @@ impl Mutation for Edit {
                 if let Some(existing) = context.document::<Job>(&active)? {
                     let same_mode = existing.uses_queue() == queue;
                     job.queue = existing.queue.clone();
+                    // The original comparison remains the submission binding
+                    // even when the sweep has followed a later publication.
+                    job.tracked_head.clone_from(&existing.tracked_head);
                     return Ok(if same_mode && existing == job {
                         Success(Outcome::Saved)
                     } else {
@@ -512,6 +545,34 @@ impl Mutation for Edit {
                 context.put_document(&active, &job)?;
                 context.put_document(&receipt, &true)?;
                 context.delete_document(&key(STOPPED, job.pull))?;
+            }
+            Change::Follow {
+                pull,
+                id,
+                version,
+                previous,
+                head,
+            } => {
+                validate_oid(&head.oid)?;
+                let active = key(ACTIVE, pull);
+                let Some(mut job) = context.document::<Job>(&active)?.filter(|job| {
+                    job.id == id
+                        && !job.uses_queue()
+                        && job
+                            .tracked_head
+                            .as_ref()
+                            .is_some_and(|head| head.version == previous)
+                }) else {
+                    return Ok(Rejected(Outcome::Changed));
+                };
+                let Some(record) = load_pull(context, pull)? else {
+                    return Ok(Rejected(Outcome::Changed));
+                };
+                if record.merge_pending.is_some() || !job.matches_pull(&record, version) {
+                    return Ok(Rejected(Outcome::Changed));
+                }
+                job.tracked_head = Some(head);
+                context.put_document(&active, &job)?;
             }
             Change::Enqueue {
                 pull,

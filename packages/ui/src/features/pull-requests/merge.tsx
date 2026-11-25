@@ -72,9 +72,10 @@ export function MergePanel({
   const bypassing = Boolean(confirmation?.bypass_rulesets?.length);
   const staleConfirmation =
     confirmation &&
-    (!(bypassing ? bypassMethods : pull.merge_methods).includes(
-      confirmation.method,
-    ) ||
+    ((!bypassing && !pull.can_merge) ||
+      !(bypassing ? bypassMethods : pull.merge_methods).includes(
+        confirmation.method,
+      ) ||
       confirmation.version !== pull.version ||
       confirmation.base_oid !== pull.base_oid ||
       confirmation.head_oid !== pull.head_oid ||
@@ -93,7 +94,9 @@ export function MergePanel({
   const requirements = pull.merge_requirements;
   const unresolved = requirements.unresolved_conversations;
   const reviewsSatisfied =
-    (requirements.required_approvals === 0 && !requirements.code_owners) ||
+    (requirements.required_approvals === 0 &&
+      !requirements.code_owners &&
+      !requirements.last_push_approval) ||
     (requirements.changes_requested === 0 &&
       requirements.approvals >= requirements.required_approvals);
   const headBranch = pull.state !== "open" && (
@@ -248,7 +251,7 @@ export function MergePanel({
       <div className="merge-summary">
         <StatusIcon size={24} />
         <div className="merge-action">
-          <strong>
+          <strong aria-live="polite">
             {pending ? (
               <>
                 <Author author={pending.author} /> started a merge using{" "}
@@ -364,11 +367,28 @@ export function MergePanel({
                 : `${Math.max(0, requirements.required_approvals - requirements.approvals)} more approving review${requirements.required_approvals - requirements.approvals === 1 ? " is" : "s are"} required.`}
             </p>
           )}
+          {!unavailable && requirements.last_push_approval === "pending" && (
+            <p className="merge-blocked-note">
+              The latest push needs approval from a repository writer who did
+              not make that push.
+            </p>
+          )}
+          {!unavailable &&
+            requirements.last_push_approval === "pusher_unavailable" && (
+              <p className="merge-blocked-note">
+                Crab could not verify who made the latest push. Push a new
+                commit before requesting approval.
+              </p>
+            )}
+          {!unavailable && requirements.last_push_approval === "approved" && (
+            <p>The latest push has an independent approval.</p>
+          )}
         </div>
       </div>
       {!unavailable && (
         <div className="merge-footer">
-          {pull.can_merge || (!pending && bypassIds.length > 0) ? (
+          {pull.can_merge ||
+          (!pending && (confirmation || bypassIds.length)) ? (
             <div className="merge-controls">
               {!pending && !confirmation && (
                 <div className="merge-method-row">
@@ -484,8 +504,9 @@ export function MergePanel({
                   )}
                   {staleConfirmation && !pending && (
                     <p role="status">
-                      The merge options or branch tips changed. Cancel and
-                      review them again.
+                      {!bypassing && !pull.can_merge
+                        ? "Merge requirements are no longer met. Cancel and review the current requirements."
+                        : "The merge options or branch tips changed. Cancel and review them again."}
                     </p>
                   )}
                   <div className="merge-method-row">

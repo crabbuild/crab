@@ -204,9 +204,33 @@ async fn native_browser_merge_when_ready_queues_and_publishes_the_tested_head() 
         format!("{base}\trefs/heads/main")
     );
 
+    browser
+        .run(&[
+            "find",
+            "role",
+            "link",
+            "click",
+            "--name",
+            "Candidate checks",
+            "--exact",
+        ])
+        .await;
+    browser.run(&["reload"]).await;
+    browser
+        .run(&["wait", "--text", "Required checks are waiting"])
+        .await;
+    browser
+        .run(&["wait", &format!(".required-checks code[title='{tested}']")])
+        .await;
     check(&tested).await;
     browser
-        .run(&["wait", "--text", "Published the tested merge candidate."])
+        .run(&["wait", "--text", "Tested merge commit"])
+        .await;
+    browser
+        .run(&[
+            "wait",
+            &format!("[aria-label='Merge check history'] code[title='{tested}']"),
+        ])
         .await;
     git(&["fetch", remote.as_str(), "main"]).await;
     assert_eq!(

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::{
@@ -26,6 +27,7 @@ use crate::{
 struct Scope {
     names: Vec<String>,
     include_mine: bool,
+    users: Vec<(String, Option<Uuid>)>,
 }
 
 pub(in crate::api) struct Bound {
@@ -40,11 +42,24 @@ pub(super) async fn bind(
     input: &mut SearchInput,
 ) -> Result<Option<Bound>> {
     let query = Query::parse(input.query.as_deref()).map_err(Error::Invalid)?;
+    let mut users = query.review_team_users();
+    let include_mine = users.remove("@me");
     let scope = Scope {
         names: query.review_team_names().into_iter().collect(),
-        include_mine: query.includes_my_team_requests(),
+        include_mine,
+        users: users
+            .into_iter()
+            .map(|name| {
+                let account = input
+                    .people
+                    .iter()
+                    .find(|person| person.name == name)
+                    .and_then(|person| person.account);
+                (name, account)
+            })
+            .collect(),
     };
-    if scope.names.is_empty() && !scope.include_mine {
+    if scope.names.is_empty() && !scope.include_mine && scope.users.is_empty() {
         return Ok(None);
     }
     let bindings = scope.resolve(server, principal, repo).await?;
@@ -84,6 +99,11 @@ impl Scope {
                 .map(|name| (name, None))
                 .collect(),
             mine: Vec::new(),
+            users: self
+                .users
+                .iter()
+                .map(|(name, _)| (name.clone(), Vec::new()))
+                .collect(),
         };
         let mut selected = Vec::new();
         let mut names = Vec::new();
@@ -95,7 +115,8 @@ impl Scope {
                 names.push(team.to_owned());
             }
         }
-        if selected.is_empty() && !self.include_mine {
+        let users: BTreeSet<_> = self.users.iter().filter_map(|(_, id)| *id).collect();
+        if selected.is_empty() && !self.include_mine && users.is_empty() {
             return Ok(bound);
         }
         let Some((organization, actor)) = authority(server, principal, repo).await? else {
@@ -110,6 +131,7 @@ impl Scope {
                     actor,
                     names,
                     include_mine: self.include_mine,
+                    users: users.into_iter().collect(),
                 },
             )
             .await;
@@ -127,6 +149,11 @@ impl Scope {
             bound.named[index].1 = team;
         }
         bound.mine = output.mine;
+        for ((_, resolved), (_, requested)) in bound.users.iter_mut().zip(&self.users) {
+            if let Some(requested) = requested {
+                *resolved = output.users.get(requested).cloned().unwrap_or_default();
+            }
+        }
         Ok(bound)
     }
 }

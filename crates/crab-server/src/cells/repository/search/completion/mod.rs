@@ -34,6 +34,7 @@ pub(crate) struct Suggestion {
     pub description: String,
 }
 
+const MAX_SUGGESTIONS: usize = 21;
 const PEOPLE_QUALIFIERS: &[&str] = &[
     "author",
     "commenter",
@@ -42,6 +43,7 @@ const PEOPLE_QUALIFIERS: &[&str] = &[
     "reviewed-by",
     "review-involves",
     "user-review-requested",
+    "team-review-requested-user",
 ];
 
 pub(crate) struct CompleteSearch;
@@ -166,7 +168,7 @@ pub(crate) fn append_qualified_values(
     let retained = input.query[..start].chars().count() + input.query[end..].chars().count();
     for (handle, description) in handles {
         let value = format!("{sign}{qualifier}:{handle}");
-        if retained + value.chars().count() <= 256 && result.items.len() < 20 {
+        if retained + value.chars().count() <= 256 && result.items.len() < MAX_SUGGESTIONS {
             result.items.push(Suggestion { value, description });
         }
     }
@@ -198,12 +200,12 @@ fn suggestions(
                 value: format!("{sign}label:{previous}{quoted}"),
                 description: label.description.clone().unwrap_or_default(),
             });
-            if items.len() == 20 {
+            if items.len() == MAX_SUGGESTIONS {
                 break;
             }
         }
     } else if prefix.starts_with("milestone:") {
-        for milestone in milestones.iter().take(20) {
+        for milestone in milestones.iter().take(MAX_SUGGESTIONS) {
             items.push(Suggestion {
                 value: format!(
                     "{sign}milestone:{}",
@@ -235,6 +237,19 @@ fn suggestions(
                 });
             }
         }
+    } else if prefix.starts_with("status:") {
+        for (value, description) in [
+            ("status:pending", "Checks pending or not yet reported"),
+            ("status:success", "Checks completed without failure"),
+            ("status:failure", "At least one check failed"),
+        ] {
+            if value.starts_with(&prefix) {
+                items.push(Suggestion {
+                    value: format!("{sign}{value}"),
+                    description: description.into(),
+                });
+            }
+        }
     } else if PEOPLE_QUALIFIERS
         .iter()
         .any(|kind| prefix.starts_with(&format!("{kind}:")))
@@ -248,6 +263,10 @@ fn suggestions(
             ("reviewed-by:@me", "Reviewed by you"),
             ("review-involves:@me", "Your review involvement"),
             ("user-review-requested:@me", "Directly awaiting your review"),
+            (
+                "team-review-requested-user:@me",
+                "Awaiting a review from your teams",
+            ),
         ] {
             if value.starts_with(&prefix) {
                 items.push(Suggestion {
@@ -266,6 +285,9 @@ fn suggestions(
             ("milestone:", "Filter by repository milestone"),
             ("review:", "Filter review status"),
             ("review-requested:", "Filter pending reviewers"),
+            ("base:", "Filter by the exact target branch"),
+            ("head:", "Filter by the source branch prefix"),
+            ("status:", "Filter by commit check status"),
             ("type:", "Filter by issue type"),
             ("in:", "Choose which discussion text to search"),
             ("no:", "Find work with missing metadata"),
@@ -301,6 +323,10 @@ fn suggestions(
             ("assignee:@me", "Work assigned to you"),
             ("assignee:*", "Work with any assignee"),
             ("team-review-requested:", "Filter by requested team"),
+            (
+                "team-review-requested-user:",
+                "Filter requests to a person's teams",
+            ),
             ("reviewed-by:", "Filter submitted reviewers"),
             (
                 "review-involves:",
@@ -347,7 +373,7 @@ fn suggestions(
             + input.query[end..].chars().count()
             <= 256
     });
-    items.truncate(20);
+    items.truncate(MAX_SUGGESTIONS);
     let error = Query::parse((!input.query.trim().is_empty()).then(|| input.query.trim()))
         .err()
         .map(str::to_owned);

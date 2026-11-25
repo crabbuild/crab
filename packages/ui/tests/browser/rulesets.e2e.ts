@@ -119,6 +119,11 @@ test("repository admins manage rulesets and readers see active rules", async ({
   await page.getByLabel("Exclude patterns").fill("release/sandbox");
   await page.getByLabel("Required approving reviews").fill("2");
   await page
+    .getByRole("checkbox", {
+      name: "Require approval of the most recent reviewable push",
+    })
+    .check();
+  await page
     .getByLabel("Restrict who can dismiss pull request reviews")
     .check();
   await page
@@ -128,6 +133,10 @@ test("repository admins manage rulesets and readers see active rules", async ({
     .getByLabel("Allow review dismissal for")
     .selectOption(`team:${releaseTeam}`);
   await page.getByLabel("Restrict updates", { exact: true }).check();
+  await chooseSelectOption(
+    page.getByRole("combobox", { name: "Force pushes" }),
+    { label: "Block force pushes" },
+  );
   await page.getByLabel("Require linear history", { exact: true }).check();
   await page.getByLabel("Restrict deletions").check();
   await page.getByLabel("Require conversation resolution").check();
@@ -162,12 +171,14 @@ test("repository admins manage rulesets and readers see active rules", async ({
     exclude: ["release/sandbox"],
     restrict_deletions: true,
     restrict_updates: true,
+    force_pushes: "block",
     require_linear_history: true,
     require_conversation_resolution: true,
     require_up_to_date: true,
     require_merge_queue: true,
     required_checks: ["ci/release"],
     required_approvals: 2,
+    require_last_push_approval: true,
     review_dismissal: [
       { kind: "user", id: releaseReviewer },
       { kind: "team", id: releaseTeam },
@@ -187,6 +198,11 @@ test("repository admins manage rulesets and readers see active rules", async ({
   ).toBeVisible();
   await expect(page.getByText("Require 2 approving reviews")).toBeVisible();
   await expect(
+    page.getByText("Require approval of the most recent reviewable push", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
     page.getByText("Restrict review dismissal", { exact: true }),
   ).toBeVisible();
   await expect(
@@ -194,6 +210,9 @@ test("repository admins manage rulesets and readers see active rules", async ({
   ).toBeVisible();
   await expect(
     page.getByText("Restrict updates", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Block force pushes", { exact: true }),
   ).toBeVisible();
   await expect(
     page.getByText("Require merge queue", { exact: true }),

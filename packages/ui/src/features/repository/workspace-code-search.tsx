@@ -105,7 +105,8 @@ export default function WorkspaceCodeSearch({ url }: { url: URL }) {
             <FieldDescription id="workspace-search-qualifiers">
               Combine terms with <code>AND</code>, <code>OR</code>, or{" "}
               <code>NOT</code>. Use <code>/pattern/</code> for regex or quotes
-              for an exact phrase.
+              for an exact phrase. Filter repositories with <code>is:fork</code>{" "}
+              or <code>is:archived</code>.
             </FieldDescription>
           </Field>
           <Button className="mt-6" type="submit">

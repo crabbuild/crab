@@ -64,6 +64,7 @@ async fn page(cell: &RepositoryCell, oid: Option<&str>) -> Rollup {
                     oid: oid.map(str::to_owned),
                 }],
                 source_token: None,
+                check_revision: None,
             },
         )
         .await
@@ -137,6 +138,7 @@ async fn review(cell: &RepositoryCell, who: &str, state: ReviewState) {
             body: "Review context".into(),
             state,
             commit_oid: "b".repeat(40),
+            comparison: None,
         },
     )
     .await;
@@ -152,7 +154,7 @@ async fn rollups_combine_latest_status_contexts_and_latest_named_run_versions_wi
         .repository(server.repositories.values()[0].id)
         .unwrap();
     seed(&cell).await;
-    for (context, state) in [("lint", 1), ("LINT", 3), ("deploy", 2)] {
+    for (context, state) in [("lint", 1), ("LINT", 3), ("deploy", 2), ("büild", 3)] {
         write::<CreateCommitStatus>(
             &cell,
             CreateCommitStatusInput {
@@ -167,8 +169,8 @@ async fn rollups_combine_latest_status_contexts_and_latest_named_run_versions_wi
         )
         .await;
     }
-    let older = run(&cell, "unit", 1, None).await;
-    run(&cell, "UNIT", 2, Some(5)).await;
+    let older = run(&cell, "büild", 1, None).await;
+    run(&cell, "BÜILD", 2, Some(5)).await;
     write::<UpdateCheckRun>(
         &cell,
         UpdateCheckRunInput {
@@ -187,7 +189,7 @@ async fn rollups_combine_latest_status_contexts_and_latest_named_run_versions_wi
     assert_eq!(
         page(&cell, Some(&"b".repeat(40))).await.checks.unwrap(),
         Checks {
-            success: 2,
+            success: 3,
             neutral: 1,
             skipped: 1,
             pending: 1,
@@ -197,6 +199,116 @@ async fn rollups_combine_latest_status_contexts_and_latest_named_run_versions_wi
     assert_eq!(
         page(&cell, Some(&"c".repeat(40))).await.checks.unwrap(),
         Checks::default()
+    );
+    fixtures::close(&server).await;
+}
+
+pub(in crate::cells::repository) struct BeforeCommitSummaries;
+impl Mutation for BeforeCommitSummaries {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
+    const ID: u32 = 65_534;
+    type Input = ();
+    type Output = ();
+
+    fn execute(context: &mut Transaction<'_>, (): ()) -> crate::cells::Result<MutationResult<()>> {
+        context.install_schema(
+            "DROP TABLE repository_check_rollups; DROP TABLE repository_check_rollup_revision;",
+        )?;
+        context.delete_document("ci/v1/check-rollups-installed")?;
+        let mut state: serde_json::Value = context.document("discussion-search/v1/state")?.unwrap();
+        state["format"] = serde_json::json!(16);
+        context.put_document("discussion-search/v1/state", &state)?;
+        Ok(MutationResult::Success(()))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preparation_preserves_old_reports_and_writes_behind_its_cursor() {
+    let server = fixtures::fixture().await;
+    let cell = server
+        .cells()
+        .unwrap()
+        .repository(server.repositories.values()[0].id)
+        .unwrap();
+    seed(&cell).await;
+    run(&cell, "unit", 2, Some(5)).await;
+    write::<BeforeCommitSummaries>(&cell, ()).await;
+    let add_status = async |oid: &str, state| {
+        let result = write::<CreateCommitStatus>(
+            &cell,
+            CreateCommitStatusInput {
+                submission_id: *Uuid::now_v7().as_bytes(),
+                author: actor("ci"),
+                oid: oid.into(),
+                context: "unit".into(),
+                state,
+                description: None,
+                target_url: None,
+            },
+        )
+        .await;
+        assert!(matches!(result, CreateCommitStatusOutcome::Created(_)));
+    };
+    for index in 10..19 {
+        add_status(&format!("{index:040x}"), 3).await;
+    }
+    let old_head = "b".repeat(40);
+    add_status(&old_head, 1).await;
+    let generation = Uuid::now_v7();
+    let initial = cell
+        .client
+        .query::<GetSearchIndexStatus>(&cell.target, None, ())
+        .await
+        .unwrap()
+        .output;
+    let SearchIndexStatus::Outdated {
+        generation: old,
+        format: 16,
+    } = initial
+    else {
+        panic!("Expected the previous discussion index format");
+    };
+    write::<RebuildIndex>(
+        &cell,
+        RebuildSearchInput::Begin {
+            expected: Some(old),
+            generation,
+        },
+    )
+    .await;
+    write::<RebuildIndex>(
+        &cell,
+        RebuildSearchInput::Step {
+            generation,
+            version: 1,
+        },
+    )
+    .await;
+    let behind_cursor = format!("{:040x}", 1);
+    add_status(&behind_cursor, 3).await;
+    write::<RebuildIndex>(
+        &cell,
+        RebuildSearchInput::Step {
+            generation,
+            version: 2,
+        },
+    )
+    .await;
+    assert_eq!(
+        page(&cell, Some(&old_head)).await.checks.unwrap(),
+        Checks {
+            success: 1,
+            failed: 1,
+            ..Checks::default()
+        }
+    );
+    assert_eq!(
+        page(&cell, Some(&behind_cursor))
+            .await
+            .checks
+            .unwrap()
+            .success,
+        1
     );
     fixtures::close(&server).await;
 }
@@ -249,6 +361,7 @@ async fn decisions_and_request_counters_follow_fulfillment_cancellation_and_sour
                     oid: Some("b".repeat(40)),
                 }],
                 source_token: None,
+                check_revision: None,
             },
         )
         .await
@@ -336,7 +449,8 @@ async fn format_ten_preparation_rebuilds_request_counts_and_is_repeatable_withou
                                 version: before.as_ref().unwrap().version,
                                 oid: Some("b".repeat(40))
                             }],
-                            source_token: None
+                            source_token: None,
+                            check_revision: None,
                         }
                     )
                     .await

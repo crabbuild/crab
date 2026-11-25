@@ -116,6 +116,14 @@ async fn squash_merge_restores_the_original_head_under_current_branch_policy() {
         .await
         .error_for_status()
         .unwrap();
+    let searched = h
+        .json(
+            "/api/repos/team/private/pulls?q=is%3Amerged+base%3Amain+head%3Afeat",
+            &writer,
+        )
+        .await;
+    assert_eq!(searched["matching"], 1);
+    assert_eq!(searched["items"][0]["number"], merged["number"]);
     let mut input = h.json(HEAD_BRANCH, &writer).await["branch"].clone();
     assert_eq!(input["head_oid"], head);
     input["request_id"] = json!(Uuid::now_v7());

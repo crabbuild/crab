@@ -62,11 +62,11 @@ pub(crate) use pulls::{
     MergeMethod, MergeReviewers, MergedPullForRelease, PullChildKey, PullChildListInput,
     PullCommentRecord, PullMerge, PullMergeTransition, PullReadiness, PullRecord, PullReviewRecord,
     PullState, PullSubmissionKey, PullSummary, RejectStalePullComparison, ReservePullMerge,
-    ReservePullMergeInput, ReservePullMergeOutcome, ReviewState, SetPullReadiness,
-    SetPullReadinessInput, SetPullReadinessOutcome, TransitionPullMerge, TransitionPullMergeInput,
-    TransitionPullMergeOutcome, UpdatePull, UpdatePullComment, UpdatePullCommentInput,
-    UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome, UpdatePullReview,
-    UpdatePullReviewInput, UpdatePullReviewOutcome,
+    ReservePullMergeInput, ReservePullMergeOutcome, ReviewComparison, ReviewState,
+    SetPullReadiness, SetPullReadinessInput, SetPullReadinessOutcome, TransitionPullMerge,
+    TransitionPullMergeInput, TransitionPullMergeOutcome, UpdatePull, UpdatePullComment,
+    UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome,
+    UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
 };
 pub(crate) use pulls::{
     GetPullDetail, GetPullLifecycleStatus, PreparePullLifecycle, PullLifecycle, review_requests,
@@ -114,6 +114,7 @@ mod models;
 pub(crate) mod projection;
 pub(crate) mod projects;
 mod pulls;
+pub(crate) mod push_attribution;
 pub(crate) mod recent_pushes;
 mod releases;
 mod schema;

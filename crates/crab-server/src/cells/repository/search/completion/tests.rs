@@ -78,12 +78,17 @@ fn empty_search_offers_qualifiers_before_values_and_state_completes() {
         "assignee:",
         "milestone:",
         "review:",
+        "base:",
+        "head:",
+        "status:",
     ] {
         assert!(
             result.items.iter().any(|item| item.value == expected),
             "{expected}"
         );
     }
+    let status = complete(&input("-status:fa", 10));
+    assert_eq!(status.items[0].value, "-status:failure");
     let state = complete(&input("state:", 6));
     assert_eq!(
         state

@@ -213,6 +213,7 @@ impl Prepared {
             "Git receive phase completed"
         );
         Ok(CapsuleArtifacts {
+            attempt: None,
             layout: self.layout.clone(),
             base: view.root_snapshot().clone(),
             edits,
@@ -305,6 +306,27 @@ async fn load_shared_catalog(
 }
 
 impl CapsuleArtifacts {
+    /// Bind these artifacts to a fresh attempt at a stable publication plan.
+    ///
+    /// The caller may reserve evidence for this exact attempt before commit.
+    pub fn bind_plan_attempt(
+        &mut self,
+        plan_id: &str,
+    ) -> Result<crab_metadata::capsule_protocol::CapsuleTransaction> {
+        if self.attempt.is_some() {
+            return Err(Error::Request(
+                "Artifacts already have a publication attempt",
+            ));
+        }
+        let attempt = crab_metadata::capsule_protocol::CapsuleTransaction::for_plan_attempt(
+            self.base.record().digest(),
+            plan_id,
+            self.edits.clone(),
+        )?;
+        self.attempt = Some(attempt.clone());
+        Ok(attempt)
+    }
+
     async fn encode(
         &mut self,
         plan_id: Option<&str>,
@@ -312,13 +334,17 @@ impl CapsuleArtifacts {
         crab_metadata::capsule_protocol::CapsuleTransaction,
         crab_metadata::capsule_protocol::Capsule,
     )> {
-        let transaction = match plan_id {
-            Some(plan_id) => crab_metadata::capsule_protocol::CapsuleTransaction::for_plan(
+        let transaction = match (self.attempt.take(), plan_id) {
+            (Some(attempt), plan_id) if attempt.plan_id() == plan_id => attempt,
+            (Some(_), _) => {
+                return Err(Error::Request("Publication plan differs from its attempt"));
+            }
+            (None, Some(plan_id)) => crab_metadata::capsule_protocol::CapsuleTransaction::for_plan(
                 self.base.record().digest(),
                 plan_id,
                 self.edits.clone(),
             )?,
-            None => crab_metadata::capsule_protocol::CapsuleTransaction::new(
+            (None, None) => crab_metadata::capsule_protocol::CapsuleTransaction::new(
                 self.base.record().digest(),
                 self.edits.clone(),
             )?,

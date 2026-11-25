@@ -39,6 +39,7 @@ export function BranchProtectionSettings({
   const [branch, setBranch] = useState("");
   const [approvals, setApprovals] = useState("0");
   const [codeOwners, setCodeOwners] = useState(false);
+  const [requireLastPushApproval, setRequireLastPushApproval] = useState(false);
   const [requireResolution, setRequireResolution] = useState(false);
   const [requireUpToDate, setRequireUpToDate] = useState(false);
   const [requireQueue, setRequireQueue] = useState(false);
@@ -74,6 +75,7 @@ export function BranchProtectionSettings({
     setBranch(rule?.branch ?? "");
     setApprovals(String(rule?.required_approvals ?? 0));
     setCodeOwners(Boolean(rule?.required_code_owner_reviews));
+    setRequireLastPushApproval(Boolean(rule?.require_last_push_approval));
     setRequireResolution(Boolean(rule?.require_conversation_resolution));
     setRequireUpToDate(Boolean(rule?.require_up_to_date));
     setRequireQueue(Boolean(rule?.require_merge_queue));
@@ -145,6 +147,7 @@ export function BranchProtectionSettings({
       branch: branch.trim(),
       required_approvals: Number(approvals),
       ...(codeOwners ? { required_code_owner_reviews: true } : {}),
+      ...(requireLastPushApproval ? { require_last_push_approval: true } : {}),
       ...(requireResolution ? { require_conversation_resolution: true } : {}),
       ...(requireUpToDate ? { require_up_to_date: true } : {}),
       ...(requireQueue ? { require_merge_queue: true } : {}),
@@ -200,17 +203,24 @@ export function BranchProtectionSettings({
                   <strong>
                     <code>{rule.branch}</code>
                   </strong>
-                  <p>
-                    {rule.required_approvals === 0
-                      ? rule.required_code_owner_reviews
-                        ? "Code owner approval required"
-                        : "No approving reviews required"
-                      : `${rule.required_approvals} approving review${rule.required_approvals === 1 ? "" : "s"} required`}
-                    {rule.required_approvals > 0 &&
-                    rule.required_code_owner_reviews
-                      ? " · Code owner approval required"
-                      : ""}
-                  </p>
+                  {(rule.required_approvals > 0 ||
+                    rule.required_code_owner_reviews ||
+                    !rule.require_last_push_approval) && (
+                    <p>
+                      {rule.required_approvals === 0
+                        ? rule.required_code_owner_reviews
+                          ? "Code owner approval required"
+                          : "No approving reviews required"
+                        : `${rule.required_approvals} approving review${rule.required_approvals === 1 ? "" : "s"} required`}
+                      {rule.required_approvals > 0 &&
+                      rule.required_code_owner_reviews
+                        ? " · Code owner approval required"
+                        : ""}
+                    </p>
+                  )}
+                  {rule.require_last_push_approval && (
+                    <p>Approval of the most recent push required</p>
+                  )}
                   {rule.require_conversation_resolution && (
                     <p>Conversation resolution required</p>
                   )}
@@ -358,6 +368,18 @@ export function BranchProtectionSettings({
             <p className="settings-help-inline">
               Require an approval for matching paths from an eligible owner in
               the base branch&apos;s CODEOWNERS file.
+            </p>
+            <label className="flex items-center gap-2">
+              <Checkbox
+                checked={requireLastPushApproval}
+                onCheckedChange={(checked) =>
+                  setRequireLastPushApproval(checked === true)
+                }
+              />
+              Require approval of the most recent reviewable push
+            </label>
+            <p className="settings-help-inline">
+              A repository writer other than the person who pushed must approve.
             </p>
             <label className="flex items-center gap-2">
               <Checkbox

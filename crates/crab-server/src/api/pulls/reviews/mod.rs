@@ -275,6 +275,11 @@ async fn create(
             return Err(Error::OwnReview);
         }
     }
+    let comparison = if !replay && input.state == ReviewState::Approved {
+        super::last_push::capture(&server, repo, &pull, &input.commit_oid, None).await?
+    } else {
+        None
+    };
     let review = storage::create_review(
         &server,
         repo,
@@ -286,6 +291,7 @@ async fn create(
             body: input.body,
             state: input.state,
             commit_oid: input.commit_oid,
+            comparison,
             base_revision: input.base_revision,
         },
     )

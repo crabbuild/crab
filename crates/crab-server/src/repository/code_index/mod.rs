@@ -10,9 +10,10 @@ use crab_remote_git::{
     Revision, TreeListingItem, TreeListingRequest,
 };
 use crab_storage::{ETag, StorageError};
+use futures_util::{StreamExt, TryStreamExt, stream};
 use gix_hash::ObjectId;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
     sync::Arc,
     time::Duration,
 };
@@ -226,7 +227,7 @@ async fn build(
     previous: Option<&Index>,
     cancel: &CancellationToken,
 ) -> Result<Index, Error> {
-    let previous: HashMap<_, _> = previous
+    let mut reusable: HashMap<_, _> = previous
         .and_then(|index| index.rows.as_ref())
         .into_iter()
         .flatten()
@@ -234,7 +235,7 @@ async fn build(
         .map(|row| {
             (
                 (row.oid, symbols::Syntax::for_path(row.path.as_bytes())),
-                row,
+                FilterSource::Previous(row),
             )
         })
         .collect();
@@ -253,97 +254,112 @@ async fn build(
             )
             .await?;
         let page = async {
-            let listing = snapshot.list_tree_blobs(&request, &operation).await?;
-            let mut batch = Vec::with_capacity(listing.items.len());
-            for entries in listing.items.chunks(BUILD_CONCURRENCY) {
-                let found = futures_util::future::try_join_all(entries.iter().map(|item| async {
+            let operation = &operation;
+            let listing = snapshot.list_tree_blobs(&request, operation).await?;
+            let paths = listing
+                .items
+                .into_iter()
+                .map(|item| {
                     let TreeListingItem::Blob(entry) = item else {
                         return Err(crab_remote_git::Error::InternalInvariant {
                             invariant: "ungrouped code index received a grouped path",
                         });
                     };
-                    let syntax = symbols::Syntax::for_path(entry.path.as_bytes());
-                    let data = match previous.get(&(entry.oid, syntax)) {
-                        Some(row) => BuildData::Reused(row.filter.clone(), row.symbols.clone()),
-                        None => BuildData::Text(text(entry.oid, &operation).await?),
-                    };
-                    Ok((entry.path.clone(), entry.oid, syntax, data))
-                }))
+                    let key = (entry.oid, symbols::Syntax::for_path(entry.path.as_bytes()));
+                    Ok((entry.path, key))
+                })
+                .collect::<crab_remote_git::Result<Vec<_>>>()?;
+            let mut seen = HashSet::new();
+            let missing: Vec<_> = paths
+                .iter()
+                .map(|(_, key)| *key)
+                .filter(|key| !reusable.contains_key(key) && seen.insert(*key))
+                .collect();
+            let batch: Vec<_> = stream::iter(missing)
+                .map(|key| async move { text(key.0, operation).await.map(|value| (key, value)) })
+                .buffer_unordered(BUILD_CONCURRENCY)
+                .try_collect()
                 .await?;
-                batch.extend(found);
-            }
-            Ok((batch, listing.has_more))
+            Ok((paths, batch, listing.has_more))
         }
         .await;
-        let (batch, more) = operation.finish(page).await?;
+        let (paths, batch, more) = operation.finish(page).await?;
         let partition_size = batch.len().div_ceil(BUILD_PARSE_JOBS).max(1);
         let mut batch = batch.into_iter();
         let partitions = std::iter::from_fn(|| {
             let partition: Vec<_> = batch.by_ref().take(partition_size).collect();
             (!partition.is_empty()).then_some(partition)
         });
-        // Run independently admitted partitions in parallel, then assemble
-        // them in tree order so the published index keeps its path cursor.
+        // Parse each missing blob and grammar once under the shared CPU limit.
         let parsed = futures_util::future::try_join_all(partitions.map(|partition| {
             let parse_cancel = cancel.clone();
             server.runtime.run_cpu(cancel, move || {
                 partition
                     .into_iter()
-                    .map(|(path, oid, syntax, data)| {
+                    .map(|(key, text)| {
                         if parse_cancel.is_cancelled() {
                             return Err(crab_remote_git::Error::Cancelled);
                         }
-                        let (filter, symbols) = match data {
-                            BuildData::Reused(filter, symbols) => (filter, symbols),
-                            BuildData::Text(text) => {
-                                let filter = text.as_deref().map(Mask::from_text);
-                                let symbols =
-                                    syntax.zip(text.as_deref()).and_then(|(syntax, text)| {
-                                        symbols::definitions(syntax, text, &parse_cancel).map(
-                                            |defs| {
-                                                Mask::from_symbols(
-                                                    defs.into_iter()
-                                                        .map(|definition| &text[definition.bytes]),
-                                                )
-                                            },
-                                        )
-                                    });
-                                (filter, symbols)
-                            }
-                        };
-                        Ok(Row {
-                            path,
-                            oid,
-                            filter,
-                            symbols,
-                        })
+                        let filter = text.as_deref().map(Mask::from_text);
+                        let symbols = key.1.zip(text.as_deref()).and_then(|(syntax, text)| {
+                            symbols::definitions(syntax, text, &parse_cancel).map(|defs| {
+                                Mask::from_symbols(
+                                    defs.into_iter().map(|definition| &text[definition.bytes]),
+                                )
+                            })
+                        });
+                        Ok((key, (filter, symbols)))
                     })
                     .collect::<crab_remote_git::Result<Vec<_>>>()
             })
         }))
         .await?;
-        let page = parsed.into_iter().flatten().collect::<Vec<_>>();
-        size += page.iter().map(Row::encoded_size).sum::<usize>();
-        row_weight += page.len() * size_of::<Row>();
-        if size > MAX_INDEX_BYTES || size + row_weight > CACHE_BYTES {
-            return Ok(Index::new(tree, None, format::OVERHEAD));
+        let mut parsed: HashMap<_, _> = parsed.into_iter().flatten().collect();
+        let start = rows.len();
+        // Retain one row per path in tree order. References to finished rows
+        // reuse their filters across pages without keeping their blob bodies.
+        for (path, key) in paths {
+            let (filter, symbols) = match reusable.entry(key) {
+                Entry::Occupied(source) => {
+                    let row = match *source.get() {
+                        FilterSource::Previous(row) => row,
+                        FilterSource::Built(index) => rows.get(index).ok_or(Error::Invalid)?,
+                    };
+                    (row.filter.clone(), row.symbols.clone())
+                }
+                Entry::Vacant(slot) => {
+                    slot.insert(FilterSource::Built(rows.len()));
+                    parsed.remove(&key).ok_or(Error::Invalid)?
+                }
+            };
+            let row = Row {
+                path,
+                oid: key.0,
+                filter,
+                symbols,
+            };
+            size += row.encoded_size();
+            row_weight += size_of::<Row>();
+            if size > MAX_INDEX_BYTES || size + row_weight > CACHE_BYTES {
+                return Ok(Index::new(tree, None, format::OVERHEAD));
+            }
+            rows.push(row);
         }
-        after = page
-            .last()
-            .map(|row| Bytes::copy_from_slice(row.path.as_bytes()));
-        rows.extend(page);
         if !more {
             return Ok(Index::new(tree, Some(rows), size));
         }
-        if after.is_none() {
+        if rows.len() == start {
             return Err(Error::Invalid);
         }
+        after = rows
+            .last()
+            .map(|row| Bytes::copy_from_slice(row.path.as_bytes()));
     }
 }
 
-enum BuildData {
-    Reused(Option<Mask>, Option<Mask>),
-    Text(Option<String>),
+enum FilterSource<'a> {
+    Previous(&'a Row),
+    Built(usize),
 }
 
 pub(crate) async fn run(server: Arc<Server>) -> crate::Result<()> {

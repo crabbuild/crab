@@ -13,7 +13,7 @@ pub(super) fn options(
     layout: crab_storage::StoreLayout<crab_storage::Store>,
     default_branch: Option<String>,
     max_ref_updates: usize,
-    rewritten_ref: Option<String>,
+    rewritable_refs: std::collections::BTreeSet<String>,
     inspect_visible_tip: Option<gix_hash::ObjectId>,
     linear_refs: std::collections::BTreeSet<String>,
 ) -> crab_remote::prepare::Options<impl Fn(&str) -> RefPolicy + Send + 'static> {
@@ -37,7 +37,7 @@ pub(super) fn options(
         },
         policy: move |name: &str| RefPolicy {
             allow_delete: default_branch.as_deref() != Some(name),
-            allow_non_fast_forward: rewritten_ref.as_deref() == Some(name),
+            allow_non_fast_forward: rewritable_refs.contains(name),
             inspect_linear_history: linear_refs.contains(name),
         },
     }

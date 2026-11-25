@@ -102,6 +102,7 @@ impl Mutation for CreateCommitStatus {
                 ],
             )],
         })?;
+        super::checks::summary::refresh(context, &status.oid)?;
         advance_revision(context)?;
         Ok(MutationResult::Success(CreateCommitStatusOutcome::Created(
             Box::new(status),

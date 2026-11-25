@@ -23,6 +23,7 @@ export function PullConversation({
   refreshing,
   active,
   revision,
+  reviewRevision,
   comment,
 }: {
   repo: Repository;
@@ -32,6 +33,7 @@ export function PullConversation({
   refreshing: boolean;
   active: boolean;
   revision: string;
+  reviewRevision: string;
   comment: ReturnType<typeof useCommentSubmission>;
 }) {
   const stateTrigger = useReturnFocus<HTMLButtonElement>(
@@ -66,6 +68,7 @@ export function PullConversation({
         href={href}
         csrf={csrf}
         revision={revision}
+        liveRevision={reviewRevision}
         active={active}
         onChanged={refresh}
       >

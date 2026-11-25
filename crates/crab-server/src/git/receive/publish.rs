@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{BufRead, BufReader},
     sync::{Arc, Mutex},
     time::Duration,
@@ -126,6 +126,41 @@ struct ReceiveInput {
     visibility_bases: BTreeMap<String, (String, gix_hash::ObjectId)>,
     defer_readiness: bool,
     wire: bool,
+    native_repeat: Option<Box<NativeRepeat>>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct NativeRepeat {
+    epoch: String,
+    transactions: BTreeMap<String, Option<String>>,
+}
+
+impl NativeRepeat {
+    fn plan(&self, original: &str) -> Result<String> {
+        Ok(
+            blake3::Hash::from(crab_metadata::receipts::publication_request_digest(&(
+                "crab.native-push-repeat.v1",
+                original,
+                self,
+            ))?)
+            .to_hex()
+            .to_string(),
+        )
+    }
+
+    fn matches(&self, view: &crab_read::capsule_protocol::CapsuleRepositoryView) -> bool {
+        self.epoch == view.root_snapshot().record().root().ref_epoch()
+            && self.transactions.iter().all(|(name, transaction)| {
+                view.visible_ref_transactions().get(name) == transaction.as_ref()
+            })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Recovery {
+    Ordinary,
+    ConsiderRepeat,
+    DeferReadiness,
 }
 
 struct PublishAttempt {
@@ -154,7 +189,53 @@ pub(super) async fn run(
     defer_readiness: bool,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
+    let directory = Arc::new(directory);
     let path = directory.path().join("receive");
+    let mut parsed = read_native_request(path.clone(), defer_readiness).await?;
+    let (request, _) = &parsed;
+    if request.updates.is_empty() {
+        return Ok(vec![]);
+    }
+    let original = native_plan_id(key, principal, body_digest)?;
+    let mut native_repeat: Option<Box<NativeRepeat>> = None;
+    loop {
+        let (request, input) = parsed;
+        let first = native_repeat.is_none();
+        let plan_id = native_repeat
+            .as_ref()
+            .map_or_else(|| Ok(original.clone()), |repeat| repeat.plan(&original))?;
+        match run_request(
+            server,
+            principal,
+            key,
+            Arc::clone(&directory),
+            request,
+            ReceiveInput {
+                pack: Some(input),
+                plan_id: Some(plan_id),
+                publication: Publication::NativePush,
+                visibility_bases: BTreeMap::new(),
+                defer_readiness,
+                wire: true,
+                native_repeat: native_repeat.take(),
+            },
+            cancel,
+        )
+        .await
+        {
+            Err(ReceiveError::NativeRepeat(repeat)) if first => {
+                parsed = read_native_request(path.clone(), defer_readiness).await?;
+                native_repeat = Some(repeat);
+            }
+            result => return result,
+        }
+    }
+}
+
+async fn read_native_request(
+    path: std::path::PathBuf,
+    defer_readiness: bool,
+) -> Result<(receive_wire::ReceiveRequest, BufReader<std::fs::File>)> {
     let (mut request, input) = tokio::task::spawn_blocking(move || -> Result<_> {
         let mut input = BufReader::new(std::fs::File::open(path)?);
         let request = if defer_readiness {
@@ -180,27 +261,7 @@ pub(super) async fn run(
         // capability cannot wait indefinitely for an empty HTTP body.
         request.report_status = true;
     }
-    if request.updates.is_empty() {
-        return Ok(vec![]);
-    }
-    let plan_id = native_plan_id(key, principal, body_digest)?;
-    run_request(
-        server,
-        principal,
-        key,
-        directory,
-        request,
-        ReceiveInput {
-            pack: Some(input),
-            plan_id: Some(plan_id),
-            publication: Publication::NativePush,
-            visibility_bases: BTreeMap::new(),
-            defer_readiness,
-            wire: true,
-        },
-        cancel,
-    )
-    .await
+    Ok((request, input))
 }
 
 pub(crate) async fn publish_existing_objects(
@@ -220,7 +281,7 @@ pub(crate) async fn publish_existing_objects(
         server,
         principal,
         key,
-        directory,
+        Arc::new(directory),
         request,
         ReceiveInput {
             pack: None,
@@ -229,6 +290,7 @@ pub(crate) async fn publish_existing_objects(
             visibility_bases: BTreeMap::new(),
             defer_readiness: false,
             wire: false,
+            native_repeat: None,
         },
         cancel,
     )
@@ -338,7 +400,7 @@ pub(super) async fn publish_pack(
         server,
         principal,
         key,
-        directory,
+        Arc::new(directory),
         request,
         ReceiveInput {
             pack: Some(pack),
@@ -347,6 +409,7 @@ pub(super) async fn publish_pack(
             visibility_bases,
             defer_readiness: false,
             wire: false,
+            native_repeat: None,
         },
         cancel,
     )
@@ -358,7 +421,7 @@ async fn run_request(
     server: &Server,
     principal: &Principal,
     key: &(String, String),
-    directory: crate::local_disk::StagingDirectory,
+    directory: Arc<crate::local_disk::StagingDirectory>,
     request: receive_wire::ReceiveRequest,
     input: ReceiveInput,
     cancel: &CancellationToken,
@@ -393,6 +456,14 @@ async fn run_request(
     } else {
         None
     };
+    let consider_repeat = input.wire && !input.defer_readiness && input.native_repeat.is_none();
+    let recovery = if input.defer_readiness {
+        Recovery::DeferReadiness
+    } else if consider_repeat {
+        Recovery::ConsiderRepeat
+    } else {
+        Recovery::Ordinary
+    };
     let native_deletions = if matches!(input.publication, Publication::NativePush)
         && !input.defer_readiness
         && server.cells().is_some()
@@ -405,6 +476,9 @@ async fn run_request(
         if let Some(plan) = plan
             && committed_plan(&entry, &request.updates, plan).await?
         {
+            if consider_repeat {
+                require_fresh_native_attempt(&entry, &request).await?;
+            }
             let mut bytes = Vec::new();
             if request.report_status {
                 receive_wire::report(&mut bytes, &request.updates, None, None)?;
@@ -422,6 +496,7 @@ async fn run_request(
     let plan_id = input.plan_id.clone().or_else(|| {
         if sends_publication_webhook(server, principal, &entry, &request.updates)
             || tracks_issue_closures(server, principal, &request.updates)
+            || super::push_attribution::tracks(server, principal, &request.updates)
         {
             // A ref can be deleted and recreated with identical old and new
             // OIDs. Give an unplanned write its own receipt for this operation.
@@ -435,7 +510,7 @@ async fn run_request(
         }
     });
     let attempt = PublishAttempt {
-        directory: Arc::new(directory),
+        directory,
         plan_id: plan_id.clone(),
         stack,
         native_deletions,
@@ -514,7 +589,6 @@ async fn run_request(
     };
     let entry = entry.as_ref();
     let request = &request;
-    let defer_readiness = input.defer_readiness;
     let publish_destination = |cancel: CancellationToken| async move {
         crab_remote::publication::with_leases(
             &entry.store,
@@ -606,16 +680,8 @@ async fn run_request(
                         crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. },
                     ),
                 ) => {
-                    recover_native_plan(
-                        server,
-                        entry,
-                        request,
-                        &plan_id,
-                        defer_readiness,
-                        cancel,
-                        error,
-                    )
-                    .await
+                    recover_native_plan(server, entry, request, &plan_id, recovery, cancel, error)
+                        .await
                 }
                 response => response,
             }
@@ -668,6 +734,7 @@ fn sends_publication_webhook(
 
 struct RefMutation<'a> {
     updates: &'a [crab_git::receive_plan::RefUpdate],
+    previous: &'a crab_read::capsule_protocol::CapsuleRepositoryView,
     publication: &'a Publication,
     stack: Option<&'a crate::api::stacked_pulls::Stack>,
     native_deletions: Option<&'a crate::api::stacked_pulls::native::Deletions>,
@@ -677,6 +744,7 @@ struct RefMutation<'a> {
     closing_issues: BTreeMap<u64, String>,
     qualified_closing_issues: BTreeMap<keywords::Qualified, String>,
     linear_history: Option<BTreeMap<String, bool>>,
+    rewritten_refs: std::collections::BTreeSet<String>,
 }
 
 fn tracks_issue_closures(
@@ -758,8 +826,12 @@ impl RefMutation<'_> {
                     "Merge candidate refs are managed by Crab",
                 ));
             }
+            let rewrite = self.rewritten_refs.contains(&update.name);
             for (id, rule) in rules.matches(&update.name, default_ref) {
                 let violation = rule.violation(update, pull).or_else(|| {
+                    if rewrite && rule.blocks_force_push() {
+                        return Some("Repository ruleset blocks force pushes");
+                    }
                     if !pull && rule.require_linear_history {
                         self.linear_violation(update)
                     } else {
@@ -772,6 +844,14 @@ impl RefMutation<'_> {
                     }
                     bypassed.insert(id);
                 }
+            }
+            if rewrite
+                && matches!(self.publication, Publication::NativePush)
+                && !rules.allows_force_push(&update.name, default_ref)
+            {
+                return Err(ReceiveError::RefRule(
+                    "Force pushes are not enabled for this branch",
+                ));
             }
             if !pull && let Some(protection) = policy.protections.protection(&update.name) {
                 if update.old.is_some() || self.has_branch {
@@ -838,6 +918,13 @@ async fn publish_attempt(
         .into());
     }
     let refs = view.refs().clone();
+    if input
+        .native_repeat
+        .as_ref()
+        .is_some_and(|repeat| !repeat.matches(&view))
+    {
+        return Err(ReceiveError::BranchChanged);
+    }
     if let (Publication::PullBranch(edit), [update]) =
         (&input.publication, request.updates.as_slice())
         && let super::PullBranchBinding::Automatic {
@@ -974,6 +1061,7 @@ async fn publish_attempt(
         .flatten();
     let mut mutation = RefMutation {
         updates: &request.updates,
+        previous: &view,
         publication: &input.publication,
         stack: attempt.stack.as_ref(),
         native_deletions: attempt.native_deletions.as_ref(),
@@ -983,6 +1071,7 @@ async fn publish_attempt(
         closing_issues: BTreeMap::new(),
         qualified_closing_issues: BTreeMap::new(),
         linear_history: None,
+        rewritten_refs: Default::default(),
     };
     let policy = if defer_readiness {
         settings::import_ref_policy(server, entry).await?
@@ -1021,24 +1110,35 @@ async fn publish_attempt(
     } else {
         1024
     };
-    // Only the generated PR rebase can replace an existing head. It still
-    // needs the exact leased refs, fresh PR authorization, and normal ref policy.
-    let rewritten_ref = match (&input.publication, request.updates.as_slice()) {
-        (Publication::BranchUpdate(branch), [update]) if branch.rebase => Some(update.name.clone()),
+    // The pack validator classifies each update independently. Publication
+    // rechecks the rules only for refs proved to be non-fast-forward.
+    let rewritable_refs = match (&input.publication, request.updates.as_slice()) {
+        (Publication::NativePush, updates) if principal.import_grant().is_none() => updates
+            .iter()
+            .filter(|update| {
+                update.old.is_some()
+                    && update.new.is_some()
+                    && active.allows_force_push(&update.name, view.head())
+            })
+            .map(|update| update.name.clone())
+            .collect(),
+        (Publication::BranchUpdate(branch), [update]) if branch.rebase => {
+            [update.name.clone()].into()
+        }
         (
             Publication::PullRequest(PullPublication {
                 candidate: Some(CandidatePublication::Prepare { .. }),
                 ..
             }),
             [update],
-        ) => Some(update.name.clone()),
-        _ => None,
+        ) => [update.name.clone()].into(),
+        _ => Default::default(),
     };
     let options = validate::options(
         entry.layout.clone(),
         default_branch,
         max_ref_updates,
-        rewritten_ref,
+        rewritable_refs,
         inspect_visible_tip,
         linear_refs,
     );
@@ -1110,6 +1210,9 @@ async fn publish_attempt(
                 ReceiveError::Graph(crab_git::receive_plan::ReceivePlanError::Limit(
                     "closing issue references",
                 )) => "too many closing issue references",
+                ReceiveError::Graph(crab_git::receive_plan::ReceivePlanError::NonFastForward {
+                    ..
+                }) => "non-fast-forward update rejected by ref policy",
                 _ => "incoming refs or graph rejected",
             };
             receive_wire::report(&mut bytes, &request.updates, unpack, Some(reason))?;
@@ -1121,6 +1224,8 @@ async fn publish_attempt(
         std::mem::take(&mut *closing_issues.lock().map_err(|_| ReceiveError::Cancelled)?);
     let changed_path_hashes = prepared.plan().changed_path_hashes().clone();
     mutation.linear_history = Some(prepared.plan().linear_history().clone());
+    mutation.rewritten_refs = prepared.plan().rewritten_refs().clone();
+    mutation.check_policy(&policy, view.head(), actor)?;
     let dependency_limits = dependency_limits();
     let pointers = prepared.plan().pointers();
     let source = match &input.publication {
@@ -1257,7 +1362,7 @@ async fn recover_native_plan(
     entry: &Repository,
     request: &receive_wire::ReceiveRequest,
     plan_id: &str,
-    defer_readiness: bool,
+    recovery: Recovery,
     cancel: &CancellationToken,
     original: ReceiveError,
 ) -> Result<Vec<u8>> {
@@ -1269,9 +1374,12 @@ async fn recover_native_plan(
             return Err(original);
         }
     }
+    if matches!(recovery, Recovery::ConsiderRepeat) {
+        require_fresh_native_attempt(entry, request).await?;
+    }
     // The receipt proves the ref visibility boundary. Index readiness remains
     // best-effort and cannot turn a recovered commit into a rejection.
-    if !defer_readiness {
+    if !matches!(recovery, Recovery::DeferReadiness) {
         let _readiness = crab_remote::publication::finish_committed(async {
             entry.invalidate().await;
             let repository = entry
@@ -1289,6 +1397,49 @@ async fn recover_native_plan(
         receive_wire::report(&mut bytes, &request.updates, None, None)?;
     }
     Ok(bytes)
+}
+
+async fn require_fresh_native_attempt(
+    entry: &Repository,
+    request: &receive_wire::ReceiveRequest,
+) -> Result<()> {
+    if !request
+        .updates
+        .iter()
+        .any(|update| update.old.is_some() && update.name.starts_with("refs/heads/"))
+    {
+        return Ok(());
+    }
+    let names: BTreeSet<_> = request
+        .updates
+        .iter()
+        .map(|update| update.name.clone())
+        .collect();
+    let view = entry.ref_view_for_refs(&names).await?;
+    if request.updates.iter().any(|update| {
+        view.refs().get(&update.name).map(String::as_str)
+            != update.old.map(|oid| oid.to_string()).as_deref()
+    }) {
+        return Ok(());
+    }
+    if request.updates.iter().any(|update| {
+        update.old.is_some() && !view.visible_ref_transactions().contains_key(&update.name)
+    }) {
+        return Err(ReceiveError::BranchChanged);
+    }
+    // A committed request's old tips can become live again after a rewrite.
+    // A new publication must bind the incarnations that are live now.
+    let transactions = names
+        .into_iter()
+        .map(|name| {
+            let transaction = view.visible_ref_transactions().get(&name).cloned();
+            (name, transaction)
+        })
+        .collect();
+    Err(ReceiveError::NativeRepeat(Box::new(NativeRepeat {
+        epoch: view.root_snapshot().record().root().ref_epoch().to_owned(),
+        transactions,
+    })))
 }
 
 pub(super) async fn committed_plan(
@@ -1387,7 +1538,7 @@ async fn commit_authorized(
     server: &Server,
     principal: &Principal,
     entry: &Repository,
-    artifacts: crab_remote::prepare::CapsuleArtifacts,
+    mut artifacts: crab_remote::prepare::CapsuleArtifacts,
     mutation: RefMutation<'_>,
     plan_id: Option<&str>,
     cancel: &CancellationToken,
@@ -1573,6 +1724,22 @@ async fn commit_authorized(
         // cannot erase a successful push. The browser verifies the receipt.
         super::recent_pushes::record(server, entry, &identity, plan, mutation.updates, default)
             .await;
+    }
+    if let Some(plan) = plan_id
+        && let Err(error) = Box::pin(super::push_attribution::record(
+            server,
+            entry,
+            principal,
+            &mut artifacts,
+            plan,
+            mutation.previous,
+            mutation.updates,
+        ))
+        .await
+    {
+        // Git remains writable when attribution is unavailable. Merge policy
+        // cannot use an unproven publication to meet a review requirement.
+        tracing::warn!(repository = %entry.id, ?error, "Git push attribution was not recorded");
     }
     let outcome = artifacts
         .commit(plan_id, TTL, cancel)

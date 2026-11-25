@@ -76,6 +76,7 @@ pub struct ValidatedRefUpdates {
     pointers: Vec<PointerDependency>,
     changed_path_hashes: BTreeSet<[u8; 32]>,
     linear_history: BTreeMap<String, bool>,
+    rewritten_refs: BTreeSet<String>,
 }
 impl ValidatedRefUpdates {
     /// Returns the complete candidate ref map.
@@ -97,6 +98,10 @@ impl ValidatedRefUpdates {
     /// Reports whether each inspected ref introduces zero merge commits.
     pub fn linear_history(&self) -> &BTreeMap<String, bool> {
         &self.linear_history
+    }
+    /// Returns existing refs whose new targets do not fast-forward.
+    pub fn rewritten_refs(&self) -> &BTreeSet<String> {
+        &self.rewritten_refs
     }
 }
 
@@ -276,15 +281,19 @@ pub fn validate<S: GraphSource, C: Fn() -> bool>(
     validator.connected(roots)?;
     let mut peeled = BTreeMap::new();
     let mut linear_history = BTreeMap::new();
+    let mut rewritten_refs = BTreeSet::new();
     for update in updates {
         let Some(new) = update.new else { continue };
+        let rule = policy(&update.name);
         if let Some(old) = update.old
-            && !policy(&update.name).allow_non_fast_forward
             && (!update.name.starts_with("refs/heads/") || !validator.is_ancestor(old, new)?)
         {
-            return Err(ReceivePlanError::NonFastForward {
-                name: update.name.clone(),
-            });
+            if !rule.allow_non_fast_forward {
+                return Err(ReceivePlanError::NonFastForward {
+                    name: update.name.clone(),
+                });
+            }
+            rewritten_refs.insert(update.name.clone());
         }
         let mut current = new;
         let mut seen = HashSet::new();
@@ -312,14 +321,14 @@ pub fn validate<S: GraphSource, C: Fn() -> bool>(
         if current != new {
             peeled.insert(update.name.clone(), current);
         }
-        if policy(&update.name).inspect_linear_history {
+        if rule.inspect_linear_history {
             linear_history.insert(
                 update.name.clone(),
                 validator.is_linear(update.old, current)?,
             );
         }
     }
-    let changed_path_hashes = validator.changed_path_hashes(updates)?;
+    let changed_path_hashes = validator.changed_path_hashes(updates, &rewritten_refs)?;
     Ok(ValidatedRefUpdates {
         refs,
         peeled,
@@ -330,6 +339,7 @@ pub fn validate<S: GraphSource, C: Fn() -> bool>(
             .collect(),
         changed_path_hashes,
         linear_history,
+        rewritten_refs,
     })
 }
 

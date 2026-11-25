@@ -31,6 +31,7 @@ enum Fault {
     CancelAfterHead,
     CancelAfterMarker,
     ReadinessAfterMarker,
+    HoldPolicyLease,
 }
 
 #[derive(Debug)]
@@ -110,6 +111,52 @@ pub(crate) fn fault_plan_receipt() -> (Store, impl Fn(bool)) {
     })
 }
 
+pub(crate) struct HeldPolicyLease(Arc<FaultStore>);
+
+impl HeldPolicyLease {
+    pub(crate) fn arm(&self) {
+        self.0.fail_plan_io.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) async fn reached(&self) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !self.0.committed.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("push did not reach the publication policy lease");
+    }
+
+    pub(crate) fn resume(&self) {
+        self.0.cancel.cancel();
+    }
+}
+
+impl Drop for HeldPolicyLease {
+    fn drop(&mut self) {
+        self.resume();
+    }
+}
+
+pub(crate) fn hold_policy_lease(prefix: &str) -> (Store, HeldPolicyLease) {
+    let backing = Arc::new(FaultStore {
+        inner: Arc::new(object_store::memory::InMemory::new()),
+        marker_prefix: String::new(),
+        root_path: crab_coordination::push_lock::internal_lock_path(
+            prefix,
+            crate::storage_root::POLICY_LEASE_RESOURCE,
+        )
+        .unwrap(),
+        head_path: String::new(),
+        committed: AtomicBool::new(false),
+        fail_plan_io: AtomicBool::new(false),
+        cancel: CancellationToken::new(),
+        fault: Fault::HoldPolicyLease,
+    });
+    (Store::new(backing.clone()), HeldPolicyLease(backing))
+}
+
 #[async_trait::async_trait]
 impl ObjectStore for FaultStore {
     async fn put_opts(
@@ -118,6 +165,15 @@ impl ObjectStore for FaultStore {
         payload: PutPayload,
         options: PutOptions,
     ) -> object_store::Result<PutResult> {
+        if matches!(self.fault, Fault::HoldPolicyLease)
+            && location.as_ref() == self.root_path
+            && self.fail_plan_io.swap(false, Ordering::SeqCst)
+        {
+            // Stop this attempt before it acquires the shared policy lease.
+            // The policy writer can acquire and release the same lease meanwhile.
+            self.committed.store(true, Ordering::SeqCst);
+            self.cancel.cancelled().await;
+        }
         if matches!(self.fault, Fault::PlanIntentWrite)
             && self.fail_plan_io.load(Ordering::SeqCst)
             && location.as_ref().contains("/v2/plans/")
@@ -134,7 +190,7 @@ impl ObjectStore for FaultStore {
             return Err(disconnected());
         }
         let result = self.inner.put_opts(location, payload, options).await?;
-        if marker {
+        if marker && !matches!(self.fault, Fault::HoldPolicyLease) {
             self.committed
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }

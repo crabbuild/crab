@@ -117,6 +117,15 @@ async fn retargeting_binds_tips_and_expires_approvals_without_removing_changes_r
     );
     let updated = h.json(PULL, &alice).await;
     assert_eq!(updated["base_ref"], "refs/heads/stable");
+    assert_eq!(
+        h.json(&format!("{REPO}/pulls?q=base%3Amain"), &alice).await["items"],
+        json!([])
+    );
+    assert_eq!(
+        h.json(&format!("{REPO}/pulls?q=base%3Astable"), &alice)
+            .await["items"][0]["number"],
+        updated["number"]
+    );
     assert_eq!(updated["base_oid"], stable);
     assert_eq!(updated["head_oid"], head);
     assert_eq!(updated["original_base_oid"], original);

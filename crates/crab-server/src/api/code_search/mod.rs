@@ -2,7 +2,7 @@ use super::{ApiError, display_path, encode_hex, query, read_admission};
 use crate::{
     app,
     auth::Principal,
-    repository::{Repository, code_index},
+    repository::{Repository, code_index, settings},
     server::Server,
 };
 use axum::{
@@ -36,7 +36,8 @@ const FILE_READ_BATCH: usize = 8;
 const MAX_MATCH_LINES: usize = 6;
 const MAX_HIGHLIGHT_CHARS: usize = 128;
 const MAX_CURSOR_PATH: usize = 8 * 1024;
-const CURSOR_HEADER: usize = 20 + 32;
+const CURSOR_CONTEXT: usize = 32;
+const RESUME_HEADER: usize = 20 + 8;
 
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -137,12 +138,16 @@ pub(super) async fn search(
         .map(|value| tokens.decode(value))
         .transpose()
         .map_err(IntoResponse::into_response)?;
+    let lifecycle = pattern.lifecycle(&server, &repo).await?;
+    let archive_version = lifecycle.as_ref().map_or(0, |state| state.version);
+    check_resume(cursor.as_ref(), archive_version)?;
 
     let mut scan = scan_repository(
         &server,
         &repo,
         &pattern,
         Window {
+            scope: pattern.repository_facts(&repo, lifecycle.as_ref().map(|state| state.archived)),
             rev: params.rev.as_deref(),
             resume: cursor.as_ref(),
             paths: PAGE_ENTRIES,
@@ -162,9 +167,16 @@ pub(super) async fn search(
     if let Some(after) = scan.after {
         scan.result.next = Some(
             tokens
-                .encode(scan.commit, &after)
+                .encode(&Resume {
+                    commit: scan.commit,
+                    archive_version,
+                    after,
+                })
                 .map_err(remote_response)?,
         );
+    }
+    if let Some(state) = lifecycle {
+        check_lifecycle(&server, &repo, state.version).await?;
     }
     // A long scan must not return snippets after the current grant is revoked.
     app::membership(&server, &principal, &repo)
@@ -192,6 +204,7 @@ struct Pattern {
     directory: GitPath,
     uses_text: bool,
     has_symbols: bool,
+    uses_archive: bool,
 }
 
 impl Pattern {
@@ -206,15 +219,54 @@ impl Pattern {
         Ok(Self {
             uses_text: query.leaves.iter().any(qualifiers::Predicate::uses_text),
             has_symbols: query.leaves.iter().any(qualifiers::Predicate::uses_symbols),
+            uses_archive: query
+                .leaves
+                .iter()
+                .any(|term| matches!(term, qualifiers::Predicate::Archived)),
             query: Arc::new(query),
             directory: GitPath::new(path.as_bytes().to_vec())?,
         })
     }
+
+    async fn lifecycle(
+        &self,
+        server: &Server,
+        repo: &Repository,
+    ) -> Result<Option<settings::RepositoryLifecycle>, Response> {
+        if !self.uses_archive {
+            return Ok(None);
+        }
+        load_lifecycle(server, repo).await.map(Some)
+    }
+}
+
+async fn load_lifecycle(
+    server: &Server,
+    repo: &Repository,
+) -> Result<settings::RepositoryLifecycle, Response> {
+    settings::load_lifecycle(server, repo)
+        .await
+        .map_err(IntoResponse::into_response)
+}
+
+async fn check_lifecycle(server: &Server, repo: &Repository, version: u64) -> Result<(), Response> {
+    if load_lifecycle(server, repo).await?.version != version {
+        return Err(app::Error::PageChanged.into_response());
+    }
+    Ok(())
+}
+
+fn check_resume(resume: Option<&Resume>, version: u64) -> Result<(), Response> {
+    if resume.is_some_and(|cursor| cursor.archive_version != version) {
+        return Err(app::Error::PageChanged.into_response());
+    }
+    Ok(())
 }
 
 struct Window<'a> {
+    scope: Facts,
     rev: Option<&'a str>,
-    resume: Option<&'a (ObjectId, GitPath)>,
+    resume: Option<&'a Resume>,
     paths: usize,
     results: usize,
     duration: Duration,
@@ -245,7 +297,7 @@ async fn scan_repository(
     let opened = repo.revalidate(server, cancellation).await?;
     let repository = &opened.git;
     let revision = match window.resume {
-        Some((oid, _)) => Revision::Commit(*oid),
+        Some(resume) => Revision::Commit(resume.commit),
         None => query::revision(repository, window.rev)?,
     };
     let mut limits = server.options.operation_limits();
@@ -265,8 +317,7 @@ async fn scan_repository(
     let found = async {
         let snapshot = repository.snapshot(&revision, &operation).await?;
         let mut acceleration = Acceleration::Scanning;
-        let scope = pattern.repository_facts(repo);
-        if pattern.query.evaluate(&scope).0 == Truth::No {
+        if pattern.query.evaluate(&window.scope).0 == Truth::No {
             let commit = snapshot.commit_oid();
             return Ok(Scan {
                 commit,
@@ -280,7 +331,7 @@ async fn scan_repository(
             match code_index::load(server, repo, snapshot.root_tree_oid()).await {
                 Ok(Some(index)) => {
                     if let Some(rows) = &index.rows {
-                        return indexed::inspect(rows, &snapshot, pattern, &scope, &window, &operation).await;
+                        return indexed::inspect(rows, &snapshot, pattern, &window, &operation).await;
                     }
                     acceleration = Acceleration::Limited;
                 }
@@ -288,7 +339,7 @@ async fn scan_repository(
                 Err(error) => tracing::debug!(repository_id = %repo.id, ?error, "Code search index could not be read"),
             }
         }
-        let mut scan = inspect(&snapshot, pattern, &scope, &window, &operation).await?;
+        let mut scan = inspect(&snapshot, pattern, &window, &operation).await?;
         scan.acceleration = acceleration;
         Ok(scan)
     }
@@ -305,7 +356,6 @@ enum Inspection {
 async fn inspect(
     snapshot: &RemoteGitSnapshot,
     pattern: &Pattern,
-    scope: &Facts,
     window: &Window<'_>,
     operation: &OperationContext,
 ) -> crab_remote_git::Result<Scan> {
@@ -325,7 +375,7 @@ async fn inspect(
         prefix,
         window
             .resume
-            .map(|(_, path)| Bytes::copy_from_slice(path.as_bytes())),
+            .map(|resume| Bytes::copy_from_slice(resume.after.as_bytes())),
         None,
         window.paths,
     )?;
@@ -338,7 +388,7 @@ async fn inspect(
         let found = futures_util::future::try_join_all(batch.iter().map(|item| async move {
             match item {
                 TreeListingItem::Blob(entry) => {
-                    pattern.inspect_entry(entry, scope, operation).await
+                    pattern.inspect_entry(entry, &window.scope, operation).await
                 }
                 TreeListingItem::CommonPrefix(_) => Err(Error::InternalInvariant {
                     invariant: "ungrouped code search received a grouped path",
@@ -488,9 +538,15 @@ struct Tokens<'a> {
     fingerprint: blake3::Hash,
 }
 
-impl Tokens<'_> {
-    fn encode(&self, commit: ObjectId, after: &GitPath) -> crab_remote_git::Result<String> {
-        let path = after.as_bytes();
+struct Resume {
+    commit: ObjectId,
+    archive_version: u64,
+    after: GitPath,
+}
+
+impl Resume {
+    fn write(&self, data: &mut Vec<u8>) -> crab_remote_git::Result<()> {
+        let path = self.after.as_bytes();
         if path.len() > MAX_CURSOR_PATH {
             return Err(crab_remote_git::Error::LimitExceeded {
                 limit: "code search cursor path",
@@ -498,40 +554,58 @@ impl Tokens<'_> {
                 maximum: MAX_CURSOR_PATH as u64,
             });
         }
-        let mut payload = Vec::with_capacity(CURSOR_HEADER + path.len() + 32);
-        payload.extend(commit.as_bytes());
+        data.extend(self.commit.as_bytes());
+        data.extend(self.archive_version.to_be_bytes());
+        data.extend(path);
+        Ok(())
+    }
+
+    fn read(data: &[u8]) -> Result<Self, ApiError> {
+        let invalid = || ApiError::Input("Invalid cursor for this code search");
+        if data.len() <= RESUME_HEADER {
+            return Err(invalid());
+        }
+        let oid: [u8; 20] = data[..20].try_into().map_err(|_| invalid())?;
+        let version = data[20..RESUME_HEADER].try_into().map_err(|_| invalid())?;
+        Ok(Self {
+            commit: ObjectId::from(oid),
+            archive_version: u64::from_be_bytes(version),
+            after: GitPath::new(Bytes::copy_from_slice(&data[RESUME_HEADER..]))?,
+        })
+    }
+}
+
+impl Tokens<'_> {
+    fn encode(&self, resume: &Resume) -> crab_remote_git::Result<String> {
+        let mut payload = Vec::new();
         payload.extend(self.fingerprint.as_bytes());
-        payload.extend(path);
+        resume.write(&mut payload)?;
         payload.extend(self.signature(&payload).as_bytes());
         Ok(URL_SAFE_NO_PAD.encode(payload))
     }
 
-    fn decode(&self, value: &str) -> Result<(ObjectId, GitPath), ApiError> {
+    fn decode(&self, value: &str) -> Result<Resume, ApiError> {
+        const MIN: usize = CURSOR_CONTEXT + RESUME_HEADER + 32;
         let invalid = ApiError::Input("Invalid cursor for this code search");
-        if value.len() > (CURSOR_HEADER + MAX_CURSOR_PATH + 32).div_ceil(3) * 4 {
+        if value.len() > (MIN + MAX_CURSOR_PATH).div_ceil(3) * 4 {
             return Err(invalid);
         }
         let bytes = URL_SAFE_NO_PAD
             .decode(value)
             .map_err(|_| ApiError::Input("Invalid code search cursor"))?;
-        if bytes.len() <= CURSOR_HEADER + 32 || bytes.len() > CURSOR_HEADER + MAX_CURSOR_PATH + 32 {
+        if bytes.len() <= MIN || bytes.len() > MIN + MAX_CURSOR_PATH {
             return Err(invalid);
         }
         let (payload, signature) = bytes.split_at(bytes.len() - 32);
-        if self.signature(payload) != *signature || self.fingerprint != payload[20..CURSOR_HEADER] {
+        if self.signature(payload) != *signature || self.fingerprint != payload[..CURSOR_CONTEXT] {
             return Err(invalid);
         }
-        let oid: [u8; 20] = payload[..20]
-            .try_into()
-            .map_err(|_| ApiError::Input("Invalid code search commit"))?;
-        let after = GitPath::new(payload[CURSOR_HEADER..].to_vec())?;
-        Ok((ObjectId::from(oid), after))
+        Resume::read(&payload[CURSOR_CONTEXT..])
     }
 
     fn signature(&self, payload: &[u8]) -> blake3::Hash {
         let mut hash = blake3::Hasher::new_keyed(self.key);
-        // Boolean expressions changed the meaning of whitespace and qualifiers.
-        hash.update(b"crab-code-search-v4\0");
+        hash.update(b"crab-code-search-v5\0");
         hash.update(self.repository.as_bytes());
         hash.update(payload);
         hash.finalize()

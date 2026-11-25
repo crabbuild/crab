@@ -24,6 +24,95 @@ async fn create_pull(h: &Harness, alice: &str) -> String {
     h.write(Method::POST,"/api/repos/team/private/pulls",alice,json!({"request_id":uuid::Uuid::now_v7(),"title":"Dismissal qualification","body":"Review lifecycle","base_ref":"refs/heads/main","head_ref":"refs/heads/feature"})).await.error_for_status().unwrap();
     head
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Chromium and the built embedded UI"]
+async fn native_browser_updates_review_eligibility_during_merge_confirmation() {
+    use crate::test_support::http::browser::Browser;
+
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let head = create_pull(&h, &alice).await;
+    let members = "/api/repos/team/private/members";
+    let grant = async |access: &str| {
+        let version = h.json(members, &alice).await["revision"].clone();
+        h.write(
+            Method::PUT,
+            members,
+            &alice,
+            json!({
+                "groups": [], "expected_revision":version,
+                "members":[{"subject":"alice-id","name":"Alice","access":"admin"},
+                            {"subject":"bob-id","name":"Bob","access":access}]
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    };
+    grant("write").await;
+    h.write(
+        Method::PUT,
+        "/api/repos/team/private/settings/branch-protections",
+        &alice,
+        json!({"expected_version":0,"rules":[{"branch":"main","required_approvals":1}]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    let browser = Browser::new("live-review-eligibility");
+    browser
+        .run(&["open", &format!("{}/team/private/pull/1", h.origin)])
+        .await;
+    browser.sign_in().await;
+    browser
+        .run(&["wait", "--text", "1 more approving review is required"])
+        .await;
+
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    h.write(Method::POST, &format!("{ROOT}/reviews"), &bob, json!({
+        "request_id":uuid::Uuid::now_v7(), "state":"approved", "body":"Reviewed in parallel", "commit_oid":head
+    })).await.error_for_status().unwrap();
+    browser.run(&["wait", "--text", "Eligible approval"]).await;
+    browser
+        .run(&["wait", "--text", "Reviewed in parallel"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Merge pull request",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&[
+            "wait",
+            ".merge-controls button[type=submit]:not([disabled])",
+        ])
+        .await;
+
+    let version = h.json(ROOT, &alice).await["version"].clone();
+    grant("read").await;
+    let blocked = h.json(ROOT, &alice).await;
+    assert_eq!(blocked["version"], version);
+    assert_eq!(blocked["head_oid"], head);
+    assert_eq!(blocked["can_merge"], false);
+    browser
+        .run(&["wait", "--text", "Write access required"])
+        .await;
+    browser
+        .run(&["wait", ".merge-controls button[type=submit][disabled]"])
+        .await;
+    drop(browser);
+    h.close().await;
+}
+
 #[tokio::test]
 async fn dismissal_is_authorized_audited_and_recovers_after_write_revocation_and_archive() {
     let h = Harness::new(false).await;

@@ -3,6 +3,7 @@ use crate::{
     cells::repository::{
         PullState, PullSummary,
         rollups::{GetRollups, Head, Rollup},
+        search::heads::Context,
     },
     repository::Repository,
     server::Server,
@@ -12,7 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(in crate::api) async fn load<'a>(
     server: &Server,
     repo: &Repository,
-    source_token: Option<&str>,
+    captured: Option<&Context>,
+    check_revision: Option<u64>,
     pulls: impl Iterator<Item = &'a PullSummary>,
 ) -> Result<BTreeMap<u64, Rollup>> {
     let pulls: Vec<_> = pulls.collect();
@@ -22,7 +24,7 @@ pub(in crate::api) async fn load<'a>(
     let mut refs = BTreeMap::<_, BTreeSet<_>>::new();
     for pull in pulls
         .iter()
-        .filter(|pull| pull.state != PullState::Merged && source_token.is_none())
+        .filter(|pull| pull.state != PullState::Merged && captured.is_none())
     {
         refs.entry(pull.head_repository)
             .or_default()
@@ -45,15 +47,24 @@ pub(in crate::api) async fn load<'a>(
         .map(|pull| Head {
             number: pull.number,
             version: pull.version,
-            oid: heads
-                .get(&pull.head_repository)
-                .and_then(|tips| tips.get(&pull.head_ref))
-                .cloned(),
+            oid: match captured {
+                Some(captured) => pull.head_repository.and_then(|fork| {
+                    captured
+                        .fork_heads
+                        .get(&format!("{fork}:{}", pull.head_ref))
+                        .cloned()
+                }),
+                None => heads
+                    .get(&pull.head_repository)
+                    .and_then(|tips| tips.get(&pull.head_ref))
+                    .cloned(),
+            },
         })
         .collect();
     let input = crate::cells::repository::rollups::Input {
         heads,
-        source_token: source_token.map(str::to_owned),
+        source_token: captured.and_then(|context| context.source_token.clone()),
+        check_revision,
     };
     let cell = app::repository_cell(server, repo)?;
     let rows = app::query_output(

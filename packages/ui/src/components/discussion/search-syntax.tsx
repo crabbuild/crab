@@ -1,7 +1,9 @@
 import { Fragment } from "react";
 import {
+  CircleCheckIcon,
   CircleDotIcon,
   FlagIcon,
+  GitBranchIcon,
   GitPullRequestIcon,
   HashIcon,
   MessageSquareIcon,
@@ -16,6 +18,9 @@ const icons = new Map<string, LucideIcon>([
   ["is", CircleDotIcon],
   ["state", CircleDotIcon],
   ["draft", GitPullRequestIcon],
+  ["base", GitBranchIcon],
+  ["head", GitBranchIcon],
+  ["status", CircleCheckIcon],
   ["label", TagIcon],
   ["milestone", FlagIcon],
   ["type", SquareIcon],
@@ -25,6 +30,7 @@ const icons = new Map<string, LucideIcon>([
   ["review", GitPullRequestIcon],
   ["review-requested", GitPullRequestIcon],
   ["team-review-requested", GitPullRequestIcon],
+  ["team-review-requested-user", GitPullRequestIcon],
   ["reviewed-by", GitPullRequestIcon],
   ["review-involves", GitPullRequestIcon],
   ["user-review-requested", GitPullRequestIcon],

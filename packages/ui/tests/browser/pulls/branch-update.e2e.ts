@@ -1,6 +1,49 @@
 import { expect, test } from "@playwright/test";
 import { mockPullRequest } from "./fixture";
 
+test("a force-push block removes the rebase action and permits an ordinary update", async ({
+  page,
+}) => {
+  const fixture = await mockPullRequest(page);
+  const pull = fixture.pull();
+  const update = {
+    request_id: "019b21da-55c0-7000-8000-000000000127",
+    version: pull.version,
+    base_oid: pull.base_oid,
+    head_oid: pull.head_oid,
+  };
+  let saved: unknown;
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/pulls/1",
+    (route) => route.fulfill({ json: { ...pull, can_update_branch: true } }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/pulls/1/update-branch",
+    (route) => {
+      if (route.request().method() === "POST") {
+        saved = route.request().postDataJSON();
+        return route.fulfill({ json: { commit: "c".repeat(40) } });
+      }
+      return route.fulfill({
+        json: { update: saved ? null : update, rebase_blocked: true },
+      });
+    },
+  );
+  await page.goto("/team/project/pull/1");
+  const panel = page.getByRole("region", {
+    name: "Update pull request branch",
+  });
+  await expect(
+    panel.getByText("A branch rule blocks rebasing here."),
+  ).toBeVisible();
+  await expect(
+    panel.getByRole("button", { name: "Branch update options" }),
+  ).toHaveCount(0);
+  await panel.getByRole("button", { name: "Update branch" }).click();
+  await expect(panel).toBeHidden();
+  expect(saved).toEqual(update);
+});
+
 test("a published resolution remains visible when the pull request moves before the switch", async ({
   page,
 }) => {

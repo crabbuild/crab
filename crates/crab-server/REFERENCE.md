@@ -562,8 +562,11 @@ Add qualifiers to the search text to narrow a query. For example,
 `src` and its subdirectories. Bare terms match file contents or paths by default.
 **Search in** can restrict them to one field. Use `repo:owner/name` to select an exact
 repository and `org:` with the organization namespace from the repository
-URL or its UUID. Both selectors use current repository access. A query
-containing only filters lists matching file paths.
+URL or its UUID. Use `is:fork` for forks and `is:archived` for archived
+repositories. For example, `content:retry NOT (is:fork OR is:archived)`
+finds code in active repositories that have no upstream. These filters use
+current repository access. A query containing only filters lists matching file
+paths.
 
 `path:` matches a case-insensitive substring of the repository-relative path.
 Use `*` or `?` within one path component and `**` across directories.
@@ -601,6 +604,8 @@ optional directory `path`, `kind=any|content|path|symbol` (default `any`),
 `matched`, and `after`. Supply the same search parameters with `next`
 to continue. A cursor binds the repository UUID, commit, and search filters.
 Subsequent pages use the pinned commit even if the selected branch advances.
+When a query uses `is:archived`, a change to the repository's archive state
+returns 409 `page_changed` on a continuation. Submit the search again to refresh it.
 A query accepts up to 512 characters, 24 terms, 12 nested operators,
 and 128 characters per literal.
 Every request checks current repository access before returning any matches.
@@ -643,6 +648,10 @@ repository. An indexed content or symbol search can consider all indexed paths
 and checks up to 32 candidates per repository. Follow `next` with the same
 parameters, including after an empty page. A repository in progress keeps
 the same commit until its scan finishes.
+When a query uses `is:archived`, each page checks current archive settings for
+the repositories it visits. A change to those settings while the page runs,
+or to the settings of a repository whose scan is being resumed, returns 409
+`page_changed`. Start over to refresh the results.
 
 An indexed Boolean or regex query examines at most 4,096 path rows per
 repository per page. Follow the continuation even after a page with no
@@ -664,8 +673,10 @@ The indexer parses each page in parallel under the shared Git CPU limit
 and assembles the filters in Git path order.
 Larger files get larger text filters to reduce false positives. An
 index answers only for its exact Git tree. Crab verifies returned paths, text,
-and definition locations against Git. It reuses unchanged blobs' filters when
-their parsing language is unchanged. Short literals and other terms that the
+and definition locations against Git. During a cold build it makes filters
+once per Git blob and parsing language, even when the file appears at several
+paths. It also reuses filters from the previous tree for incremental builds.
+Short literals and other terms that the
 filter cannot rule out remain candidates. The page reports `indexed_repositories`,
 `scanning_repositories`, and `limited_repositories`. Crab scans Git while a
 matching index is unavailable or exceeds the artifact or memory limit.
@@ -1137,6 +1148,12 @@ fork branch with an upstream branch. The file list and diffs show changes
 from the common Git ancestor to the fork tip. Changes made only upstream
 are excluded. Branch selection does not write refs or copy Git objects.
 
+From the upstream repository, choose **New pull request** and then
+**Compare across forks**. Search by owner or repository name and select a
+fork you can write to. Your base branch, draft, and previous branch choice
+stay in the form when switching between head repositories. The
+`GET .../pulls/head-forks?q=...` endpoint serves the searchable choices.
+
 For the comparison API, send `GET /api/repos/{owner}/{name}/changes` with
 `rev=refs/heads/{fork-branch}`, `base=refs/heads/{upstream-branch}`,
 `merge_base=true`, and `upstream={source-repository-uuid}`. Crab verifies
@@ -1146,9 +1163,11 @@ rules. The response identifies the ancestor as `base`, the upstream tip as
 and `commit` in the fork. Both `changes` and `commits` also accept exact
 commit IDs in `base` and `rev` for a repeatable comparison.
 
-Writers can open a regular or draft pull request in the upstream repository
-from the same comparison. The request stores the fork UUID, branch name and
-both inspected commit IDs. The upstream owns the conversation, reviews,
+Contributors can open a regular or draft pull request from the comparison
+with Write access to the fork and Read access upstream. A recent push to a
+personal fork offers **Compare & pull request**. Crab rechecks both grants
+and the inspected tips at creation. The request stores the fork UUID, branch
+name and both inspected commit IDs. The upstream owns the conversation, reviews,
 CODEOWNERS and merge requirements. Files and commits are read from the fork.
 The base and head may have the same branch name. API clients post to the
 upstream `pulls` route with `head_repository` set to the fork UUID, and supply
@@ -1285,6 +1304,15 @@ Changing the default branch records a new symbolic HEAD through the ref journal.
 
 Branch protection uses exact short branch names. A configuration can seed version zero; after the first administrative save, the stored object is authoritative across restarts and server instances. Set `require_conversation_resolution` to require resolved review threads.
 
+**Require approval of the most recent reviewable push** is available in exact
+branch protection and in repository and organization branch rulesets. A
+currently eligible writer other than the authenticated pusher must approve
+the current head publication and comparison merge base. The rule also
+applies to fork heads, auto-merge, queued merges, and final publication.
+The merge panel shows whether an independent approval is pending or the
+pusher could not be verified. Older or imported heads without authenticated
+publication evidence need a new push before the rule can be satisfied.
+
 Archived repositories remain readable and searchable. Browser writes, native pushes, and LFS uploads return a read-only error. Native Git and LFS check archive state again immediately before publication.
 
 ### Manage branch and tag rulesets
@@ -1315,6 +1343,20 @@ and workflow. Any applicable rule can require the head to contain the current
 base commit or require the merge queue. Each setting requires at least one
 required check or workflow.
 
+In a repository or organization branch ruleset, **Force pushes** can allow or
+block non-fast-forward updates on matching branches. Use an active allow rule
+for topic branches that contributors rebase locally. Native Git pushes require
+an explicit allow rule. A matching block takes precedence unless the pusher has
+an **Always** bypass for it. The PR and linear-history rules still apply.
+Crab checks the exact advertised tip, current rules, and paths protected by Git
+LFS locks before publishing a rewrite. A block also prevents the browser from
+rebasing a matching PR head.
+
+If a later rewrite restores the exact predecessor for a previously committed
+Git request, sending that request again uses a new publication plan bound to
+the current ref transactions. A former success receipt stays valid for
+transport recovery when the request's expected predecessor is no longer live.
+
 **Require linear history** is available in classic branch protection and in
 repository and organization rulesets. Crab checks the commits introduced by
 each matching ref update, including objects already reachable from another
@@ -1332,8 +1374,8 @@ under the ref and policy leases.
 `can_manage`. Administrators can see disabled rulesets and replace the complete
 collection with matching `expected_version`. Each entry contains `id` (UUID),
 `name`, `target` (`branch` or `tag`), `enforcement` (`active` or `disabled`),
-`include`, `exclude`, `restrict_creations`, `restrict_updates`, `restrict_deletions`,
-`require_pull_request`, `required_approvals`, `required_code_owner_reviews`,
+`include`, `exclude`, `restrict_creations`, `restrict_updates`, `restrict_deletions`, optional `force_pushes` (`allow` or `block`),
+`require_pull_request`, `required_approvals`, `required_code_owner_reviews`, `require_last_push_approval`,
 `require_conversation_resolution`, `require_up_to_date`, `require_merge_queue`, `require_linear_history`,
 `required_checks`, `required_integrations`, and optional `review_dismissal`.
 Branch-only settings must have
@@ -3425,6 +3467,16 @@ issues and PRs. Counts use the same authoritative predicate as results.
 Prefix a term or qualifier with `-` to exclude it. Missing-metadata qualifiers
 cannot be negated. Unknown qualifiers and malformed syntax return 400.
 
+Use `base:release/2.0` for pull requests targeting that exact branch, or
+`head:backport/` for source branches beginning with that prefix. Use short
+branch names with their original case. Repository search suggests both
+qualifiers; they also work in workspace search, grouped conditions, and
+exclusions. A merged pull request remains searchable by its recorded branch
+names after the source branch is deleted.
+Public readers can filter by visible local source and target branches. A
+fork source name that is hidden on the PR cannot match a source branch filter
+or contribute to its counts.
+
 For organization repositories, open **Types** above the issue list or add
 `type:"Incident report"` to the search. Names match case-insensitively. Use
 `no:type` to find issues without an enabled type. Disabling an issue type
@@ -3554,9 +3606,13 @@ Both list outputs include `assigned_to_me` for global positive self predicates;
 conditional/excluded predicates retain arbitrary-search navigation.
 
 Reviewer predicates accept public usernames or `@me`: `review-requested`,
-`reviewed-by`, `review-involves`, and `user-review-requested`.
-`review-requested:@me` includes outstanding requests for the teams you currently
-belong to. `user-review-requested:@me` shows direct requests. A submitted review
+`reviewed-by`, `review-involves`, `user-review-requested`, and
+`team-review-requested-user`.
+`review-requested:USERNAME` includes direct requests and outstanding requests
+to the user's current teams that the reader can see. Use
+`user-review-requested:USERNAME` for direct requests and
+`team-review-requested-user:USERNAME` for team requests. Use `@me` to apply
+any of these filters to your own account. A submitted review
 fulfills its pending direct request and remains a participant. Cancellation
 without a review removes participation. Qualified issuer/subject bindings
 prevent cross-provider subject collisions.
@@ -3566,7 +3622,7 @@ review from a visible team in the repository's organization. Quote values
 containing spaces. Type `team-review-requested:` in the search box to choose
 a visible team with the qualified value filled in. A fulfilled or cancelled
 request drops out. Team visibility and roster changes invalidate affected
-continuations. Existing repositories require `cells rebuild-search` for
+continuations in repository and workspace search. Existing repositories require `cells rebuild-search` for
 discussion index format 14.
 
 Exclusion, boolean groups, exact full counts and query-bound cursors use the
@@ -4444,6 +4500,10 @@ Pull list rows, including PR rows returned by issue search, include `rollup` wit
 success, neutral, skipped, pending and failed outcomes. Latest commit statuses
 and latest check runs remain separate sources. The newest run wins within
 each case-insensitive name and provider connection.
+Each accepted CI report updates its commit's counts in the same Repository Cell
+transaction. PR lists read the saved counts for the selected commit without
+scanning report history. Existing repositories prepare these counts through
+[`cells rebuild-search`](CELLAR.md#commit-check-summary-preparation).
 Review counts include selected-head approvals, unresolved requests for changes,
 outstanding review requests and decisions anchored on earlier commits. Requested
 changes remain active after a new push until the same reviewer replaces the
@@ -4667,11 +4727,12 @@ An unprotected branch is never review-required, and an approved match still need
 at least one active approval. Checks and other merge conditions are independent.
 
 Head-dependent filters bind the verified Git source token to a ready immutable
-ref projection. Pending reconciliation returns 503 `review_index_pending` with
-visible retry. Source changes and effective rule edits invalidate cursors.
+ref projection and capture current private fork heads from their own repositories.
+Pending reconciliation returns 503 `review_index_pending` with visible retry.
+Source changes and effective rule edits invalidate repository and workspace cursors.
 An empty repository requires no Git manifest. Completed merges use the recorded
 source head, decoded by the canonical binary codec, even after branch deletion.
-Filtered rollups retain the same captured source rather than resolving newer refs.
+Filtered rollups retain the same captured source, including fork heads.
 Missing unmerged source refs have no proven latest head: rollups report null
 source/check/review fields. Retaining that historical source head remains parity
 work; the opening OID is not used as a freshness fallback.
@@ -4689,6 +4750,25 @@ Preparation preserves canonical SQL/KV records, versions and permanent submissio
 ledgers. Transport receipts retain their normal bounded expiry. Serving never
 installs this relation. Upgrade all peers and embedded UI together
 for the changed private search/rollup input contract.
+
+### Pull request check status filters
+
+Repository pull request and discussion lists, and workspace discussion search,
+accept `status:pending`, `status:success`, and `status:failure` in ordinary search
+expressions. The repository search box suggests each value. Failure takes
+precedence over pending. A known head with no reports counts as pending.
+Successful, neutral, and skipped reports count as completed without failure.
+An unmerged PR whose branch disappeared has no current result. Merged PRs
+retain the result of their recorded source commit.
+
+The filter and list rollup use the same per-commit CI counts. Both review and
+check filters use the same head capture. Local heads bind
+to the verified Git ref projection. Private fork branches are read from one
+pinned ref view per upstream-authorized fork. Fork lookups are concurrent and
+the captured head map is limited to 1 MiB by the Cell request budget. An
+oversized snapshot returns a request error.
+Changes to the captured heads or CI summaries invalidate page continuations.
+Workspace status search includes repositories with an active repository grant.
 
 ### Dismiss a pull request review
 
@@ -5002,6 +5082,36 @@ Submit `POST .../pulls/{number}/merge` with the candidate's `method`,
 `tested_candidate_oid`, `request_id`, `version`, `base_oid`, and `head_oid`
 to publish the candidate. Retry an interrupted response with the same request.
 
+**Conversation** refreshes merge readiness while an open pull request is
+visible. New reviews, head changes, and changes to approval counts trigger
+fresh reviewer details. The latest conversation refreshes with the decision,
+while earlier activity stays in view during pagination.
+An open merge confirmation becomes unavailable when its requirements or
+captured tips change. The author can keep editing their comment draft.
+
+The **Checks** tab refreshes the open pull request’s head and queued candidate
+while the tab is visible. Head reports and candidate reports identify their
+tested commit separately. The newest check-run page refreshes more often while
+runs are active and continues to pick up reruns. The selected log refreshes when
+its run version changes and keeps its expanded steps. Hidden tabs pause these reads and catch
+up when visible again. Completed pull requests show their saved check history.
+
+### Schedule auto-merge
+
+Enable **Allow auto-merge** under **Settings → General → Pull request merge
+methods**. A writer can schedule an open pull request from its merge box. Crab
+checks the inspected base and head when saving the request. The merge box
+shows the scheduled method and the head currently waiting for requirements.
+
+Auto-merge follows branch updates when Crab can verify that every intervening
+publication came from a person with durable Write access to the target
+repository. This applies to same-repository branches and linked private forks.
+A fork owner with only Read access upstream can push to the fork, and that push
+ends the waiting request. A branch recreation, base switch, or missing push
+attribution also requires fresh confirmation. The request checks reviews and
+CI against the latest head before merging. The request survives a lost reply
+when the ref transaction committed and its attribution was saved.
+
 ### Merge a pull request through the queue
 
 Enable **Require merge queue** on an exact branch in **Settings → Branches**
@@ -5240,18 +5350,23 @@ text, Boolean expressions, and discussion qualifiers as the repository lists.
 For example, `is:open label:"bug" deployment` finds open work that matches
 both the label and text. The repository scope accepts an owner namespace or
 an exact `owner/repository`. Search both types together or choose Issues or
-Pull requests, and sort by creation time or recent activity. The browser URL
-keeps the query and filters and opens each result by its type and repository
-UUID.
+Pull requests. Sort in either direction by creation time, last update, comment
+count, or reaction count. The selected count is displayed beside each match.
+The browser URL keeps the query and filters and opens each result by its type
+and repository UUID.
 
 `GET /api/discussion-search` requires a browser account, plus `q` or `scope`.
-It accepts optional `kind=issue|pull`, `sort=created|updated`, `limit` from 1
-to 50, and `after` from the previous response. It returns `items` and nullable
-`next`. Crab merges bounded pages from each readable repository's discussion
-index. The account, search parameters, and readable scope bind the cursor.
-Current repository access is checked again before results are returned. A
-changed scope returns HTTP 409. An unavailable repository index returns its
-normal preparation error so an incomplete search can be retried.
+It accepts optional `kind=issue|pull`, `sort=created|updated|comments|reactions`
+(default `created`), `direction=asc|desc` (default `desc`), `limit` from 1 to
+50, and `after` from the previous response. It returns `items` and nullable
+`next`. Each item includes `sort_value`, the selected timestamp or count.
+Crab merges bounded pages from each readable repository's discussion index.
+The account, search parameters, and readable scope bind the cursor. Current
+repository access is checked again before results are returned. A changed
+scope returns HTTP 409. For comment and reaction sorts, an index revision
+change also returns HTTP 409. Open **First page** to refresh the results.
+An unavailable repository index returns its normal preparation error so an
+incomplete search can be retried.
 
 ### Understand pagination and storage
 

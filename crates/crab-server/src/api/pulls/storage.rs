@@ -11,7 +11,7 @@ use crate::{
         GetPull, GetPullComment, GetPullMergeSubmission, GetPullReviewSubmission,
         GetPullSubmission, ListPullComments, PullChildKey, PullChildListInput, PullMergeTransition,
         PullRecord, PullSubmissionKey, RejectStalePullComparison, ReservePullMerge,
-        ReservePullMergeInput, ReservePullMergeOutcome, TransitionPullMerge,
+        ReservePullMergeInput, ReservePullMergeOutcome, ReviewComparison, TransitionPullMerge,
         TransitionPullMergeInput, TransitionPullMergeOutcome, UpdatePull, UpdatePullComment,
         UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome,
         UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
@@ -48,6 +48,8 @@ pub(super) struct PullReviewDecision {
     pub author: Identity,
     pub state: ReviewState,
     pub commit_oid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<ReviewComparison>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -120,6 +122,7 @@ pub(super) struct NewPullReview {
     pub body: String,
     pub state: ReviewState,
     pub commit_oid: String,
+    pub comparison: Option<ReviewComparison>,
     pub base_revision: Option<u64>,
 }
 
@@ -514,6 +517,7 @@ pub(super) async fn create_review(
                     body: input.body,
                     state: input.state,
                     commit_oid: input.commit_oid,
+                    comparison: input.comparison,
                     base_revision: input.base_revision,
                 },
             )
@@ -823,6 +827,7 @@ pub(super) fn from_pull(value: PullRecord) -> PullRequest {
                 author: from_author(decision.author),
                 state: decision.state,
                 commit_oid: decision.commit_oid,
+                comparison: decision.comparison,
             })
             .collect(),
         version: value.version,

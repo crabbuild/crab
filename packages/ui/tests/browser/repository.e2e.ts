@@ -3222,12 +3222,13 @@ test("footer groups the Crab mark and tagline into one compact signature", async
 test("code search preserves scope and links each match to the searched commit", async ({
   page,
 }) => {
+  const expression = "render NOT is:archived";
   let continuationAttempts = 0;
   await page.route(
     (url) => url.pathname === "/api/repos/team/project/code-search",
     (route) => {
       const request = new URL(route.request().url());
-      expect(request.searchParams.get("q")).toBe("render");
+      expect(request.searchParams.get("q")).toBe(expression);
       expect(request.searchParams.get("kind")).toBe("symbol");
       expect(request.searchParams.get("path")).toBe("src");
       expect(request.searchParams.get("rev")).toBe("refs/heads/main");
@@ -3273,7 +3274,7 @@ test("code search preserves scope and links each match to the searched commit", 
     .getByRole("link", { name: "Search code", exact: true })
     .click();
   const form = page.getByRole("search", { name: "Search repository code" });
-  await form.getByLabel("Search text").fill("render");
+  await form.getByLabel("Search text").fill(expression);
   await chooseSelectOption(form.getByLabel("Search in"), "symbol");
   await form.getByLabel("Directory (optional)").fill("src");
   await form.getByRole("checkbox", { name: "Match case" }).check();
@@ -3308,7 +3309,7 @@ test("code search preserves scope and links each match to the searched commit", 
   await line.click();
   await expect(page).toHaveURL(`/team/project/blob/${oid}/src/index.ts#L7`);
   await page.goBack();
-  await expect(form.getByLabel("Search text")).toHaveValue("render");
+  await expect(form.getByLabel("Search text")).toHaveValue(expression);
 });
 
 test("Go to file finds a deep repository path before its directory is expanded", async ({

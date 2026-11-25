@@ -37,7 +37,9 @@ pub(crate) use candidate::authorize_merge_candidate;
 mod codeowners;
 pub(crate) use branch_update::authorize_branch_update;
 pub(super) mod comments;
-mod git;
+pub(super) mod git;
+mod head_forks;
+mod last_push;
 mod merged_comparison;
 pub(super) use git::review_head;
 mod merge;
@@ -133,6 +135,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route(
             "/api/repos/{owner}/{name}/pulls/open-comparison",
             get(open_comparison::find),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/pulls/head-forks",
+            get(head_forks::list),
         )
         .route(
             "/api/repos/{owner}/{name}/pulls/recent-pushes",
@@ -393,6 +399,7 @@ async fn pull_view<'a>(
             "updates_restricted": requirements.updates_restricted,
             "linear_history_required": requirements.linear_history_required,
             "required_approvals": requirements.required_approvals,
+            "last_push_approval": requirements.last_push_approval,
             "rulesets": requirements.rulesets,
             "approvals": requirements.approvals,
             "changes_requested": requirements.changes_requested,
@@ -436,6 +443,7 @@ struct MergeRequirements {
     rulesets: Vec<String>,
     bypass_options: Vec<crate::repository::settings::BypassOption>,
     required_approvals: usize,
+    last_push_approval: Option<last_push::Report>,
     approvals: usize,
     changes_requested: usize,
     code_owners: Option<codeowners::Report>,
@@ -557,7 +565,7 @@ async fn requirements(
     };
     let policy = policy.merge_protection(&pull.base_ref, &default_ref, actor, bypass)?;
     let protection = policy.protection.as_ref();
-    let ((checks, candidate_checks), unresolved, code_owners, head_up_to_date) = match protection {
+    let outcomes = match protection {
         Some(rule) => tokio::try_join!(
             required_checks::load(
                 server,
@@ -617,9 +625,30 @@ async fn requirements(
                     .await
                     .map(Some)
             },
+            async {
+                if rule.require_last_push_approval {
+                    // A queued CI candidate can include speculative
+                    // predecessors. Review the actual target branch.
+                    let live_base;
+                    let base = if matches!(target, MergeCheckTarget::Queue(_)) {
+                        live_base = repo.ref_oid(&pull.base_ref).await?;
+                        live_base.as_deref()
+                    } else {
+                        base_oid
+                    };
+                    Box::pin(last_push::evaluate(
+                        server, repo, pull, base, head_oid, reviewers,
+                    ))
+                    .await
+                } else {
+                    Ok(None)
+                }
+            },
         )?,
-        _ => ((vec![], tested_oid.map(|_| vec![])), None, None, None),
+        _ => ((vec![], tested_oid.map(|_| vec![])), None, None, None, None),
     };
+    let ((checks, candidate_checks), unresolved, code_owners, head_up_to_date, last_push_approval) =
+        outcomes;
     let mut requirements = merge_requirements(pull, protection, head_oid, reviewers, checks);
     requirements.candidate_checks = candidate_checks;
     requirements.satisfied &= code_owners
@@ -636,6 +665,9 @@ async fn requirements(
     requirements.satisfied &= unresolved.is_none_or(|count| count == 0);
     requirements.head_up_to_date = head_up_to_date;
     requirements.satisfied &= head_up_to_date != Some(false);
+    requirements.last_push_approval = last_push_approval;
+    requirements.satisfied &=
+        last_push_approval.is_none_or(|status| matches!(status, last_push::Report::Approved));
     Ok(requirements)
 }
 
@@ -677,8 +709,9 @@ pub(crate) async fn authorize_merge_publication(
     if !pending.bypass_rulesets.is_empty() {
         merge::validate_bypass_actor(pending, &app::actor(&grant.principal)?)?;
     }
+    let source = publication.head_repository.as_deref().unwrap_or(repo);
     if grant.principal.is_auto_merge() {
-        auto_merge::authorize(server, repo, &grant.principal, pending, pull.number).await?;
+        auto_merge::authorize(server, repo, &grant.principal, pending, pull.number, source).await?;
     } else {
         auto_merge::require_direct_access(server, repo, pull.number).await?;
     }
@@ -718,7 +751,6 @@ pub(crate) async fn authorize_merge_publication(
     // Save the closure before the marker so finishing a proven receipt does
     // not reinterpret it using a later HEAD or a later edit to the links.
     let on_default = repo.default_ref().await? == update.name;
-    let source = publication.head_repository.as_deref().unwrap_or(repo);
     let cleanup = head_branch::automatic::capture(
         server,
         source,
@@ -746,6 +778,7 @@ fn merge_requirements(
             rulesets: Vec::new(),
             bypass_options: Vec::new(),
             required_approvals: 0,
+            last_push_approval: None,
             approvals: 0,
             changes_requested: 0,
             code_owners: None,
@@ -760,7 +793,9 @@ fn merge_requirements(
     let mut approvals = 0;
     let mut changes_requested = 0;
     for decision in &pull.review_decisions {
-        if (rule.required_approvals > 0 || rule.required_code_owner_reviews)
+        if (rule.required_approvals > 0
+            || rule.required_code_owner_reviews
+            || rule.require_last_push_approval)
             && !reviewers.contains(&decision.author.issuer, &decision.author.subject)
         {
             continue;
@@ -777,7 +812,9 @@ fn merge_requirements(
     let checks_satisfied = checks
         .iter()
         .all(|check| check.state() == Some(StatusState::Success));
-    let reviews_satisfied = (required_approvals == 0 && !rule.required_code_owner_reviews)
+    let reviews_satisfied = (required_approvals == 0
+        && !rule.required_code_owner_reviews
+        && !rule.require_last_push_approval)
         || (changes_requested == 0 && approvals >= required_approvals);
     MergeRequirements {
         queue_required: rule.require_merge_queue,
@@ -787,6 +824,7 @@ fn merge_requirements(
         rulesets: Vec::new(),
         bypass_options: Vec::new(),
         required_approvals,
+        last_push_approval: None,
         approvals,
         changes_requested,
         code_owners: None,
@@ -851,10 +889,7 @@ async fn list(
     let review_teams =
         super::discussion_search::resolve_people(&server, &principal, repo, &mut input).await?;
     let type_scope = super::discussion_search::issue_types::bind(&server, repo, &mut input).await?;
-    let review_source = input
-        .review_context
-        .as_ref()
-        .and_then(|value| value.source_token.clone());
+    let pull_heads = input.pull_heads.clone();
     let page = app::query_output(
         routed
             .client
@@ -864,7 +899,14 @@ async fn list(
     let rollups = if principal.is_public_reader(repo.id) {
         Default::default()
     } else {
-        rollups::load(&server, repo, review_source.as_deref(), page.items.iter()).await?
+        rollups::load(
+            &server,
+            repo,
+            pull_heads.as_ref(),
+            page.check_revision,
+            page.items.iter(),
+        )
+        .await?
     };
     let authors = super::profiles::attribution::Authors::load(
         &server,
@@ -880,6 +922,10 @@ async fn list(
         page.items.iter().flat_map(|pull| pull.assignees.iter()),
     )
     .await?;
+    // Search counts and rows must have the same visibility at publication.
+    if assignees.principal.is_public_reader(repo.id) != principal.is_public_reader(repo.id) {
+        return Err(Error::PageChanged);
+    }
     let pulls = &page.items;
     let items = pulls
         .iter()
@@ -947,16 +993,9 @@ async fn create(
         return Err(Error::Invalid("Base and head branches must differ"));
     }
     if let Some(fork) = input.head_repository {
-        git::fork_repository(&server, &repo, fork)?;
-        // Private same-organization forks inherit the upstream grant. Keep
-        // the browser credential bound to the upstream collaboration route.
-        if !app::membership(&server, &principal, &repo)
-            .await?
-            .principal
-            .can_write(repo.id)
-        {
-            return Err(Error::Forbidden);
-        }
+        let fork = git::fork_repository(&server, &repo, fork)?;
+        let grant = app::membership(&server, &principal, &repo).await?;
+        git::require_fork_writer(&server, &repo, &grant.principal, &fork).await?;
         if input.expected.is_none() {
             return Err(Error::Invalid(
                 "Inspect the fork comparison before opening a pull request",
@@ -1119,7 +1158,7 @@ async fn create_at_comparison(
     server: &Arc<Server>,
     principal: &Principal,
     repo: &Arc<Repository>,
-    input: NewPullRequest,
+    mut input: NewPullRequest,
 ) -> Result<PullRequest> {
     use crate::cells::repository::collaboration::links::branches::promotion::Prepare;
 
@@ -1184,17 +1223,12 @@ async fn create_at_comparison(
                             || refs.get(&input.head_ref) != Some(&input.head_oid)
                     }
                 };
-                let grant = app::membership(worker, &principal, repo).await?;
-                if fork.is_some() && !grant.principal.can_write(repo.id) {
-                    return Err(Error::Forbidden);
-                }
                 if cancel.is_cancelled() {
                     return Err(Error::MergeBusy);
                 }
-                if stale
-                    || repo.organization.is_none()
-                    || !input.head_ref.starts_with("refs/heads/")
-                {
+                if repo.organization.is_none() || (stale && fork.is_none()) {
+                    let grant = app::membership(worker, &principal, repo).await?;
+                    input.metadata.can_triage &= grant.principal.can_triage(repo.id);
                     return storage::create_pull(worker, repo, input, stale, None).await;
                 }
                 settings::with_ownership_lease(worker, repo, |policy| async move {
@@ -1202,8 +1236,12 @@ async fn create_at_comparison(
                         return Err(Error::MergeBusy);
                     }
                     let grant = app::membership(worker, &principal, repo).await?;
-                    if fork.is_some() && !grant.principal.can_write(repo.id) {
-                        return Err(Error::Forbidden);
+                    if let Some(fork) = fork {
+                        git::require_fork_writer(worker, repo, &grant.principal, fork).await?;
+                    }
+                    input.metadata.can_triage &= grant.principal.can_triage(repo.id);
+                    if stale {
+                        return storage::create_pull(worker, repo, input, true, None).await;
                     }
                     let branch = crate::cells::repository::collaboration::links::branches::Branch {
                         repository: input.head_repository.unwrap_or(repo.id),

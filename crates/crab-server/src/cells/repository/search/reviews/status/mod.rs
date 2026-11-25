@@ -11,7 +11,7 @@ use crate::cells::{
     Error, Result,
     application::{Read, SqlValue, Transaction},
     repository::{
-        BranchProtectionRecord, MergeReviewers, projection,
+        BranchProtectionRecord, MergeReviewers,
         rulesets::{ActiveRulesets, GetRefPolicy},
     },
 };
@@ -47,40 +47,19 @@ impl Status {
 }
 
 impl Query {
-    fn review_statuses(&self) -> Vec<Status> {
-        fn collect(expression: &Expression, values: &mut Vec<Status>) {
-            match expression {
-                Expression::Term {
-                    value: Term::ReviewStatus(status),
-                    ..
-                } => values.push(*status),
-                Expression::Not(inner)
-                | Expression::Scope {
-                    expression: inner, ..
-                } => collect(inner, values),
-                Expression::And(parts) | Expression::Or(parts) => {
-                    for part in parts {
-                        collect(part, values);
-                    }
-                }
-                _ => (),
-            }
-        }
-        let mut values = vec![];
-        collect(&self.expression, &mut values);
-        values
-    }
     pub(crate) fn needs_review_source(&self) -> bool {
-        self.review_statuses()
-            .iter()
-            .any(|status| matches!(status, Status::Required | Status::Approved))
+        self.expression.has_term(|term| {
+            matches!(
+                term,
+                Term::ReviewStatus(Status::Required | Status::Approved)
+            )
+        })
     }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Context {
-    pub source_token: Option<String>,
     #[serde(default)]
     pub default_ref: String,
     pub configured_rules: Vec<BranchProtectionRecord>,
@@ -89,28 +68,9 @@ pub(crate) struct Context {
     pub reviewers: MergeReviewers,
 }
 
-pub(crate) struct GetSourceState;
-impl Read for GetSourceState {
-    const CLASS: &'static str = crate::cells::repository::CLASS;
-    const ID: u32 = 327;
-    type Input = ();
-    type Output = Option<projection::ProjectionStateView>;
-    fn execute(context: &mut Transaction<'_>, (): ()) -> Result<Self::Output> {
-        super::super::index::ensure_ready(context)?;
-        if context
-            .query("SELECT 1 FROM repository_pulls LIMIT 1", &[])?
-            .rows
-            .is_empty()
-        {
-            return Ok(None);
-        }
-        projection::GetProjectionState::execute(context, projection::ProjectionState).map(Some)
-    }
-}
-
+#[derive(Serialize)]
 pub(in crate::cells::repository::search) struct Prepared {
-    pub epoch: Option<u64>,
-    pub(in crate::cells::repository::search) approvals: BTreeMap<String, u8>,
+    approvals: BTreeMap<String, u8>,
     reviewers: MergeReviewers,
 }
 pub(in crate::cells::repository::search) fn prepare(
@@ -118,26 +78,9 @@ pub(in crate::cells::repository::search) fn prepare(
     input: Option<&Context>,
 ) -> Result<Prepared> {
     let input = input.ok_or(Error::Invalid(
-        "Review status requires a captured Git source",
+        "Review status requires the current review policy",
     ))?;
     crate::cells::repository::settings::validate_protections(&input.configured_rules)?;
-    if input.source_token.as_ref().is_some_and(|token| {
-        token.len() != 64
-            || !token
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    }) {
-        return Err(Error::Invalid("Review source token is invalid"));
-    }
-    let epoch = match (GetSourceState::execute(context, ())?, &input.source_token) {
-        (None, None) => None,
-        (Some(state), Some(token))
-            if state.source_token.as_ref() == Some(token) && state.ready_epoch.is_some() =>
-        {
-            state.ready_epoch
-        }
-        _ => return Err(Error::StaleSearch),
-    };
     // Saved rules, including an empty set, override configured initial policy.
     let (classic, mut rulesets) = GetRefPolicy::execute(context, ())?;
     rulesets
@@ -172,14 +115,12 @@ pub(in crate::cells::repository::search) fn prepare(
         }
     }
     Ok(Prepared {
-        epoch,
         approvals,
         reviewers: input.reviewers.clone(),
     })
 }
 
 pub(in crate::cells::repository::search) struct Bound {
-    epoch: String,
     approvals: String,
     reviewers: String,
 }
@@ -188,18 +129,13 @@ impl Bound {
         prepared: &Prepared,
         mut bind: impl FnMut(SqlValue) -> String,
     ) -> Result<Self> {
-        let epoch = bind(
-            prepared
-                .epoch
-                .map(crate::cells::repository::integer)
-                .transpose()?
-                .unwrap_or(SqlValue::Null),
-        );
         let approvals = if prepared.approvals.is_empty() {
             "0".to_owned()
         } else {
             let counts = bind(SqlValue::Text(serde_json::to_string(&prepared.approvals)?));
-            format!("COALESCE((SELECT value FROM json_each({counts}) WHERE key=s.base_ref),0)")
+            format!(
+                "COALESCE((SELECT value FROM json_each({counts}) WHERE key=pr_source.base_ref),0)"
+            )
         };
         let issuer = bind(SqlValue::Text(prepared.reviewers.issuer.clone()));
         let subjects = bind(SqlValue::Text(serde_json::to_string(
@@ -209,13 +145,15 @@ impl Bound {
             "(({approvals})=0 OR (v.author_issuer={issuer} AND v.author_subject IN (SELECT value FROM json_each({subjects}))))"
         );
         Ok(Self {
-            epoch,
             approvals,
             reviewers,
         })
     }
-    pub(in crate::cells::repository::search) fn predicate(&self, status: Status) -> String {
-        let head = "COALESCE(s.merged_head_oid,NULLIF(lower(hex(r.target_oid)),''))";
+    pub(in crate::cells::repository::search) fn predicate(
+        &self,
+        status: Status,
+        head: &str,
+    ) -> String {
         let approved = format!(
             "(SELECT COUNT(*) FROM repository_pull_review_decisions v WHERE v.pull_number=d.number AND v.state=1 AND v.commit_oid={head} AND {})",
             self.reviewers
@@ -235,10 +173,7 @@ impl Bound {
             ),
             Status::ChangesRequested => return CHANGES_REQUESTED.into(),
         };
-        format!(
-            "d.kind=1 AND EXISTS (SELECT 1 FROM discussion_index_pull_sources s LEFT JOIN git_projection_refs r ON r.epoch_id={} AND r.name=s.head_ref WHERE s.document=d.rowid AND ({condition}))",
-            self.epoch
-        )
+        format!("d.kind=1 AND pr_source.document IS NOT NULL AND ({condition})")
     }
 }
 

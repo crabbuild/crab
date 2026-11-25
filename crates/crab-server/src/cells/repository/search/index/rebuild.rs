@@ -1,4 +1,5 @@
 use super::*;
+use crate::cells::repository::checks::summary;
 use crate::cells::repository::issues::issue_type::search as issue_types;
 
 /// Start or advance preparation using its expected generation and version.
@@ -55,6 +56,17 @@ impl Mutation for RebuildIndex {
                     return Err(crate::cells::Error::Invalid(
                         "discussion index generation is invalid",
                     ));
+                }
+                summary::begin(context)?;
+                if current
+                    .as_ref()
+                    .is_some_and(|state| state.format == 16 && state.progress.is_none())
+                {
+                    context.put_document(
+                        STATE_KEY,
+                        &building(generation, SearchIndexPhase::CheckRollups),
+                    )?;
+                    return progress(context);
                 }
                 locks::install(context)?;
                 issue_types::install(context)?;
@@ -150,6 +162,9 @@ impl Mutation for RebuildIndex {
                     SearchIndexPhase::PullLocks => locks::step(context, build, SubjectKind::Pull)?,
                     SearchIndexPhase::IssueTypes => {
                         issue_types::backfill(context, &mut build.after, BATCH)?
+                    }
+                    SearchIndexPhase::CheckRollups => {
+                        summary::backfill(context, &mut build.processed)?
                     }
                     SearchIndexPhase::Reviews => super::super::reviews::reviews(context)?,
                     SearchIndexPhase::ReviewRequests => super::super::reviews::requests(context)?,
@@ -286,13 +301,20 @@ impl Mutation for RebuildIndex {
                         SearchIndexPhase::PullLocks => {
                             let mut after = 0;
                             if issue_types::backfill(context, &mut after, BATCH)? {
-                                current.progress = None;
+                                if begin_checks(context, build)? {
+                                    current.progress = None;
+                                }
                             } else {
                                 build.phase = SearchIndexPhase::IssueTypes;
                                 build.after = after;
                             }
                         }
-                        SearchIndexPhase::IssueTypes => current.progress = None,
+                        SearchIndexPhase::IssueTypes => {
+                            if begin_checks(context, build)? {
+                                current.progress = None;
+                            }
+                        }
+                        SearchIndexPhase::CheckRollups => current.progress = None,
                     }
                 }
                 current
@@ -302,6 +324,15 @@ impl Mutation for RebuildIndex {
         progress(context)
     }
 }
+fn begin_checks(
+    context: &mut Transaction<'_>,
+    build: &mut SearchIndexProgress,
+) -> crate::cells::Result<bool> {
+    build.phase = SearchIndexPhase::CheckRollups;
+    build.after = 0;
+    summary::backfill(context, &mut build.processed)
+}
+
 fn building(generation: Uuid, phase: SearchIndexPhase) -> State {
     State {
         format: FORMAT,

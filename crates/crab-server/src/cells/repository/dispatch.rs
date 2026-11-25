@@ -27,12 +27,24 @@ pub(in crate::cells) fn dispatch_mutation(
         || id == PreparePullLifecycle::ID
         || id == review_dismissals::PrepareReviewState::ID
         || id == collaboration::submissions::preparation::Prepare::ID;
+    // Check reports and Git push attribution have independent storage. They
+    // can commit while the discussion index is being prepared.
+    let maintenance = maintenance
+        || matches!(
+            id,
+            CreateCommitStatus::ID
+                | CreateCheckRun::ID
+                | UpdateCheckRun::ID
+                | integrations::Record::ID
+                | push_attribution::Record::ID
+        );
     #[cfg(test)]
     let maintenance = maintenance
         || id == projects::tests::Historical::ID
         || id == assignments::migration::tests::SeedSubjects::ID
         || id == reviewers::tests::PreviousIndex::ID
         || id == rollups::tests::PreviousFormat::ID
+        || id == rollups::tests::BeforeCommitSummaries::ID
         || id == search::reviews::status::tests::PreviousFormat::ID
         || id == collaboration::conversation::tests::Inspect::ID
         || id == collaboration::submissions::preparation::tests::Historical::ID
@@ -65,6 +77,7 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<issues::transfer::publication::Fence>(context, input)
         }
         recent_pushes::Record::ID => invoke_mutation::<recent_pushes::Record>(context, input),
+        push_attribution::Record::ID => invoke_mutation::<push_attribution::Record>(context, input),
         #[cfg(test)]
         SeedHistoricalMerges::ID => invoke_mutation::<SeedHistoricalMerges>(context, input),
         attachments::Reserve::ID => invoke_mutation::<attachments::Reserve>(context, input),
@@ -163,6 +176,10 @@ pub(in crate::cells) fn dispatch_mutation(
         #[cfg(test)]
         rollups::tests::PreviousFormat::ID => {
             invoke_mutation::<rollups::tests::PreviousFormat>(context, input)
+        }
+        #[cfg(test)]
+        rollups::tests::BeforeCommitSummaries::ID => {
+            invoke_mutation::<rollups::tests::BeforeCommitSummaries>(context, input)
         }
         #[cfg(test)]
         issues::lifecycle::tests::Historical::ID => {
@@ -359,6 +376,8 @@ pub(in crate::cells) fn dispatch_read(
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
         recent_pushes::List::ID => invoke_read::<recent_pushes::List>(context, input),
+        push_attribution::Verify::ID => invoke_read::<push_attribution::Verify>(context, input),
+        push_attribution::Latest::ID => invoke_read::<push_attribution::Latest>(context, input),
         pull_branch::HasPullForPush::ID => {
             invoke_read::<pull_branch::HasPullForPush>(context, input)
         }
@@ -422,8 +441,11 @@ pub(in crate::cells) fn dispatch_read(
             invoke_read::<collaboration::bulk::Select>(context, input)
         }
         GetPullLifecycleStatus::ID => invoke_read::<GetPullLifecycleStatus>(context, input),
-        search::reviews::status::GetSourceState::ID => {
-            invoke_read::<search::reviews::status::GetSourceState>(context, input)
+        search::heads::GetSourceState::ID => {
+            invoke_read::<search::heads::GetSourceState>(context, input)
+        }
+        search::heads::ListForkRefs::ID => {
+            invoke_read::<search::heads::ListForkRefs>(context, input)
         }
         review_dismissals::GetReviewState::ID => {
             invoke_read::<review_dismissals::GetReviewState>(context, input)

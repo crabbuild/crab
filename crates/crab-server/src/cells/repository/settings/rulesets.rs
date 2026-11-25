@@ -52,6 +52,13 @@ pub(crate) enum Enforcement {
     Disabled,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ForcePushes {
+    Allow,
+    Block,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum BypassActor {
@@ -166,9 +173,13 @@ pub(crate) struct Ruleset {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub restrict_updates: bool,
     pub restrict_deletions: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_pushes: Option<ForcePushes>,
     pub require_pull_request: bool,
     pub required_approvals: u8,
     pub required_code_owner_reviews: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_last_push_approval: bool,
     #[serde(default)]
     pub require_conversation_resolution: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -186,11 +197,16 @@ pub(crate) struct Ruleset {
 }
 
 impl Ruleset {
+    pub(crate) fn blocks_force_push(&self) -> bool {
+        self.force_pushes == Some(ForcePushes::Block)
+    }
+
     pub(crate) fn requires_pull(&self) -> bool {
         self.require_pull_request
             || self.require_merge_queue
             || self.required_approvals > 0
             || self.required_code_owner_reviews
+            || self.require_last_push_approval
             || self.require_conversation_resolution
             || !self.required_checks.is_empty()
             || !self.required_integrations.is_empty()
@@ -254,7 +270,8 @@ impl Ruleset {
             && self.name.len() <= 100
             && self.name.trim() == self.name
             && !self.name.chars().any(char::is_control)
-            && (!self.requires_pull() || self.target == Target::Branch)
+            && (!(self.requires_pull() || self.force_pushes.is_some())
+                || self.target == Target::Branch)
             && self.review_dismissal.as_ref().is_none_or(|entries| {
                 let mut unique = HashSet::new();
                 self.target == Target::Branch
@@ -269,7 +286,8 @@ impl Ruleset {
                 || self.restrict_creations
                 || self.restrict_updates
                 || self.require_linear_history
-                || self.restrict_deletions)
+                || self.restrict_deletions
+                || self.force_pushes.is_some())
             && !self.include.is_empty()
             && [&self.include, &self.exclude].into_iter().all(|patterns| {
                 let mut unique = HashSet::new();

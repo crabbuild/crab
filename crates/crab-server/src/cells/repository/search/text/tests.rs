@@ -32,6 +32,7 @@ fn input(source: &str) -> SearchInput {
         .map(|name| people::Binding {
             name,
             identity: Some(people::identity(&actor.issuer, &actor.subject).unwrap()),
+            account: None,
         })
         .collect();
     SearchInput {
@@ -198,6 +199,7 @@ async fn field_search_covers_all_contribution_bodies_and_keeps_edits_deletion_an
                 body: "Reviewneedle".into(),
                 state: ReviewState::Commented,
                 commit_oid: "b".repeat(40),
+                comparison: None,
             }
         )
         .await,

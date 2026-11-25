@@ -4,9 +4,19 @@ import { Field, FieldLabel } from "@/components/ui/field";
 import { FieldSelect } from "@/components/ui/field-select";
 import { Input } from "@/components/ui/input";
 import { navigate, useRequest } from "@/lib/api";
-import { WorkResults, type WorkPage } from "./results";
+import { WorkResults, type WorkPage, type WorkSort } from "./results";
 
 const PATH = "/-/discussion-search";
+const sorts = {
+  created: "Newest created",
+  "created-asc": "Oldest created",
+  updated: "Last updated",
+  "updated-asc": "Least recently updated",
+  comments: "Most comments",
+  "comments-asc": "Fewest comments",
+  reactions: "Most reactions",
+  "reactions-asc": "Fewest reactions",
+};
 
 function href(parameters: URLSearchParams, after?: string) {
   const query = new URLSearchParams(parameters);
@@ -19,14 +29,21 @@ export default function WorkSearch({ url }: { url: URL }) {
   const scope = url.searchParams.get("scope") ?? "";
   const selected = url.searchParams.get("kind");
   const kind = selected === "issue" || selected === "pull" ? selected : "";
-  const sort =
-    url.searchParams.get("sort") === "updated" ? "updated" : "created";
+  const requestedSort = url.searchParams.get("sort");
+  const sort: WorkSort =
+    requestedSort === "updated" ||
+    requestedSort === "comments" ||
+    requestedSort === "reactions"
+      ? requestedSort
+      : "created";
+  const ascending = url.searchParams.get("direction") === "asc";
   const after = url.searchParams.get("after") ?? undefined;
   const parameters = new URLSearchParams();
   if (q) parameters.set("q", q);
   if (scope) parameters.set("scope", scope);
   if (kind) parameters.set("kind", kind);
-  if (sort === "updated") parameters.set("sort", sort);
+  if (sort !== "created") parameters.set("sort", sort);
+  if (ascending) parameters.set("direction", "asc");
   const search = new URLSearchParams(parameters);
   if (after) search.set("after", after);
   const result = useRequest<WorkPage>(
@@ -49,14 +66,16 @@ export default function WorkSearch({ url }: { url: URL }) {
         onSubmit={(event) => {
           event.preventDefault();
           const query = new URLSearchParams();
-          for (const [name, value] of new FormData(event.currentTarget)) {
-            if (
-              typeof value === "string" &&
-              value.trim() &&
-              !(name === "sort" && value === "created")
-            )
-              query.set(name, value.trim());
+          const fields = new FormData(event.currentTarget);
+          for (const name of ["q", "scope", "kind"]) {
+            const value = String(fields.get(name) ?? "").trim();
+            if (value) query.set(name, value);
           }
+          const [order, direction] = String(
+            fields.get("sort") ?? "created",
+          ).split("-");
+          if (order !== "created") query.set("sort", order);
+          if (direction === "asc") query.set("direction", direction);
           if (href(query) === href(parameters) && !after) {
             result.retry();
           } else {
@@ -108,9 +127,9 @@ export default function WorkSearch({ url }: { url: URL }) {
             <FieldSelect
               id="discussion-search-sort"
               name="sort"
-              defaultValue={sort}
+              defaultValue={ascending ? `${sort}-asc` : sort}
               className="w-full"
-              options={{ created: "Newest created", updated: "Last updated" }}
+              options={sorts}
             />
           </Field>
           <Button type="submit" className="col-span-2 sm:col-span-1">
@@ -131,7 +150,7 @@ export default function WorkSearch({ url }: { url: URL }) {
           after={after}
           href={(cursor) => href(parameters, cursor)}
           emptyMessage="No matching issues or pull requests."
-          showUpdated={sort === "updated"}
+          sort={sort}
         />
       )}
     </section>

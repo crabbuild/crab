@@ -61,7 +61,7 @@ async fn public_visibility_grants_anonymous_code_and_discussion_reads_until_revo
         .unwrap()
     };
     let source = create("library").await;
-    create("private-library").await;
+    let private_source = create("private-library").await;
     let owner = source["owner"].as_str().unwrap();
     let id = source["id"].as_str().unwrap();
     let git_path = format!("{}/git/{owner}/library.git", h.origin);
@@ -167,6 +167,47 @@ async fn public_visibility_grants_anonymous_code_and_discussion_reads_until_revo
     )
     .await;
     let pull_path = format!("pulls/{}", pull["number"]);
+    // Seed a retained cross-repository PR as it would exist after publication
+    // detaches its private source. Only the PR's own discussion becomes public.
+    let cell = h
+        .server
+        .cells()
+        .unwrap()
+        .repository(Uuid::parse_str(id).unwrap())
+        .unwrap();
+    use crate::cells::repository::{
+        CreatePull, CreatePullInput, CreatePullOutcome, RepositoryAuthor,
+    };
+    let fork_pull = cell
+        .client
+        .command::<CreatePull>(
+            &cell.target,
+            crate::app::mutation_identity().unwrap(),
+            CreatePullInput {
+                submission_id: *Uuid::now_v7().as_bytes(),
+                author: RepositoryAuthor {
+                    issuer: h.provider.issuer.to_string(),
+                    subject: "alice-id".into(),
+                    name: "Alice".into(),
+                },
+                title: "Previously linked pull".into(),
+                body: "Published discussion".into(),
+                base_ref: "refs/heads/main".into(),
+                base_oid: pull["base_oid"].as_str().unwrap().into(),
+                head_ref: "refs/heads/internal/work".into(),
+                head_oid: pull["head_oid"].as_str().unwrap().into(),
+                head_repository: Some(
+                    Uuid::parse_str(private_source["id"].as_str().unwrap()).unwrap(),
+                ),
+                draft: false,
+                metadata: Default::default(),
+                code_owner_requests: Default::default(),
+            },
+        )
+        .await
+        .unwrap()
+        .output;
+    assert!(matches!(fork_pull, CreatePullOutcome::Created(_)));
     let get = async |path: &str| h.http.get(path).send().await.unwrap();
     assert_eq!(
         get(&format!("{repo_path}/refs")).await.status(),
@@ -289,7 +330,29 @@ async fn public_visibility_grants_anonymous_code_and_discussion_reads_until_revo
         "Public attachment contents"
     );
     assert_eq!(read("issues").await["items"][0]["title"], "Published issue");
-    assert_eq!(read("pulls").await["items"][0]["title"], "Published pull");
+    let published = read("pulls").await;
+    assert_eq!(published["matching"], 2);
+    assert_eq!(published["items"][0]["title"], "Previously linked pull");
+    assert_eq!(published["items"][0]["head_ref"], "");
+    assert_eq!(published["items"][1]["title"], "Published pull");
+    for list in ["pulls", "issues"] {
+        let visible = read(&format!("{list}?q=base%3Amain+head%3Afeat")).await;
+        assert_eq!(visible["counts"]["open"], 1);
+        assert_eq!(visible["items"][0]["number"], pull["number"]);
+        let hidden = read(&format!("{list}?q=head%3Ainternal%2F")).await;
+        assert_eq!(hidden["matching"], 0);
+        assert_eq!(hidden["counts"]["open"], 0);
+    }
+    let workspace = format!("/api/discussion-search?q=head%3Ainternal%2F&scope={owner}%2Flibrary");
+    assert_eq!(
+        h.json(&workspace, &alice).await["items"][0]["title"],
+        "Previously linked pull"
+    );
+    *h.provider.mode.lock().await = "outsider".into();
+    let visitor = h.login().await;
+    assert_eq!(h.json(&workspace, &visitor).await["items"], json!([]));
+    let check_search = format!("/api/discussion-search?q=status%3Apending&scope={owner}%2Flibrary");
+    assert_eq!(h.json(&check_search, &visitor).await["items"], json!([]));
     assert_eq!(read(&issue_path).await["can_edit"], false);
     assert!(
         read(&format!("{issue_path}/conversation")).await["items"]

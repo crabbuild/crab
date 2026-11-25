@@ -2,6 +2,126 @@ use crate::test_support::http::Harness;
 use axum::http::{StatusCode, header};
 use serde_json::{Value, json};
 
+mod fork_heads;
+mod team_requests;
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Chromium and the built embedded UI"]
+async fn browser_filters_pull_requests_by_branch_and_check_status() {
+    use crate::test_support::{git, http::browser::Browser};
+    use reqwest::Method;
+
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let token = h
+        .write(
+            Method::POST,
+            "/api/git-token",
+            &alice,
+            json!({"owner":"team","repository":"private","access":"write"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    let mut remote = url::Url::parse(&format!("{}/git/team/private.git", h.origin)).unwrap();
+    remote.set_username("crab").unwrap();
+    remote.set_password(token["token"].as_str()).unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    let path = checkout.path();
+    let head = git::push_review_branches(path, remote.as_str()).await;
+    git::success(
+        path,
+        &[
+            "push",
+            remote.as_str(),
+            "main:refs/heads/release/2.0",
+            "feature:refs/heads/backport/fix",
+        ],
+    )
+    .await;
+    for (title, base, head) in [
+        ("Default branch change", "main", "feature"),
+        ("Release branch change", "release/2.0", "backport/fix"),
+    ] {
+        h.write(
+            Method::POST,
+            "/api/repos/team/private/pulls",
+            &alice,
+            json!({
+                "request_id":uuid::Uuid::now_v7(), "title":title, "body":"",
+                "base_ref":format!("refs/heads/{base}"), "head_ref":format!("refs/heads/{head}"),
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    }
+    h.write(
+        Method::POST,
+        &format!("/api/repos/team/private/statuses/{head}"),
+        &alice,
+        json!({"request_id":uuid::Uuid::now_v7(),"context":"ci/build","state":"success"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    fork_heads::ready_search(
+        &h,
+        &alice,
+        "/api/repos/team/private/pulls",
+        "status:success",
+    )
+    .await;
+
+    let browser = Browser::new("branch-filter");
+    browser
+        .run(&["open", &format!("{}/team/private/pulls", h.origin)])
+        .await;
+    browser.sign_in().await;
+    browser
+        .run(&["wait", "--text", "Default branch change"])
+        .await;
+    browser
+        .run(&["wait", "--text", "Release branch change"])
+        .await;
+    let search = ".discussion-search input[role=combobox]";
+    browser.run(&["fill", search, "is:open ba"]).await;
+    browser
+        .run(&["wait", "--text", "Filter by the exact target branch"])
+        .await;
+    browser.run(&["press", "ArrowDown"]).await;
+    browser.run(&["press", "Enter"]).await;
+    assert_eq!(
+        browser.run(&["get", "value", search]).await.trim(),
+        "is:open base:"
+    );
+    browser
+        .run(&[
+            "fill",
+            search,
+            "is:open base:release/2.0 head:backport/ status:su",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "Checks completed without failure"])
+        .await;
+    browser.run(&["press", "ArrowDown"]).await;
+    browser.run(&["press", "Enter"]).await;
+    browser.run(&["press", "Enter"]).await;
+    let filtered = r#"new URL(location.href).searchParams.get('q') === 'is:open base:release/2.0 head:backport/ status:success' &&
+        document.querySelector('.issue-list a[href="/team/private/pull/2"]') !== null &&
+        document.querySelector('.issue-list a[href="/team/private/pull/1"]') === null &&
+        document.querySelector('nav[aria-label="Pull request state"] .discussion-state-count')?.textContent === '1'"#;
+    browser.run(&["wait", "--fn", filtered]).await;
+    browser.run(&["reload"]).await;
+    browser.run(&["wait", "--fn", filtered]).await;
+    drop(browser);
+    h.close().await;
+}
+
 #[tokio::test]
 async fn completion_uses_authorized_repository_labels_and_bounds_cursor_input() {
     let h = Harness::new(false).await;

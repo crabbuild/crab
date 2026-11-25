@@ -4,9 +4,11 @@ use super::collaboration::{SubjectKind, SubjectState};
 
 pub(crate) mod assignees;
 pub(crate) mod authors;
+pub(crate) mod check_status;
 pub(crate) mod completion;
 pub(crate) mod contributions;
 mod counts;
+pub(crate) mod heads;
 pub(crate) mod index;
 pub(crate) mod issue_types;
 pub(crate) mod labels;
@@ -51,7 +53,10 @@ enum Term {
     Assignee(String),
     Reviewer { kind: reviews::Kind, name: String },
     ReviewStatus(reviews::status::Status),
+    CheckStatus(check_status::Status),
     TeamReviewRequested(String),
+    BaseBranch(String),
+    HeadBranch(String),
     Count(counts::Filter),
     Text(String),
     Label(Vec<String>),
@@ -76,6 +81,15 @@ enum Metadata {
 }
 
 impl Query {
+    pub(crate) fn needs_pull_heads(&self) -> bool {
+        self.needs_review_source() || self.uses_check_status()
+    }
+
+    pub(crate) fn uses_check_status(&self) -> bool {
+        self.expression
+            .has_term(|term| matches!(term, Term::CheckStatus(_)))
+    }
+
     pub(crate) fn uses_issue_types(&self) -> bool {
         self.expression.has_term(issue_types::is_type)
     }
@@ -352,16 +366,21 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
                 &qualifier.to_ascii_lowercase(),
                 &unquote(value)?,
             )?),
-            "review-requested" | "reviewed-by" | "review-involves" | "user-review-requested" => {
-                Term::Reviewer {
-                    kind: reviews::Kind::parse(&qualifier.to_ascii_lowercase())?,
-                    name: people::name(&unquote(value)?)?,
-                }
-            }
+            "review-requested"
+            | "reviewed-by"
+            | "review-involves"
+            | "user-review-requested"
+            | "team-review-requested-user" => Term::Reviewer {
+                kind: reviews::Kind::parse(&qualifier.to_ascii_lowercase())?,
+                name: people::name(&unquote(value)?)?,
+            },
             "team-review-requested" => {
                 Term::TeamReviewRequested(reviews::teams::name(&unquote(value)?)?)
             }
             "review" => Term::ReviewStatus(reviews::status::Status::parse(&unquote(value)?)?),
+            "status" => Term::CheckStatus(check_status::Status::parse(&unquote(value)?)?),
+            "base" => Term::BaseBranch(unquote(value)?),
+            "head" => Term::HeadBranch(unquote(value)?),
             "label" => Term::Label(label_names(value)?),
             "reason" => Term::Reason(match unquote(value)?.to_lowercase().as_str() {
                 "completed" => super::issues::lifecycle::Reason::Completed,

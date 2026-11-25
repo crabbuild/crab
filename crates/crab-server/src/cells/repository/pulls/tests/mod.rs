@@ -36,6 +36,13 @@ fn maximum_pull_decisions_fit_the_registered_output_bound() {
                 author: author.clone(),
                 state: ReviewState::Approved,
                 commit_oid: "89abcdef0123456789abcdef0123456789abcdef".into(),
+                comparison: Some(ReviewComparison {
+                    head: crate::cells::repository::push_attribution::RefVersion {
+                        epoch: "e".repeat(64),
+                        transaction: "f".repeat(64),
+                    },
+                    base_oid: "0123456789abcdef0123456789abcdef01234567".into(),
+                }),
             })
             .collect(),
         version: 1,

@@ -345,6 +345,7 @@ async fn qualify_handoff(
                         people::identity(&lookup_identity.issuer, &lookup_identity.subject)
                             .unwrap(),
                     ),
+                    account: None,
                 }],
                 ..Default::default()
             },

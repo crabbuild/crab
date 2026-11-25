@@ -141,6 +141,17 @@ async fn personal_fork_is_retired_on_removal_and_restored_only_with_previous_acc
     assert_eq!(visible["repositories"].as_array().unwrap().len(), 1);
 
     let fork_route = format!("/api/repos/{namespace}/library");
+    let search = "/api/code-search?q=path:README.md+is:fork";
+    let hits = h.json(search, &bob).await;
+    assert_eq!(hits["groups"].as_array().unwrap().len(), 1);
+    assert_eq!(hits["groups"][0]["id"], fork_id);
+    let local_hits = h
+        .json(
+            &format!("{fork_route}/code-search?q=path:README.md+is:fork"),
+            &bob,
+        )
+        .await;
+    assert_eq!(local_hits["items"][0]["path"], "README.md");
     let check_fork = async |cookie: &str| {
         h.http
             .get(format!("{}{fork_route}/refs", h.origin))
@@ -176,6 +187,7 @@ async fn personal_fork_is_retired_on_removal_and_restored_only_with_previous_acc
     };
 
     remove(1).await;
+    assert_eq!(h.json(search, &bob).await["groups"], json!([]));
     assert_eq!(check_fork(&alice).await.status(), StatusCode::NOT_FOUND);
     assert_eq!(check_fork(&bob).await.status(), StatusCode::NOT_FOUND);
     assert_eq!(

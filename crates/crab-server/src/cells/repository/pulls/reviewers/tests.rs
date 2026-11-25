@@ -89,6 +89,7 @@ fn review(author: &RepositoryAuthor, state: ReviewState) -> CreatePullReviewInpu
         body: "Feedback".into(),
         state,
         commit_oid: "b".repeat(40),
+        comparison: None,
     }
 }
 

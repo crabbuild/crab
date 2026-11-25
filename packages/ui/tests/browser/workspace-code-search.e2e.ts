@@ -7,7 +7,7 @@ test("workspace search clears old results when access changes between pages", as
   const organization = "01905010-0000-7000-8000-000000000001";
   const repository = "01905010-0000-7000-8000-000000000002";
   const commit = "1".repeat(40);
-  const expression = "manifest AND NOT path:vendor/";
+  const expression = "manifest AND NOT (is:fork OR is:archived)";
   let revoked = false;
   await page.route("**/api/session", (route) =>
     route.fulfill({
@@ -66,6 +66,9 @@ test("workspace search clears old results when access changes between pages", as
   );
   await page.goto(`/-/code-search?organization=${organization}`);
   const form = page.getByRole("search", { name: "Search workspace code" });
+  await expect(form.getByLabel("Search text")).toHaveAccessibleDescription(
+    /is:fork or is:archived/,
+  );
   await form.getByLabel("Search text").fill(expression);
   await chooseSelectOption(form.getByLabel("Search in"), "path");
   await form.getByLabel("Directory (optional)").fill("src");

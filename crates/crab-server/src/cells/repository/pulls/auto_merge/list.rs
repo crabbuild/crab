@@ -211,6 +211,7 @@ mod tests {
                             head_ref: format!("refs/heads/feature-{pull}"),
                             head_repository: None,
                             head_oid: head_oid.clone(),
+                            tracked_head: None,
                             initial_base_oid: base_oid.clone(),
                             initial_version: 1,
                             generation: 0,

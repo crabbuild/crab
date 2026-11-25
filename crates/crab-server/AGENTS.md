@@ -68,6 +68,11 @@ review presentation uses these native records directly in `api/pulls/reviews/`.
 publication receipt and holds both comparison tips and the new ref through
 the Cell mutation.
 `cells/repository/pulls/auto_merge.rs` owns durable PR auto-merge requests.
+`git/receive/push_attribution.rs` records the exact planned Git transaction
+and committed predecessor under the ref and policy leases. Attribution checks
+durable upstream Write access, including for private fork pushes. The active
+request follows a continuous chain from its saved ref version. Final merge
+publication revalidates that version while holding the comparison leases.
 `cells/repository/collaboration/links/closure.rs` captures opt-in issue closures
 under the Git publication policy lease and applies them at native merge
 completion. `links/keywords.rs` interprets closing references in Markdown prose.

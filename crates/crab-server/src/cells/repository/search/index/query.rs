@@ -5,7 +5,7 @@ pub(crate) mod work;
 use super::*;
 use crate::cells::repository::collaboration::{SubjectState, reactions::Kind};
 use crate::cells::repository::search::{
-    Expression, Metadata, Query, Term,
+    Expression, Metadata, Query, Term, heads,
     text::{self, Fields},
 };
 
@@ -28,12 +28,46 @@ pub(crate) enum Sort {
     Relevance,
 }
 
+impl Sort {
+    pub(crate) fn is_workspace_sort(self) -> bool {
+        matches!(
+            self,
+            Self::Created | Self::Updated | Self::Comments | Self::Reactions
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Direction {
     Asc,
     #[default]
     Desc,
+}
+
+impl Direction {
+    fn sql(self) -> &'static str {
+        match self {
+            Self::Asc => "ASC",
+            Self::Desc => "DESC",
+        }
+    }
+
+    fn seek(self, inclusive: bool) -> &'static str {
+        match (self, inclusive) {
+            (Self::Asc, false) => ">",
+            (Self::Asc, true) => ">=",
+            (Self::Desc, false) => "<",
+            (Self::Desc, true) => "<=",
+        }
+    }
+
+    pub(crate) fn compare<T: Ord>(self, left: T, right: T) -> std::cmp::Ordering {
+        match self {
+            Self::Asc => left.cmp(&right),
+            Self::Desc => right.cmp(&left),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -47,10 +81,14 @@ pub(crate) struct SearchInput {
     pub people: Vec<super::super::people::Binding>,
     pub assignees: Vec<super::super::assignees::Binding>,
     pub review_context: Option<super::super::reviews::status::Context>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_heads: Option<heads::Context>,
     #[serde(default)]
     pub review_teams: super::super::reviews::teams::Bindings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_types: Option<super::super::issue_types::Binding>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub public_reader: bool,
 }
 impl Default for SearchInput {
     fn default() -> Self {
@@ -63,8 +101,10 @@ impl Default for SearchInput {
             people: Vec::new(),
             assignees: Vec::new(),
             review_context: None,
+            pull_heads: None,
             review_teams: Default::default(),
             issue_types: None,
+            public_reader: false,
         }
     }
 }
@@ -106,6 +146,8 @@ pub(crate) struct Page<T> {
     pub navigation: super::super::navigation::StateNavigation,
     pub lock_filter: super::super::navigation::LockFilter,
     pub labels: Vec<LabelSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_revision: Option<u64>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -194,35 +236,59 @@ struct Bindings<'a> {
     people: &'a [super::super::people::Binding],
     assignees: &'a [super::super::assignees::Binding],
     review: Option<super::super::reviews::status::Bound>,
+    heads: Option<heads::Bound>,
     review_teams: &'a super::super::reviews::teams::Bindings,
     issue_types: &'a Option<super::super::issue_types::Binding>,
+    public_reader: bool,
     archived: bool,
     now_ms: i64,
 }
 impl<'a> Bindings<'a> {
-    fn new(
-        input: &'a SearchInput,
-        prepared: Option<&super::super::reviews::status::Prepared>,
-        archived: bool,
-        now_ms: i64,
-    ) -> crate::cells::Result<Self> {
+    fn new(input: &'a SearchInput, criteria: &Criteria, now_ms: i64) -> crate::cells::Result<Self> {
         let mut values = Self {
             people: &input.people,
             assignees: &input.assignees,
             review: None,
+            heads: None,
             values: Vec::new(),
             review_teams: &input.review_teams,
             issue_types: &input.issue_types,
-            archived,
+            public_reader: input.public_reader,
+            archived: criteria.archived.unwrap_or(false),
             now_ms,
         };
-        if let Some(prepared) = prepared {
+        if let Some(prepared) = &criteria.review {
             values.review = Some(super::super::reviews::status::Bound::new(
                 prepared,
                 |value| values.bind(value),
             )?);
         }
+        if let Some(prepared) = &criteria.heads {
+            let mut heads = heads::Bound::new(prepared, |value| values.bind(value))?;
+            if criteria.check_revision.is_some() {
+                heads.joins.push_str(&format!(
+                    " LEFT JOIN repository_check_rollups ci ON ci.oid={}",
+                    heads.oid
+                ));
+            }
+            values.heads = Some(heads);
+        }
         Ok(values)
+    }
+
+    fn head_cte(&self) -> &str {
+        self.heads.as_ref().map_or("", |heads| &heads.cte)
+    }
+
+    fn head_joins(&self) -> &str {
+        self.heads.as_ref().map_or("", |heads| &heads.joins)
+    }
+
+    fn head_oid(&self) -> crate::cells::Result<&'static str> {
+        self.heads
+            .as_ref()
+            .map(|heads| heads.oid)
+            .ok_or(crate::cells::Error::Invalid("Search heads were not bound"))
     }
 
     fn bind(&mut self, value: SqlValue) -> String {
@@ -269,6 +335,8 @@ struct Criteria {
     query: Query,
     archived: Option<bool>,
     review: Option<super::super::reviews::status::Prepared>,
+    heads: Option<heads::Prepared>,
+    check_revision: Option<u64>,
     now_ms: u64,
 }
 
@@ -291,6 +359,20 @@ fn criteria(
     } else {
         None
     };
+    let heads = if query.needs_pull_heads() {
+        if input.public_reader {
+            return Err(crate::cells::Error::Invalid(
+                "Review and check filters require repository access",
+            ));
+        }
+        Some(heads::prepare(context, input.pull_heads.as_ref())?)
+    } else {
+        None
+    };
+    let check_revision = query
+        .uses_check_status()
+        .then(|| crate::cells::repository::checks::summary::revision(context))
+        .transpose()?;
 
     if subject_kind != Some(SubjectKind::Pull) || query.needs_lifecycle() {
         super::super::super::issues::lifecycle::ensure_ready(context)?;
@@ -309,6 +391,8 @@ fn criteria(
         query,
         archived,
         review,
+        heads,
+        check_revision,
         now_ms,
     })
 }
@@ -322,12 +406,10 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     input.validate().map_err(crate::cells::Error::Invalid)?;
     let generation = ensure_ready(context)?;
     let revision = revision(context)?;
-    let Criteria {
-        query,
-        archived,
-        review,
-        now_ms,
-    } = criteria(context, &input, subject_kind)?;
+    let criteria = criteria(context, &input, subject_kind)?;
+    let query = &criteria.query;
+    let archived = criteria.archived;
+    let now_ms = criteria.now_ms;
     let identity = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT repository_uuid FROM repository_identity WHERE singleton = 1",
@@ -355,7 +437,12 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         &input.review_context,
         &input.review_teams,
         &input.issue_types,
-        review.as_ref().map(|prepared| &prepared.approvals),
+        &criteria.review,
+        (
+            input.public_reader,
+            &input.pull_heads,
+            criteria.check_revision,
+        ),
     ))?)
     .to_hex()
     .to_string();
@@ -374,12 +461,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     }) {
         return Err(crate::cells::Error::StaleSearch);
     }
-    let mut bindings = Bindings::new(
-        &input,
-        review.as_ref(),
-        archived.unwrap_or(false),
-        context.now_ms(),
-    )?;
+    let mut bindings = Bindings::new(&input, &criteria, context.now_ms())?;
     let kind_clause = kind_filter(subject_kind, &mut bindings);
     // Each counter describes its navigation query, even when the current query
     // selects only closed work. Rows and both targets share this native snapshot.
@@ -389,7 +471,8 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     let totals = context.sql(&SqlBatch {
         statements: vec![statement(
             &format!(
-                "SELECT d.state, COUNT(*) FROM discussion_index d WHERE {count_filter} GROUP BY d.state"
+                "{} SELECT d.state, COUNT(*) FROM discussion_index d {} WHERE {count_filter} GROUP BY d.state",
+                bindings.head_cte(), bindings.head_joins()
             ),
             bindings.values.clone(),
         )],
@@ -416,12 +499,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         .ok_or(crate::cells::Error::Invalid(
             "discussion count exceeds its range",
         ))?;
-    let mut bindings = Bindings::new(
-        &input,
-        review.as_ref(),
-        archived.unwrap_or(false),
-        context.now_ms(),
-    )?;
+    let mut bindings = Bindings::new(&input, &criteria, context.now_ms())?;
     let kind_clause = kind_filter(subject_kind, &mut bindings);
     let predicate = expression(&query.expression, &mut bindings)?;
     let filter = format!("{kind_clause} AND ({predicate})");
@@ -439,21 +517,14 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
             ))?,
     };
     let order = sort_expression(input.sort, &query.expression, &mut bindings);
-    let direction = match input.direction {
-        Direction::Asc => "ASC",
-        Direction::Desc => "DESC",
-    };
+    let direction = input.direction.sql();
     // Issues and PRs allocate numbers independently. The kind breaks equal
     // number/sort ties so crossing a page boundary cannot skip either subject.
     let seek = if let Some(cursor) = cursor {
         let key = bindings.bind(cursor.key.sql()?);
         let number = bindings.bind(integer(cursor.subject.number)?);
         let kind = bindings.bind(SqlValue::Integer(kind(cursor.subject.kind)));
-        let operator = if input.direction == Direction::Asc {
-            ">"
-        } else {
-            "<"
-        };
+        let operator = input.direction.seek(false);
         format!(
             "(sort_key {operator} {key} OR (sort_key = {key} AND (number {operator} {number} OR (number = {number} AND kind {operator} {kind}))))"
         )
@@ -462,7 +533,9 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     };
     let limit = bindings.bind(SqlValue::Integer(i64::from(input.limit) + 1));
     let sql = format!(
-        "SELECT number, sort_key, comments, reactions, kind FROM (SELECT d.kind, d.number, {order} AS sort_key, d.comments, d.reactions FROM discussion_index d WHERE {filter}) WHERE {seek} ORDER BY sort_key {direction}, number {direction}, kind {direction} LIMIT {limit}"
+        "{} SELECT number, sort_key, comments, reactions, kind FROM (SELECT d.kind, d.number, {order} AS sort_key, d.comments, d.reactions FROM discussion_index d {} WHERE {filter}) WHERE {seek} ORDER BY sort_key {direction}, number {direction}, kind {direction} LIMIT {limit}",
+        bindings.head_cte(),
+        bindings.head_joins()
     );
     let rows = context.sql(&SqlBatch {
         statements: vec![statement(&sql, bindings.values)],
@@ -579,6 +652,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         navigation,
         lock_filter: query.lock_filter(),
         labels,
+        check_revision: criteria.check_revision,
     })
 }
 
@@ -639,15 +713,33 @@ fn scoped_expression(
             }
             Term::ReviewStatus(super::super::reviews::status::Status::None) => super::super::reviews::status::UNREVIEWED.into(),
             Term::ReviewStatus(super::super::reviews::status::Status::ChangesRequested) => super::super::reviews::status::CHANGES_REQUESTED.into(),
-            Term::ReviewStatus(status)=> bindings.review.as_ref().ok_or(crate::cells::Error::Invalid("Review source was not bound"))?.predicate(*status),
+            Term::ReviewStatus(status)=> bindings.review.as_ref().ok_or(crate::cells::Error::Invalid("Review source was not bound"))?.predicate(*status, bindings.head_oid()?),
+            Term::CheckStatus(status) => format!(
+                "d.kind=1 AND {} IS NOT NULL AND ({})",
+                bindings.head_oid()?,
+                status.predicate(),
+            ),
+            Term::BaseBranch(branch) => {
+                let reference = bindings.text(&format!("refs/heads/{branch}"));
+                format!("d.kind = 1 AND EXISTS (SELECT 1 FROM repository_pulls p WHERE p.number = d.number AND p.base_ref = {reference})")
+            }
+            Term::HeadBranch(prefix) if bindings.public_reader => {
+                // Public rows omit fork heads. The projected name begins with
+                // the fork UUID for those rows, so only local heads can match.
+                let reference = bindings.bind(SqlValue::Blob(format!("refs/heads/{prefix}").into_bytes()));
+                format!("d.kind = 1 AND EXISTS (SELECT 1 FROM discussion_index_pull_sources p WHERE p.document = d.rowid AND instr(p.head_ref, {reference}) = 1)")
+            }
+            Term::HeadBranch(prefix) => {
+                let reference = bindings.text(&format!("refs/heads/{prefix}"));
+                format!("d.kind = 1 AND EXISTS (SELECT 1 FROM repository_pulls p WHERE p.number = d.number AND instr(p.head_ref, {reference}) = 1)")
+            }
             Term::Reviewer { kind, name } => {
-                use super::super::reviews::Kind;
-                let direct = bindings.person(name).map_or_else(|| "0".into(), |value| {
-                    let predicate = kind.predicate();
+                let direct = kind.direct_predicate().and_then(|predicate| bindings.person(name).map(|value| {
                     format!("d.kind = 1 AND d.number IN (SELECT r.pull FROM discussion_index_reviewers r WHERE r.identity = {value} AND ({predicate}))")
-                });
-                if *kind == Kind::ReviewRequested && name == "@me" && !bindings.review_teams.mine.is_empty() {
-                    let teams = bindings.text(&serde_json::to_string(&bindings.review_teams.mine)?);
+                })).unwrap_or_else(|| "0".into());
+                let teams = bindings.review_teams.for_user(name);
+                if kind.includes_teams() && !teams.is_empty() {
+                    let teams = bindings.text(&serde_json::to_string(teams)?);
                     let team = format!("EXISTS (SELECT 1 FROM discussion_index_team_requests t WHERE t.document=d.rowid AND t.team IN (SELECT value FROM json_each({teams})))");
                     format!("(({direct}) OR (d.kind=1 AND {team}))")
                 } else {

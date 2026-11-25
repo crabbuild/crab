@@ -1,5 +1,5 @@
 use super::*;
-use crate::cells::repository::search::index;
+use crate::cells::repository::search::{heads, index};
 use crate::cells::{RepositoryCell, application::Mutation, repository::*};
 use crate::test_support::server as fixtures;
 use uuid::Uuid;
@@ -71,6 +71,7 @@ async fn review(
             body: "Review feedback".into(),
             state,
             commit_oid: oid.into(),
+            comparison: None,
         },
     )
     .await
@@ -138,37 +139,58 @@ async fn refs(cell: &RepositoryCell, generation: u64, heads: &[(u64, &str)]) -> 
     .await;
     token
 }
-fn input(query: &str, token: Option<&str>, approvals: u8) -> SearchInput {
+async fn input(
+    cell: &RepositoryCell,
+    query: &str,
+    token: Option<&str>,
+    approvals: u8,
+) -> SearchInput {
+    let needs_heads = Query::parse(Some(query)).unwrap().needs_review_source();
+    let pull_heads = if needs_heads {
+        let page = read::<heads::ListForkRefs>(
+            cell,
+            heads::ForkRefInput {
+                after: 0,
+                stamp: None,
+            },
+        )
+        .await;
+        Some(heads::Context {
+            source_token: token.map(str::to_owned),
+            stamp: page.stamp,
+            fork_heads: BTreeMap::new(),
+        })
+    } else {
+        None
+    };
     SearchInput {
         query: Some(query.into()),
-        review_context: Query::parse(Some(query))
-            .unwrap()
-            .needs_review_source()
-            .then(|| Context {
-                source_token: token.map(str::to_owned),
-                default_ref: "refs/heads/main".into(),
-                inherited_rulesets: Default::default(),
-                reviewers: MergeReviewers {
-                    issuer: actor("Bob").issuer,
-                    subjects: vec!["Bob".into(), "Carol".into()],
-                },
-                configured_rules: vec![BranchProtectionRecord {
-                    branch: "main".into(),
-                    required_approvals: approvals,
-                    required_code_owner_reviews: false,
-                    require_conversation_resolution: false,
-                    require_up_to_date: false,
-                    require_merge_queue: false,
-                    require_linear_history: false,
-                    required_checks: vec![],
-                    required_integrations: vec![],
-                }],
-            }),
+        pull_heads,
+        review_context: needs_heads.then(|| Context {
+            default_ref: "refs/heads/main".into(),
+            inherited_rulesets: Default::default(),
+            reviewers: MergeReviewers {
+                issuer: actor("Bob").issuer,
+                subjects: vec!["Bob".into(), "Carol".into()],
+            },
+            configured_rules: vec![BranchProtectionRecord {
+                branch: "main".into(),
+                required_approvals: approvals,
+                required_code_owner_reviews: false,
+                require_last_push_approval: false,
+                require_conversation_resolution: false,
+                require_up_to_date: false,
+                require_merge_queue: false,
+                require_linear_history: false,
+                required_checks: vec![],
+                required_integrations: vec![],
+            }],
+        }),
         ..Default::default()
     }
 }
 async fn matches(cell: &RepositoryCell, query: &str, token: &str, approvals: u8) -> u64 {
-    read::<ListDiscussions>(cell, input(query, Some(token), approvals))
+    read::<ListDiscussions>(cell, input(cell, query, Some(token), approvals).await)
         .await
         .matching
 }
@@ -290,7 +312,7 @@ async fn source_changes_invalidate_cursors_and_rollups_retain_the_filtered_snaps
         review(&cell, number, "Bob", ReviewState::Approved, &b).await;
     }
     let first = refs(&cell, 1, &[(1, &b), (2, &b), (3, &b)]).await;
-    let mut search = input("review:approved", Some(&first), 1);
+    let mut search = input(&cell, "review:approved", Some(&first), 1).await;
     search.limit = 1;
     let page = read::<ListDiscussions>(&cell, search.clone()).await;
     assert_eq!(
@@ -307,6 +329,7 @@ async fn source_changes_invalidate_cursors_and_rollups_retain_the_filtered_snaps
                 oid: Some(c.clone()),
             }],
             source_token: Some(first.clone()),
+            check_revision: None,
         },
     )
     .await
@@ -322,6 +345,7 @@ async fn source_changes_invalidate_cursors_and_rollups_retain_the_filtered_snaps
                 branch: "main".into(),
                 required_approvals: 2,
                 required_code_owner_reviews: false,
+                require_last_push_approval: false,
                 require_conversation_resolution: false,
                 require_up_to_date: false,
                 require_merge_queue: false,
@@ -350,6 +374,7 @@ async fn source_changes_invalidate_cursors_and_rollups_retain_the_filtered_snaps
                 branch: "main".into(),
                 required_approvals: 1,
                 required_code_owner_reviews: false,
+                require_last_push_approval: false,
                 require_conversation_resolution: false,
                 require_up_to_date: false,
                 require_merge_queue: false,
@@ -368,7 +393,8 @@ async fn source_changes_invalidate_cursors_and_rollups_retain_the_filtered_snaps
         .err()
         .unwrap();
     assert!(matches!(error, Error::StaleSearch));
-    search.review_context.as_mut().unwrap().source_token = Some(second.clone());
+    let mut search = input(&cell, "review:approved", Some(&second), 1).await;
+    search.limit = 1;
     search.before = page.next;
     assert!(matches!(
         cell.client
@@ -390,24 +416,23 @@ async fn an_empty_repository_needs_no_git_source_and_comment_only_reviews_are_un
         .unwrap()
         .repository(server.repositories.values()[0].id)
         .unwrap();
-    assert!(read::<GetSourceState>(&cell, ()).await.is_none());
+    assert!(read::<heads::GetSourceState>(&cell, ()).await.is_none());
+    let empty = input(&cell, "review:approved", None, 1).await;
     assert_eq!(
-        read::<ListDiscussions>(&cell, input("review:approved", None, 1))
-            .await
-            .matching,
+        read::<ListDiscussions>(&cell, empty.clone()).await.matching,
         0
     );
     pull(&cell, 1).await;
     review(&cell, 1, "Bob", ReviewState::Commented, &"b".repeat(40)).await;
     assert_eq!(
-        read::<ListDiscussions>(&cell, input("review:none", None, 1))
+        read::<ListDiscussions>(&cell, input(&cell, "review:none", None, 1).await)
             .await
             .matching,
         1
     );
     assert!(matches!(
         cell.client
-            .query::<ListDiscussions>(&cell.target, None, input("review:approved", None, 1))
+            .query::<ListDiscussions>(&cell.target, None, empty)
             .await
             .err()
             .unwrap(),
@@ -480,14 +505,11 @@ async fn merged_source_heads_survive_branch_deletion_and_explicit_bounded_prepar
         1
     );
     let before = read::<GetPull>(&cell, 1).await;
+    let search = input(&cell, "review:approved", Some(&token), 1).await;
     write::<PreviousFormat>(&cell, ()).await;
     assert!(matches!(
         cell.client
-            .query::<ListDiscussions>(
-                &cell.target,
-                None,
-                input("review:approved", Some(&token), 1)
-            )
+            .query::<ListDiscussions>(&cell.target, None, search)
             .await
             .err()
             .unwrap(),
@@ -539,6 +561,7 @@ async fn merged_source_heads_survive_branch_deletion_and_explicit_bounded_prepar
                 oid: None,
             }],
             source_token: Some(token),
+            check_revision: None,
         },
     )
     .await
@@ -578,9 +601,11 @@ async fn review_filters_apply_rulesets_to_the_default_ref_in_the_search_snapshot
                 restrict_creations: false,
                 restrict_updates: false,
                 restrict_deletions: false,
+                force_pushes: None,
                 require_pull_request: false,
                 required_approvals: 2,
                 required_code_owner_reviews: false,
+                require_last_push_approval: false,
                 require_conversation_resolution: false,
                 require_up_to_date: false,
                 require_merge_queue: false,

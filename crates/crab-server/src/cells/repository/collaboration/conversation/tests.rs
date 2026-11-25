@@ -111,6 +111,7 @@ async fn seed(cell: &RepositoryCell, count: usize) {
                 body: "Review".into(),
                 state: ReviewState::Commented,
                 commit_oid: "b".repeat(40),
+                comparison: None,
             },
         )
         .await;

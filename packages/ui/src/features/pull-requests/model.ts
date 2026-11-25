@@ -107,6 +107,7 @@ export interface PullRequest extends PullSummary {
     updates_restricted?: boolean;
     linear_history_required?: boolean;
     required_approvals: number;
+    last_push_approval?: "approved" | "pending" | "pusher_unavailable" | null;
     approvals: number;
     changes_requested: number;
     code_owners?: CodeOwnersReport | null;

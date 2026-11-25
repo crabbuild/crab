@@ -1,4 +1,6 @@
 use super::*;
+use crate::cells::repository::checks::summary;
+pub(crate) use crate::cells::repository::checks::summary::Checks;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -7,15 +9,6 @@ pub(crate) struct Head {
     pub number: u64,
     pub version: u64,
     pub oid: Option<String>,
-}
-#[derive(Clone, Default, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Checks {
-    pub success: u64,
-    pub neutral: u64,
-    pub skipped: u64,
-    pub pending: u64,
-    pub failed: u64,
 }
 #[derive(Default, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +32,8 @@ pub(crate) struct Rollup {
 pub(crate) struct Input {
     pub heads: Vec<Head>,
     pub source_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_revision: Option<u64>,
 }
 pub(crate) struct GetRollups;
 impl Read for GetRollups {
@@ -64,6 +59,11 @@ impl Read for GetRollups {
             ));
         }
         search::index::ensure_ready(context)?;
+        if let Some(expected) = input.check_revision {
+            if summary::revision(context)? != expected {
+                return Ok(None);
+            }
+        }
         let mut commits = BTreeMap::<String, Checks>::new();
         let mut items = Vec::with_capacity(input.heads.len());
         let epoch = input
@@ -93,11 +93,14 @@ impl Read for GetRollups {
             // Filtered lists retain the search's immutable ref snapshot. A later
             // Git lookup could display rollups that no longer satisfy the filter.
             let selected = if let Some(epoch) = epoch {
-                let rows=context.query("SELECT lower(hex(r.target_oid)) FROM discussion_index_pull_sources s JOIN git_projection_refs r ON r.name=s.head_ref AND r.epoch_id=? WHERE s.document=?", &[integer(epoch)?,integer(head.number*2+1)?])?;
-                rows.rows
-                    .first()
-                    .map(|row| result_text(row, 0))
-                    .transpose()?
+                let rows=context.query("SELECT CASE WHEN instr(s.head_ref,X'3a')=37 THEN ? ELSE NULLIF(lower(hex(r.target_oid)),'') END
+                    FROM discussion_index_pull_sources s LEFT JOIN git_projection_refs r ON r.name=s.head_ref AND r.epoch_id=? WHERE s.document=?",
+                    &[head.oid.map_or(SqlValue::Null,SqlValue::Text),integer(epoch)?,integer(head.number*2+1)?])?;
+                match rows.rows.first().and_then(|row| row.first()) {
+                    Some(SqlValue::Text(oid)) => Some(oid.clone()),
+                    Some(SqlValue::Null) | None => None,
+                    _ => return Err(crate::cells::Error::Invalid("Pull rollup head is invalid")),
+                }
             } else {
                 head.oid
             };
@@ -106,7 +109,7 @@ impl Read for GetRollups {
                 let checks = if let Some(checks) = commits.get(oid) {
                     checks.clone()
                 } else {
-                    let checks = checks(context, oid)?;
+                    let checks = summary::read(context, oid)?;
                     commits.insert(oid.clone(), checks.clone());
                     checks
                 };
@@ -123,52 +126,6 @@ impl Read for GetRollups {
         }
         Ok(Some(items))
     }
-}
-
-fn checks(context: &mut Transaction<'_>, oid: &str) -> crate::cells::Result<Checks> {
-    // Canonical catalogs bound this to 1,000 status submissions and 100 runs,
-    // excluding check output/log bodies. Repeated heads share the result.
-    let statuses = ListCommitStatuses::execute(context, oid.to_owned())?;
-    let runs = ListCheckRuns::execute(
-        context,
-        ListCheckRunsInput {
-            oid: oid.to_owned(),
-            before: None,
-            limit: 100,
-        },
-    )?;
-    let mut counts = Checks::default();
-    for status in statuses.statuses {
-        match status.state {
-            0 | 1 => counts.failed += 1,
-            2 => counts.pending += 1,
-            3 => counts.success += 1,
-            _ => {
-                return Err(crate::cells::Error::Invalid(
-                    "Commit status state is invalid",
-                ));
-            }
-        }
-    }
-    let mut names = BTreeSet::new();
-    for run in runs.runs {
-        // Each provider owns its check names. An older run updated after a
-        // rerun must not replace the rerun in this summary.
-        let provider =
-            super::super::integrations::github_connection(&run.author.issuer, &run.author.subject);
-        if !names.insert((provider, run.name.to_lowercase())) {
-            continue;
-        }
-        match (run.status, run.conclusion) {
-            (0 | 1, _) => counts.pending += 1,
-            (2, Some(3)) => counts.neutral += 1,
-            (2, Some(4)) => counts.skipped += 1,
-            (2, Some(5)) => counts.success += 1,
-            (2, _) => counts.failed += 1,
-            _ => return Err(crate::cells::Error::Invalid("Check run state is invalid")),
-        }
-    }
-    Ok(counts)
 }
 
 fn reviews(context: &Transaction<'_>, pull: u64, oid: &str) -> crate::cells::Result<Reviews> {

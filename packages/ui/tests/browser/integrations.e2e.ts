@@ -158,6 +158,7 @@ test("a workflow can be connected, required by a branch, rotated, and disconnect
           {
             branch: "main",
             required_approvals: 0,
+            require_last_push_approval: true,
             require_conversation_resolution: true,
             require_linear_history: true,
             required_checks: [],
@@ -307,6 +308,11 @@ test("a workflow can be connected, required by a branch, rotated, and disconnect
     .click();
   await page.getByLabel("Branch name").fill("main");
   await page
+    .getByRole("checkbox", {
+      name: "Require approval of the most recent reviewable push",
+    })
+    .check();
+  await page
     .getByRole("checkbox", { name: "Require conversation resolution" })
     .check();
   await page.getByRole("checkbox", { name: "Require linear history" }).check();
@@ -320,6 +326,11 @@ test("a workflow can be connected, required by a branch, rotated, and disconnect
   ).toBeVisible();
   await expect(
     page.getByText("Conversation resolution required", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Approval of the most recent push required", {
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(
     page.getByText("Linear history required", { exact: true }),

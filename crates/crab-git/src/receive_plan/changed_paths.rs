@@ -33,10 +33,27 @@ impl<S: GraphSource, C: Fn() -> bool> Validator<'_, S, C> {
     pub(super) fn changed_path_hashes(
         &mut self,
         updates: &[RefUpdate],
+        rewritten_refs: &BTreeSet<String>,
     ) -> Result<BTreeSet<[u8; 32]>> {
+        let mut paths = BTreeSet::new();
         let mut pending = Vec::new();
         for update in updates {
             let Some(mut oid) = update.new else { continue };
+            if let Some(old) = update.old
+                && update.name.starts_with("refs/heads/")
+                && rewritten_refs.contains(&update.name)
+            {
+                // A rewrite can remove a locked path while introducing no
+                // commits, such as when the new tip is an existing ancestor.
+                let old_tree = self.commit_tree(old)?;
+                let new_tree = self.commit_tree(oid)?;
+                self.collect_tree_changes(
+                    Some(old_tree),
+                    Some(new_tree),
+                    PathHash::root(),
+                    &mut paths,
+                )?;
+            }
             let inspect_tip = self.source.inspect_visible_tip(&oid);
             if !inspect_tip && self.trusted_kind(oid)?.is_some() {
                 continue;
@@ -63,7 +80,6 @@ impl<S: GraphSource, C: Fn() -> bool> Validator<'_, S, C> {
             }
         }
 
-        let mut paths = BTreeSet::new();
         let mut commits = HashSet::new();
         // A final-tree comparison misses a changed path reverted by a later commit
         // in the same push. Inspect every commit until committed visibility begins.
@@ -97,22 +113,7 @@ impl<S: GraphSource, C: Fn() -> bool> Validator<'_, S, C> {
                 self.collect_tree_changes(None, Some(tree), PathHash::root(), &mut paths)?;
             } else {
                 for parent in &parents {
-                    let parent_node = self.load(*parent)?;
-                    if parent_node.kind != Kind::Commit {
-                        return Err(ReceivePlanError::Kind {
-                            oid: *parent,
-                            expected: Kind::Commit,
-                            actual: parent_node.kind,
-                        });
-                    }
-                    let parent_tree = parent_node
-                        .links
-                        .first()
-                        .ok_or(ReceivePlanError::Invalid {
-                            oid: *parent,
-                            reason: "commit has no tree",
-                        })?
-                        .0;
+                    let parent_tree = self.commit_tree(*parent)?;
                     self.collect_tree_changes(
                         Some(parent_tree),
                         Some(tree),
@@ -124,6 +125,24 @@ impl<S: GraphSource, C: Fn() -> bool> Validator<'_, S, C> {
             pending.extend(parents.into_iter().map(|parent| (parent, false)));
         }
         Ok(paths)
+    }
+
+    fn commit_tree(&mut self, oid: ObjectId) -> Result<ObjectId> {
+        let node = self.load(oid)?;
+        if node.kind != Kind::Commit {
+            return Err(ReceivePlanError::Kind {
+                oid,
+                expected: Kind::Commit,
+                actual: node.kind,
+            });
+        }
+        node.links
+            .first()
+            .map(|(tree, _)| *tree)
+            .ok_or(ReceivePlanError::Invalid {
+                oid,
+                reason: "commit has no tree",
+            })
     }
 
     fn collect_tree_changes(

@@ -242,6 +242,103 @@ test("recent pushes open the matching repository or fork comparison", async ({
   );
 });
 
+test("compare across forks preserves the draft and submits the selected fork commit", async ({
+  page,
+}) => {
+  const { lifecycle } = await mockPullRequest(page);
+  lifecycle.organizationId = "00000000-0000-4000-8000-000000000070";
+  const fork = {
+    id: "00000000-0000-4000-8000-000000000071",
+    owner: "alex",
+    name: "project",
+    owned: true,
+  };
+  const base = "a".repeat(40);
+  const head = "e".repeat(40);
+  await page.route("**/api/repos/team/project/pulls/head-forks*", (route) => {
+    const query = new URL(route.request().url()).searchParams.get("q");
+    return route.fulfill({
+      json: { items: query === "missing" ? [] : [fork], truncated: false },
+    });
+  });
+  await page.route("**/api/repos/alex/project/refs", (route) => {
+    expect(route.request().headers()["x-crab-repository-id"]).toBe(fork.id);
+    return route.fulfill({
+      json: {
+        head: { name: "refs/heads/main", oid: base },
+        refs: [
+          { name: "refs/heads/main", oid: base },
+          { name: "refs/heads/feature/docs", oid: head },
+        ],
+        generation: 3,
+      },
+    });
+  });
+  await page.route("**/api/repos/alex/project/changes?*", (route) => {
+    expect(route.request().headers()["x-crab-repository-id"]).toBe(fork.id);
+    const query = new URL(route.request().url()).searchParams;
+    expect(query.get("upstream")).toBe(lifecycle.repositoryId);
+    expect(query.get("base")).toBe("refs/heads/main");
+    const commit = query.get("rev") === "refs/heads/main" ? base : head;
+    return route.fulfill({
+      json: { base, base_tip: base, commit, generation: 3, changes: [] },
+    });
+  });
+  let submission: unknown;
+  await page.route(/\/api\/repos\/team\/project\/pulls(?:\?|$)/, (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    expect(route.request().headers()["x-crab-repository-id"]).toBe(
+      lifecycle.repositoryId,
+    );
+    submission = route.request().postDataJSON();
+    return route.fulfill({ status: 201, json: { number: 2 } });
+  });
+  await page.goto("/team/project/compare");
+  const title = page.getByLabel("Title", { exact: true });
+  const description = page.getByRole("textbox", {
+    name: "Description",
+    exact: true,
+  });
+  await title.fill("Compare from a personal fork");
+  await description.fill("Keep this draft while switching sources.");
+  await page.getByRole("button", { name: "Compare across forks" }).click();
+  const picker = page.getByRole("dialog", { name: "Head repository" });
+  await expectNoAccessibilityViolations(page);
+  await picker.getByLabel("Search forks").fill("missing");
+  await expect(
+    picker.getByText("No writable forks match your search."),
+  ).toBeVisible();
+  await picker.getByLabel("Search forks").fill("project");
+  await picker.getByRole("button", { name: "project (your fork)" }).click();
+  await expect(
+    page.getByText("The head branch has no commits to propose."),
+  ).toBeVisible();
+  await chooseSelectOption(
+    page.getByLabel("Fork branch"),
+    "refs/heads/feature/docs",
+  );
+  await page.getByRole("button", { name: "project (your fork)" }).click();
+  await picker.getByRole("button", { name: "Use upstream repository" }).click();
+  await expect(page.getByLabel("compare:")).toHaveText("feature/docs");
+  await page.getByRole("button", { name: "Compare across forks" }).click();
+  await picker.getByRole("button", { name: "project (your fork)" }).click();
+  await expect(page.getByLabel("Fork branch")).toContainText("feature/docs");
+  await expect(title).toHaveValue("Compare from a personal fork");
+  await expect(description).toHaveValue(
+    "Keep this draft while switching sources.",
+  );
+  await page
+    .getByRole("button", { name: "Create pull request", exact: true })
+    .click();
+  await expect(page).toHaveURL(/\/team\/project\/pull\/2$/);
+  expect(submission).toMatchObject({
+    head_repository: fork.id,
+    head_ref: "refs/heads/feature/docs",
+    base_ref: "refs/heads/main",
+    expected: { base_oid: base, head_oid: head },
+  });
+});
+
 test("a late pull request template preserves what the author typed", async ({
   page,
 }) => {

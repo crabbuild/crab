@@ -20,7 +20,6 @@ import {
   type Repository,
   type RepositoryLabel,
 } from "@/lib/api";
-import { Reviewers } from "@/features/pull-requests/reviews/reviewers";
 import { Author } from "./author";
 import { LinkedWork } from "./links";
 import { MilestonePicker } from "@/features/milestones/picker";
@@ -274,7 +273,7 @@ export function DiscussionMetadata({
   onSaved,
   children,
   allowIssueClosure,
-  reviewerRefresh,
+  reviewers,
 }: {
   repo: Repository;
   assignees?: RepositoryAssignee[];
@@ -287,19 +286,11 @@ export function DiscussionMetadata({
   onSaved: () => void;
   children?: ReactNode;
   allowIssueClosure?: boolean;
-  reviewerRefresh?: number;
+  reviewers?: ReactNode;
 }) {
   return (
     <aside className="discussion-metadata" aria-label="Metadata">
-      {!repo.public_read_only && path.startsWith("pulls/") && (
-        <Reviewers
-          key={`${path}:${reviewerRefresh}`}
-          repo={repo}
-          pull={Number(path.split("/")[1])}
-          csrf={csrf}
-          onSaved={onSaved}
-        />
-      )}
+      {reviewers}
       <section>
         <header>
           <strong>Assignees</strong>

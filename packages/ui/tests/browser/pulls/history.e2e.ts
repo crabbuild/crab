@@ -22,7 +22,7 @@ function editedContribution<T extends Comment>(item: T): T {
 }
 
 async function historyFixture(page: Page) {
-  await mockPullRequest(page);
+  const fixture = await mockPullRequest(page);
   const comments: Comment[] = Array.from({ length: 65 }, (_, index) => ({
     number: index + 1,
     author: { name: "Alice", profile: null },
@@ -200,6 +200,7 @@ async function historyFixture(page: Page) {
     throw new Error(`Unexpected history mutation: ${method} ${path}`);
   });
   return {
+    pull: fixture.pull,
     reads,
     writes,
     comments,
@@ -208,6 +209,41 @@ async function historyFixture(page: Page) {
     },
   };
 }
+
+test("a live pull update keeps loaded earlier conversation pages in view", async ({
+  page,
+}) => {
+  const model = await historyFixture(page);
+  let reviewed = false;
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/pulls/1",
+    (route) => {
+      const pull = model.pull();
+      return route.fulfill({
+        json: {
+          ...pull,
+          title: reviewed ? "Updated pull request" : pull.title,
+          version: pull.version + Number(reviewed),
+        },
+      });
+    },
+  );
+  await page.clock.install();
+  await page.goto("/team/project/pull/1");
+  const cards = page.locator(".pull-timeline article:visible");
+  await expect(cards).toHaveCount(30);
+  await page.getByRole("button", { name: "Load earlier activity" }).click();
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(cards).toHaveCount(60);
+  const reads = model.reads.length;
+  reviewed = true;
+  await page.clock.fastForward(5_000);
+  await expect(
+    page.getByRole("heading", { name: /Updated pull request/ }),
+  ).toBeVisible();
+  await expect(cards).toHaveCount(60);
+  expect(model.reads).toHaveLength(reads);
+});
 
 test("one chronological history remains reachable after an earlier page fails", async ({
   page,

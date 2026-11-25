@@ -190,6 +190,8 @@ pub(crate) struct SubmitInput {
     pub body: String,
     pub comparison: Option<(String, String)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_comparison: Option<ReviewComparison>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_revision: Option<u64>,
 }
 
@@ -271,6 +273,7 @@ impl Mutation for Submit {
                 body: input.body,
                 state: input.state,
                 commit_oid: head,
+                comparison: input.approved_comparison,
                 base_revision: input.base_revision,
             },
             true,

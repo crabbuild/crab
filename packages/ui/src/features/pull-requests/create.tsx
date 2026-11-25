@@ -1,4 +1,5 @@
 import { FieldSelect } from "@/components/ui/field-select";
+import { Result } from "@/components/request/result";
 import { CreationForm } from "@/components/discussion/create/form";
 import {
   selection,
@@ -36,6 +37,7 @@ import { useState } from "react";
 
 import type { PullRequest } from "./model";
 import { branch } from "./presentation";
+import { HeadForkPicker, type HeadFork } from "./head-fork-picker";
 import { PullTemplatePicker, type PullTemplates } from "./templates";
 
 export function NewPull({
@@ -58,30 +60,41 @@ export function NewPull({
   const branches = refs.refs.filter((ref) =>
     ref.name.startsWith("refs/heads/"),
   );
-  const requestedBase = repositoryRoute(url)?.base;
+  const route = repositoryRoute(url);
+  const requestedBase = route?.base;
   const initialBase = requestedBase
     ? (branches.find(
         (ref) =>
           ref.name === requestedBase || branch(ref.name) === requestedBase,
       )?.name ?? "")
     : (refs.head?.name ?? branches[0]?.name ?? "");
-  const headRefs = fork?.refs ?? refs;
-  const headBranches = headRefs.refs.filter((ref) =>
-    ref.name.startsWith("refs/heads/"),
-  );
-  const requestedHead = fork?.requestedHead ?? repositoryRoute(url)?.head;
   const [base, setBase] = useState(initialBase);
-  const [head, setHead] = useState(
-    requestedHead
+  const [selectedFork, setSelectedFork] = useState<HeadFork>();
+  const forkRefs = useRequest<Refs>(
+    selectedFork ? endpoint(selectedFork, "refs") : null,
+    selectedFork?.id,
+  );
+  const headRepo = selectedFork ?? fork?.repo ?? repo;
+  const isFork = headRepo.id !== repo.id;
+  const headRefs = selectedFork ? forkRefs.data : (fork?.refs ?? refs);
+  const headBranches =
+    headRefs?.refs.filter((ref) => ref.name.startsWith("refs/heads/")) ?? [];
+  const [selectedHeads, setSelectedHeads] = useState<Record<string, string>>(
+    {},
+  );
+  const selectedHead =
+    selectedHeads[headRepo.id] ??
+    (selectedFork ? undefined : (fork?.requestedHead ?? route?.head));
+  const head =
+    selectedHead !== undefined
       ? (headBranches.find(
           (ref) =>
-            ref.name === requestedHead || branch(ref.name) === requestedHead,
+            ref.name === selectedHead || branch(ref.name) === selectedHead,
         )?.name ?? "")
-      : fork
-        ? (headRefs.head?.name ?? headBranches[0]?.name ?? "")
+      : isFork
+        ? (headRefs?.head?.name ?? headBranches[0]?.name ?? "")
         : (branches.find((ref) => ref.name !== initialBase)?.name ??
-          initialBase),
-  );
+          initialBase);
   const [title, setTitle] = useState(
     (url.searchParams.get("title") ?? "").slice(0, 256),
   );
@@ -101,12 +114,18 @@ export function NewPull({
     onCreated: (created) =>
       navigate(repoHref(repo, { view: "pulls", pull: String(created.number) })),
   });
-  const headRepo = fork?.repo ?? repo;
   const canCreate =
-    !fork ||
-    (headRepo.access === "write" && repo.access === "write" && !repo.archived);
-  const comparable = Boolean(base && head && (fork || base !== head));
-  const comparison = usePullComparison(headRepo, base, head, fork && repo.id);
+    !isFork ||
+    ((selectedFork !== undefined || fork?.repo.access === "write") &&
+      !repo.public_read_only &&
+      !repo.archived);
+  const comparable = Boolean(base && head && (isFork || base !== head));
+  const comparison = usePullComparison(
+    headRepo,
+    base,
+    comparable ? head : "",
+    isFork ? repo.id : undefined,
+  );
   const preview = comparison.data;
   const canSubmit = Boolean(preview && preview.base !== preview.commit);
   const openComparison = useRequest<{ pull_number: number | null }>(
@@ -114,7 +133,7 @@ export function NewPull({
       ? endpoint(repo, "pulls/open-comparison", {
           base_ref: base,
           head_ref: head,
-          head_repository: fork?.repo.id,
+          head_repository: isFork ? headRepo.id : undefined,
         })
       : null,
     repo.id,
@@ -143,8 +162,21 @@ export function NewPull({
         <Link href={repoHref(repo, { view: "pulls" })}>← Back to pulls</Link>
       )}
       <div className="compare-heading">
-        <h2>{fork ? "Compare with upstream" : "Compare changes"}</h2>
-        {!fork && (
+        <div className="flex flex-wrap items-center gap-3">
+          <h2>{fork ? "Compare with upstream" : "Compare changes"}</h2>
+          {!fork &&
+            repo.organization_id &&
+            !repo.forked_from &&
+            !repo.public_read_only && (
+              <HeadForkPicker
+                repo={repo}
+                selected={selectedFork}
+                disabled={creation.locked}
+                onSelect={setSelectedFork}
+              />
+            )}
+        </div>
+        {!isFork && (
           <p className="muted">
             Choose a base branch and a different head branch to review.
           </p>
@@ -154,7 +186,7 @@ export function NewPull({
         <GitMergeIcon />
         <Field orientation="horizontal" className="w-auto gap-2">
           <FieldLabel htmlFor="pull-base">
-            {fork ? "Upstream branch" : "base:"}
+            {isFork ? "Upstream branch" : "base:"}
           </FieldLabel>
           <FieldSelect
             id="pull-base"
@@ -167,7 +199,7 @@ export function NewPull({
                 value: ref.name,
                 label: (
                   <>
-                    {fork && `${repo.name}:`}
+                    {isFork && `${repo.name}:`}
                     {branch(ref.name)}
                   </>
                 ),
@@ -177,21 +209,26 @@ export function NewPull({
         </Field>
         <span aria-hidden="true">←</span>
         <Field orientation="horizontal" className="w-auto gap-2">
-          <FieldLabel htmlFor={fork ? "fork-compare-head" : "pull-head"}>
-            {fork ? "Fork branch" : "compare:"}
+          <FieldLabel htmlFor={isFork ? "fork-compare-head" : "pull-head"}>
+            {isFork ? "Fork branch" : "compare:"}
           </FieldLabel>
           <FieldSelect
-            id={fork ? "fork-compare-head" : "pull-head"}
-            disabled={creation.locked}
+            id={isFork ? "fork-compare-head" : "pull-head"}
+            disabled={creation.locked || !headRefs}
             value={head}
-            onValueChange={(nextValue) => setHead(nextValue)}
+            onValueChange={(nextValue) =>
+              setSelectedHeads((current) => ({
+                ...current,
+                [headRepo.id]: nextValue,
+              }))
+            }
             options={[
               ...(!head ? [{ value: "", label: "Choose a branch" }] : []),
               ...headBranches.map((ref) => ({
                 value: ref.name,
                 label: (
                   <>
-                    {fork && `${headRepo.name}:`}
+                    {isFork && `${headRepo.name}:`}
                     {branch(ref.name)}
                   </>
                 ),
@@ -200,7 +237,11 @@ export function NewPull({
           />
         </Field>
       </div>
-      {!fork && branches.length < 2 ? (
+      {selectedFork && !headRefs ? (
+        <Result state={forkRefs} timingLabel="Fork references">
+          {() => null}
+        </Result>
+      ) : !isFork && branches.length < 2 ? (
         <div className="notice">
           <h3>Two branches are required</h3>
           <p>Push another branch before creating a pull request.</p>
@@ -247,10 +288,10 @@ export function NewPull({
               )}
             </div>
           )}
-          {canCreate && (!fork || canSubmit || creation.locked) && (
+          {canCreate && (!isFork || canSubmit || creation.locked) && (
             <>
               <h3>
-                {fork
+                {isFork
                   ? `Open a pull request in ${repo.name}`
                   : "Open a pull request"}
               </h3>
@@ -326,7 +367,7 @@ export function NewPull({
                     draft,
                     base_ref: base,
                     head_ref: head,
-                    head_repository: fork?.repo.id,
+                    head_repository: isFork ? headRepo.id : undefined,
                     expected: preview && {
                       base_oid: preview.base_tip,
                       head_oid: preview.commit,
@@ -389,7 +430,16 @@ export function NewPull({
               </CreationForm>
             </>
           )}
-          {!fork && preview && !canSubmit && (
+          {isFork && !canCreate && (
+            <p className="notice" role="status">
+              {repo.archived
+                ? "The upstream repository is archived."
+                : repo.public_read_only
+                  ? "Repository access is required to open a pull request."
+                  : "Write access to the fork is required to open a pull request."}
+            </p>
+          )}
+          {preview && !canSubmit && (
             <p className="notice" role="status">
               The head branch has no commits to propose.
             </p>

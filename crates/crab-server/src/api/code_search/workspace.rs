@@ -6,7 +6,7 @@ const PATHS_PER_REPOSITORY: usize = 32;
 const MATCHES_PER_PAGE: usize = 20;
 const HEADER: usize = 16 + 32;
 const CHECKSUM: usize = 32;
-const MAX_PAYLOAD: usize = HEADER + 20 + MAX_CURSOR_PATH;
+const MAX_PAYLOAD: usize = HEADER + RESUME_HEADER + MAX_CURSOR_PATH;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -112,6 +112,7 @@ async fn search_page(
     let mut results = Results::default();
     let mut left = MATCHES_PER_PAGE;
     let mut next = None;
+    let mut lifecycles = Vec::new();
     for (index, repo) in repositories
         .iter()
         .enumerate()
@@ -122,12 +123,24 @@ async fn search_page(
             repository: following.id,
             scan: None,
         });
+        let resume = cursor
+            .as_ref()
+            .filter(|position| position.repository == repo.id)
+            .and_then(|position| position.scan.as_ref());
+        let lifecycle = pattern.lifecycle(server, repo).await?;
+        let archive_version = lifecycle.as_ref().map_or(0, |state| state.version);
+        let scope = pattern.repository_facts(repo, lifecycle.as_ref().map(|state| state.archived));
+        check_resume(resume, archive_version)?;
+        if let Some(state) = lifecycle {
+            lifecycles.push((repo, state.version));
+        }
+        if pattern.query.evaluate(&scope).0 == Truth::No {
+            continue;
+        }
         let window = Window {
+            scope,
             rev: None,
-            resume: cursor
-                .as_ref()
-                .filter(|position| position.repository == repo.id)
-                .and_then(|position| position.scan.as_ref()),
+            resume,
             paths: PATHS_PER_REPOSITORY,
             results: left,
             duration: Duration::from_secs(6),
@@ -168,7 +181,11 @@ async fn search_page(
         if let Some(path) = scan.after {
             next = Some(Position {
                 repository: repo.id,
-                scan: Some((scan.commit, path)),
+                scan: Some(Resume {
+                    commit: scan.commit,
+                    archive_version,
+                    after: path,
+                }),
             });
             break;
         }
@@ -176,6 +193,13 @@ async fn search_page(
             break;
         }
     }
+    // Recheck archive versions only for repositories visited by this page.
+    futures_util::future::try_join_all(
+        lifecycles
+            .into_iter()
+            .map(|(repo, version)| check_lifecycle(server, repo, version)),
+    )
+    .await?;
     // Refresh every grant in scope before releasing excerpts or a continuation.
     // The cursor also seals this scope, so previous pages cannot be continued
     // after a repository leaves the user's view.
@@ -201,7 +225,11 @@ async fn visible(
 ) -> app::Result<Vec<Arc<Repository>>> {
     let mut repositories: Vec<_> = catalog::visible_matching(server, principal, None, |repo| {
         organization.is_none_or(|id| repo.organization == Some(id))
-            && pattern.query.evaluate(&pattern.repository_facts(repo)).0 != Truth::No
+            && pattern
+                .query
+                .evaluate(&pattern.repository_facts(repo, None))
+                .0
+                != Truth::No
     })
     .await?
     .into_iter()
@@ -221,13 +249,14 @@ fn scope_digest(repositories: &[Arc<Repository>]) -> blake3::Hash {
         hash.update(b"\0");
         hash.update(repo.config.name.as_bytes());
         hash.update(b"\0");
+        hash.update(&[u8::from(repo.forked_from.is_some())]);
     }
     hash.finalize()
 }
 
 struct Position {
     repository: Uuid,
-    scan: Option<(ObjectId, GitPath)>,
+    scan: Option<Resume>,
 }
 
 struct Continuations<'a> {
@@ -238,8 +267,7 @@ struct Continuations<'a> {
 impl Continuations<'_> {
     fn seal(&self, data: &[u8]) -> blake3::Hash {
         let mut mac = blake3::Hasher::new_keyed(self.key);
-        // Old continuations could refer to the same text with literal semantics.
-        mac.update(b"crab-workspace-code-search-v4\0");
+        mac.update(b"crab-workspace-code-search-v5\0");
         mac.update(self.context.as_bytes());
         mac.update(data);
         mac.finalize()
@@ -249,17 +277,8 @@ impl Continuations<'_> {
         let mut data = Vec::new();
         data.extend(position.repository.as_bytes());
         data.extend(scope.as_bytes());
-        if let Some((oid, path)) = &position.scan {
-            let path = path.as_bytes();
-            if path.len() > MAX_CURSOR_PATH {
-                return Err(Error::LimitExceeded {
-                    limit: "code search cursor path",
-                    actual: path.len() as u64,
-                    maximum: MAX_CURSOR_PATH as u64,
-                });
-            }
-            data.extend(oid.as_bytes());
-            data.extend(path);
+        if let Some(resume) = &position.scan {
+            resume.write(&mut data)?;
         }
         data.extend(self.seal(&data).as_bytes());
         Ok(URL_SAFE_NO_PAD.encode(data))
@@ -282,17 +301,10 @@ impl Continuations<'_> {
             return Err(app::Error::PageChanged.into_response());
         }
         let repository = Uuid::from_slice(&data[..16]).map_err(|_| invalid())?;
-        let resume = &data[HEADER..];
-        let scan = if resume.is_empty() {
-            None
-        } else if resume.len() > 20 {
-            let oid: [u8; 20] = resume[..20].try_into().map_err(|_| invalid())?;
-            let path =
-                GitPath::new(Bytes::copy_from_slice(&resume[20..])).map_err(remote_response)?;
-            Some((ObjectId::from(oid), path))
-        } else {
-            return Err(invalid());
-        };
+        let scan = (data.len() > HEADER)
+            .then(|| Resume::read(&data[HEADER..]))
+            .transpose()
+            .map_err(IntoResponse::into_response)?;
         Ok(Position { repository, scan })
     }
 }
