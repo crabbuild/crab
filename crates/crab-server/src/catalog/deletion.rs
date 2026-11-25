@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -18,6 +18,8 @@ pub(crate) struct DeletedRepository {
     pub root: Uuid,
     pub deleted_at_ms: u64,
     actor: MembershipActor,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) retired_for_removal: bool,
 }
 
 impl DeletedRepository {
@@ -28,7 +30,10 @@ impl DeletedRepository {
     }
 
     pub(crate) fn same_deletion(&self, operation: Uuid, actor: &MembershipActor) -> bool {
-        self.operation == operation && self.root == self.repository.id && &self.actor == actor
+        !self.retired_for_removal
+            && self.operation == operation
+            && self.root == self.repository.id
+            && &self.actor == actor
     }
 }
 
@@ -85,6 +90,10 @@ impl CatalogDocument {
                 || record.ownership_epoch != record.name_version()
                 || record.application != RepositoryApplicationState::CellReady
                 || record.transfer.is_some()
+                || (entry.retired_for_removal
+                    && (record.fork_owner.is_none()
+                        || record.forked_from.is_none()
+                        || entry.root != record.id))
                 || !record.forking.valid_saved()
                 || !record.visibility.valid_saved()
                 || record.organization.as_ref().is_none_or(|organization| {
@@ -104,6 +113,95 @@ impl CatalogDocument {
             )?;
         }
         Ok(())
+    }
+
+    pub(super) fn retire_personal_forks(
+        &mut self,
+        organization: Uuid,
+        owner: &MembershipActor,
+        by: &MembershipActor,
+        now_ms: u64,
+    ) -> Result<BTreeMap<Uuid, u32>, CatalogError> {
+        let mut retired = BTreeMap::new();
+        self.repositories.retain_mut(|record| {
+            if record.organization_id() == Some(organization)
+                && record.fork_owner.as_ref() == Some(owner)
+                && record.application == RepositoryApplicationState::CellReady
+            {
+                retired.insert(record.id, record.clone());
+                false
+            } else {
+                true
+            }
+        });
+        let mut archived = BTreeMap::new();
+        for (id, mut repository) in retired {
+            let source_epoch = repository
+                .forked_from
+                .and_then(|source| self.repository_by_id(source))
+                .ok_or(CatalogError::Conflict)?
+                .ownership_epoch;
+            let operation = Uuid::now_v7();
+            repository.retire_address(operation)?;
+            self.deleted_repositories.push(DeletedRepository {
+                repository,
+                operation,
+                root: id,
+                deleted_at_ms: now_ms,
+                actor: by.clone(),
+                retired_for_removal: true,
+            });
+            archived.insert(id, source_epoch);
+        }
+        Ok(archived)
+    }
+
+    pub(super) fn restore_personal_forks(
+        &mut self,
+        organization: Uuid,
+        owner: &MembershipActor,
+        archived: &BTreeMap<Uuid, u32>,
+    ) -> bool {
+        let mut restored = Vec::new();
+        let mut names: HashSet<_> = self
+            .repositories
+            .iter()
+            .map(|record| (record.owner.to_lowercase(), record.name.to_lowercase()))
+            .collect();
+        let upstream: HashMap<_, _> = self
+            .repositories
+            .iter()
+            .filter(|repo| {
+                repo.organization_id() == Some(organization)
+                    && repo.forked_from.is_none()
+                    && !repo.visibility.value.is_public()
+            })
+            .map(|repo| (repo.id, repo.ownership_epoch))
+            .collect();
+        self.deleted_repositories.retain(|entry| {
+            let repo = &entry.repository;
+            if entry.retired_for_removal
+                && repo.organization_id() == Some(organization)
+                && repo.fork_owner.as_ref() == Some(owner)
+                && let Some(epoch) = archived.get(&repo.id)
+                && repo.forked_from.and_then(|id| upstream.get(&id)) == Some(epoch)
+                && names.insert((repo.owner.to_lowercase(), repo.name.to_lowercase()))
+            {
+                restored.push(repo.clone());
+                false
+            } else {
+                true
+            }
+        });
+        let changed = !restored.is_empty();
+        for repo in restored {
+            self.release_alias(&repo.owner, &repo.name);
+            self.repositories.push(repo);
+        }
+        if changed {
+            self.normalize();
+        }
+        changed
     }
 
     fn queue_deletion_audit(
@@ -180,6 +278,7 @@ impl CatalogStore {
                 root: input.repository,
                 deleted_at_ms: input.now,
                 actor: input.actor.clone(),
+                retired_for_removal: false,
             });
         }
         let removed = document

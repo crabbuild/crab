@@ -5,7 +5,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{
-    FetchGrant, ImportAccount, ImportContext, ImportError, InternalGit, OrganizationOwner,
+    FetchGrant, ForkSource, ImportAccount, ImportContext, ImportError, InternalGit,
+    OrganizationOwner,
     git::{configure_git, default_branch, mirror_refs, mirror_size, push_mirror, run_git},
     jobs, repository_route,
     source::ValidatedImport,
@@ -137,9 +138,15 @@ async fn import_repository(
     cancellation: &CancellationToken,
 ) -> Result<(), ImportError> {
     account.check(server).await?;
-    let namespace = account.namespace(&request.owner)?;
     let organization = account.organization;
     let catalog = server.catalog().ok_or(ImportError::Unavailable)?;
+    let fork = account
+        .fork_source(server, &catalog, request.fork_source)
+        .await?;
+    let namespace = account.destination(&request.owner, fork.as_deref())?;
+    let authority = organization
+        .map(|owner| owner.id)
+        .or(fork.as_ref().map(|source| source.organization));
     let (document, _) = catalog.load().await.map_err(ImportError::Catalog)?;
     if let Some(record) = document.repositories.iter().find(|record| {
         record.owner.eq_ignore_ascii_case(&request.owner)
@@ -148,7 +155,7 @@ async fn import_repository(
         if record.id != id
             || record.owner != request.owner
             || record.name != request.name
-            || record.organization_id() != organization.map(|owner| owner.id)
+            || record.organization_id() != authority
             || record.forked_from != request.fork_source
         {
             return Err(ImportError::Catalog(crate::catalog::CatalogError::Conflict));
@@ -170,7 +177,16 @@ async fn import_repository(
         if snapshot.matches(view.head(), view.refs()) {
             // Receive verifies reachable payloads before committing refs. A
             // lost reply can finish from this snapshot without rereading them.
-            return finish_destination(server, &catalog, job, id, organization, &snapshot).await;
+            return finish_destination(
+                server,
+                &catalog,
+                job,
+                id,
+                organization,
+                fork.as_deref(),
+                &snapshot,
+            )
+            .await;
         }
         if !view.refs().is_empty()
             || view.head().strip_prefix("refs/heads/") != Some(&snapshot.default_branch)
@@ -201,26 +217,14 @@ async fn import_repository(
         Err(error) => return Err(ImportError::Staging(error)),
     };
     let mirror = directory.path().join("repository.git");
-    let fork_source = match request.fork_source {
+    let fork_source = match &fork {
         None => None,
-        Some(id) => {
-            let organization = organization.ok_or(ImportError::NotFound)?;
-            organization.require_fork(server, &document, id).await?;
-            let source = server
-                .repositories
-                .by_id(id)
-                .filter(|source| {
-                    source.organization == Some(organization.id) && source.forked_from.is_none()
-                })
-                .ok_or(ImportError::NotFound)?;
-            let current = crate::app::membership(server, &account.principal, &source)
-                .await
-                .map_err(ImportError::organization)?;
+        Some(fork) => {
+            let (source, _) = fork.current(server).await?;
             let grant = context.register(InternalGit::Fetch(Arc::new(FetchGrant {
                 route: repository_route(&source),
-                principal: current.principal.scoped_to_repository(Some(source.id)),
                 writer: Arc::clone(job),
-                organization,
+                fork: Arc::clone(fork),
             })));
             Some((
                 context.destination_url(&source.config.owner, &source.config.name),
@@ -272,7 +276,7 @@ async fn import_repository(
         .await?;
     account.check(server).await?;
     let actor = &account.identity;
-    let members = if server.auth.is_some() && organization.is_none() {
+    let members = if server.auth.is_some() && authority.is_none() {
         vec![RepositoryMember {
             subject: actor.subject.clone(),
             name: actor.name.clone(),
@@ -315,9 +319,19 @@ async fn import_repository(
         &mirror,
         cancellation,
         organization,
+        fork.clone(),
     )
     .await?;
-    finish_destination(server, &catalog, job, id, organization, &snapshot).await
+    finish_destination(
+        server,
+        &catalog,
+        job,
+        id,
+        organization,
+        fork.as_deref(),
+        &snapshot,
+    )
+    .await
 }
 
 pub(super) async fn open_destination(
@@ -346,6 +360,7 @@ pub(super) async fn publish_snapshot(
     mirror: &Path,
     cancellation: &CancellationToken,
     organization: Option<OrganizationOwner>,
+    fork: Option<Arc<ForkSource>>,
 ) -> Result<(), ImportError> {
     job.verify().await?;
     let grant = context.begin_repository(
@@ -353,6 +368,7 @@ pub(super) async fn publish_snapshot(
         Arc::clone(job),
         snapshot.clone(),
         organization,
+        fork,
     );
     let destination = context.destination_url(&repository.config.owner, &repository.config.name);
     let pushed = push_mirror(
@@ -382,6 +398,7 @@ pub(super) async fn finish_destination(
     job: &jobs::Writer,
     id: Uuid,
     organization: Option<OrganizationOwner>,
+    fork: Option<&ForkSource>,
     snapshot: &jobs::Snapshot,
 ) -> Result<(), ImportError> {
     job.update(jobs::State::Running, "Making repository available")
@@ -398,24 +415,37 @@ pub(super) async fn finish_destination(
             .map(|_| ())
             .map_err(ImportError::Catalog)
     };
-    if let Some(owner) = organization {
+    if let Some(authority) = organization
+        .map(|owner| owner.id)
+        .or(fork.map(|source| source.organization))
+    {
         // The quarantine stays private until the catalog commit. Hold the
         // policy lease through that commit so a default or ruleset edit
         // cannot retarget the repository after the last policy check.
         let published: crate::app::Result<_> = with_ruleset_lease(
             server,
-            RulesetScope::Organization(owner.id),
+            RulesetScope::Organization(authority),
             &server.cancellation,
             |cancel| async move {
                 let outcome = async {
                     if cancel.is_cancelled() {
                         return Err(ImportError::Cancelled);
                     }
-                    let policy =
-                        validate_destination_policy(server, catalog, id, owner, snapshot).await?;
-                    owner
-                        .authorize_publication(server, id, snapshot, policy)
-                        .await?;
+                    let policy = validate_destination_policy(
+                        server,
+                        catalog,
+                        id,
+                        authority,
+                        organization,
+                        fork,
+                        snapshot,
+                    )
+                    .await?;
+                    if let Some(owner) = organization {
+                        owner
+                            .authorize_publication(server, id, snapshot, policy)
+                            .await?;
+                    }
                     if cancel.is_cancelled() {
                         return Err(ImportError::Cancelled);
                     }
@@ -437,7 +467,9 @@ async fn validate_destination_policy(
     server: &Server,
     catalog: &CatalogStore,
     id: Uuid,
-    owner: OrganizationOwner,
+    organization: Uuid,
+    owner: Option<OrganizationOwner>,
+    fork: Option<&ForkSource>,
     snapshot: &jobs::Snapshot,
 ) -> Result<u64, ImportError> {
     use crate::cells::repository::rulesets::{ActiveRulesets, BypassActor, BypassContext};
@@ -445,12 +477,15 @@ async fn validate_destination_policy(
     let record = document
         .repositories
         .iter()
-        .find(|row| row.id == id && row.organization_id() == Some(owner.id))
+        .find(|row| row.id == id && row.organization_id() == Some(organization))
         .ok_or(ImportError::DestinationChanged)?;
-    if let Some(source) = record.forked_from {
+    if record.forked_from != fork.map(|source| source.source) {
+        return Err(ImportError::DestinationChanged);
+    }
+    if let Some(source) = fork {
         // This read shares the organization's policy lease with both settings
         // writers. A disabled fork stays quarantined even after its refs commit.
-        owner.require_fork(server, &document, source).await?;
+        source.current(server).await?;
     }
     let repository = crate::repository::catalog::materialize_record(catalog, record)
         .await
@@ -470,17 +505,25 @@ async fn validate_destination_policy(
             .iter()
             .any(|entry| matches!(entry.actor, BypassActor::Team { .. }))
     }) {
-        owner
-            .policy_grant(server)
-            .await
-            .map_err(ImportError::organization)?
-            .bypass_teams
+        match (owner, fork) {
+            (Some(owner), _) => owner
+                .policy_grant(server)
+                .await
+                .map_err(ImportError::organization)?,
+            (None, Some(fork)) => fork.policy_grant(server, true).await?,
+            (None, None) => return Err(ImportError::DestinationChanged),
+        }
+        .bypass_teams
     } else {
         Vec::new()
     };
     let actor = BypassContext {
-        role: Some(RepositoryAccess::Admin),
-        organization_owner: true,
+        role: Some(if owner.is_some() {
+            RepositoryAccess::Admin
+        } else {
+            RepositoryAccess::Write
+        }),
+        organization_owner: owner.is_some(),
         teams: &teams,
         organization_teams: &teams,
     };

@@ -14,6 +14,7 @@ async fn invitation_versions_fence_cancellation_edits_retries_and_reacceptance()
         recipient,
         version: 0,
         role: Role::Owner,
+        reinstate_version: None,
     };
     let ChangeOutcome::Applied(first) = write::<Invite>(client, id, input.clone()).await else {
         panic!("offer missing")
@@ -72,6 +73,7 @@ async fn invitation_versions_fence_cancellation_edits_retries_and_reacceptance()
             recipient,
             version: 1,
             role: Role::Member,
+            reinstate_version: None,
         },
     )
     .await
@@ -129,6 +131,7 @@ async fn invitation_versions_fence_cancellation_edits_retries_and_reacceptance()
             recipient,
             version: 3,
             role: Role::Member,
+            reinstate_version: None,
         },
     )
     .await
@@ -201,6 +204,7 @@ async fn concurrent_invitation_acceptance_and_cancellation_have_one_atomic_winne
             recipient,
             version: 0,
             role: Role::Member,
+            reinstate_version: None,
         },
     )
     .await;
@@ -385,6 +389,7 @@ async fn invitation_pages_are_bounded_and_cannot_reuse_a_member_cursor() {
                 recipient,
                 version: 0,
                 role: Role::Member,
+                reinstate_version: None,
             },
         )
         .await;

@@ -3,7 +3,7 @@ mod git;
 mod jobs;
 mod source;
 mod workflow;
-use authority::{ImportAccount, OrganizationOwner};
+use authority::{ForkSource, ImportAccount, OrganizationOwner};
 use source::{GitImportRequest, ValidatedImport, validate_request};
 use workflow::run_import;
 
@@ -70,6 +70,7 @@ impl ImportContext {
         writer: Arc<jobs::Writer>,
         snapshot: jobs::Snapshot,
         organization: Option<OrganizationOwner>,
+        fork: Option<Arc<ForkSource>>,
     ) -> ImportGuard {
         self.register(InternalGit::Receive(Arc::new(ReceiveGrant {
             route: repository_route(&repository),
@@ -77,6 +78,7 @@ impl ImportContext {
             writer,
             snapshot,
             organization,
+            fork,
         })))
     }
 
@@ -193,9 +195,10 @@ impl InternalGit {
             Self::Receive(grant) => Principal::import(grant),
             Self::Fetch(grant) => {
                 if grant.writer.verify().await.is_ok()
-                    && grant.organization.check(server).await.is_ok()
+                    && let Ok((source, principal)) = grant.fork.current(server).await
+                    && repository_route(&source) == grant.route
                 {
-                    grant.principal.clone()
+                    principal.scoped_to_repository(Some(source.id))
                 } else {
                     Principal::anonymous()
                 }
@@ -206,9 +209,8 @@ impl InternalGit {
 
 pub(crate) struct FetchGrant {
     route: String,
-    principal: Principal,
     writer: Arc<jobs::Writer>,
-    organization: OrganizationOwner,
+    fork: Arc<ForkSource>,
 }
 
 fn repository_route(repository: &Repository) -> String {
@@ -224,6 +226,7 @@ pub(crate) struct ReceiveGrant {
     writer: Arc<jobs::Writer>,
     snapshot: jobs::Snapshot,
     organization: Option<OrganizationOwner>,
+    fork: Option<Arc<ForkSource>>,
     route: String,
 }
 
@@ -244,7 +247,9 @@ impl ReceiveGrant {
     pub(crate) async fn active(&self, server: &Server) -> bool {
         let result = async {
             self.writer.verify().await?;
-            if let Some(owner) = self.organization {
+            if let Some(fork) = &self.fork {
+                fork.current(server).await?;
+            } else if let Some(owner) = self.organization {
                 owner.check(server).await?;
             }
             Ok::<_, ImportError>(())
@@ -285,7 +290,13 @@ impl ReceiveGrant {
     ) -> crate::app::Result<crate::cells::organization::teams::repository_access::ActorTeams> {
         match self.organization {
             Some(owner) => owner.policy_grant(server).await,
-            None => Ok(Default::default()),
+            None => match &self.fork {
+                Some(fork) => fork
+                    .policy_grant(server, true)
+                    .await
+                    .map_err(|_| app::Error::Forbidden),
+                None => Ok(Default::default()),
+            },
         }
     }
 
@@ -511,6 +522,16 @@ async fn start(
 struct ForkRequest {
     request_id: Uuid,
     name: String,
+    #[serde(default)]
+    destination: ForkDestination,
+}
+
+#[derive(Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ForkDestination {
+    #[default]
+    Organization,
+    Personal,
 }
 
 async fn start_fork(
@@ -525,15 +546,21 @@ async fn start_fork(
         .organization
         .filter(|_| source.forked_from.is_none())
         .ok_or(ImportError::NotFound)?;
-    let account = ImportAccount::resolve(&server, &principal, Some(organization)).await?;
+    let personal = input.destination == ForkDestination::Personal;
+    let account =
+        ImportAccount::resolve(&server, &principal, (!personal).then_some(organization)).await?;
     let name = source::identifier(input.name, "name")?;
-    if name.eq_ignore_ascii_case(&source.config.name) {
+    if !personal && name.eq_ignore_ascii_case(&source.config.name) {
         return Err(ImportError::Invalid("Choose a different name for the fork"));
     }
     let request = ValidatedImport {
         source: format!("{}/{}", source.config.owner, source.config.name),
         fork_source: Some(source.id),
-        owner: source.config.owner.clone(),
+        owner: if personal {
+            crate::catalog::personal_namespace(&account.identity.issuer, &account.identity.subject)
+        } else {
+            source.config.owner.clone()
+        },
         name,
         description: String::new(),
         token: None,
@@ -559,7 +586,7 @@ async fn submit(
         return Ok((StatusCode::ACCEPTED, Json(status)));
     }
     account
-        .check_fork(server, &catalog, request.fork_source)
+        .fork_source(server, &catalog, request.fork_source)
         .await?;
     let slot = context.admission.admit(&request)?;
     let Some(writer) = jobs.create(id, &request).await? else {
@@ -614,7 +641,7 @@ async fn resume(
     };
     account.namespace(&request.owner)?;
     account
-        .check_fork(&server, &catalog, request.fork_source)
+        .fork_source(&server, &catalog, request.fork_source)
         .await?;
     let slot = context.admission.admit(&request)?;
     let status = match jobs.claim(id, &request).await? {

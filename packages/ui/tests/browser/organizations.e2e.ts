@@ -9,6 +9,7 @@ import type {
   OrganizationMembership,
   Organization,
   OrganizationRole,
+  Reinstatement,
 } from "@/lib/contracts";
 
 const id = "01900000-0000-7000-8000-000000000010";
@@ -21,6 +22,7 @@ async function fixture(page: Page) {
     role: OrganizationRole;
     members: OrganizationMembership[];
     invitation: Invitation | null;
+    reinstatement?: Reinstatement;
     writes: unknown[];
     fail: boolean;
     metadataVisible: boolean;
@@ -184,21 +186,24 @@ async function fixture(page: Page) {
           json: {
             organization: state.organization,
             invitation: state.invitation,
+            reinstatement: state.reinstatement,
           },
         });
       if (method === "PUT") {
         const input = request.postDataJSON() as {
           version: number;
           role: OrganizationRole;
+          reinstate_version?: number;
         };
         state.invitation = {
           recipient: bob,
           role: input.role,
-          member_version: 0,
+          member_version: input.reinstate_version ?? 0,
           version: input.version + 1,
           state: "pending",
           created_at_ms: Date.now(),
           expires_at_ms: Date.now() + 7 * 86400000,
+          reinstates: input.reinstate_version !== undefined,
         };
       }
       if (method === "DELETE" && state.invitation)
@@ -735,7 +740,8 @@ test("owners can review and convert multiple selected members", async ({
   await page.goto(root);
   const all = page.getByRole("checkbox", { name: "Select page" });
   const trigger = page.getByRole("button", {
-    name: "Convert to outside collaborators",
+    name: "2 selected",
+    exact: true,
   });
   const dialog = page.getByRole("dialog", {
     name: "Convert to outside collaborators",
@@ -745,6 +751,9 @@ test("owners can review and convert multiple selected members", async ({
     await page.getByRole("checkbox", { name: "Select Alice" }).uncheck();
     await expect(all).toHaveAttribute("aria-checked", "mixed");
     await trigger.click();
+    await page
+      .getByRole("menuitem", { name: "Convert to outside collaborators" })
+      .click();
     await expect(dialog).toContainText("team-derived repository roles");
     await expect(dialog.getByText("Bob", { exact: true })).toBeVisible();
     await expect(dialog.getByText("Casey", { exact: true })).toBeVisible();
@@ -784,6 +793,82 @@ test("owners can review and convert multiple selected members", async ({
       }),
     ).toHaveText("2 repositories");
   }
+});
+
+test("owners review and remove selected members from People", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  const profiles = [
+    { id: bob, name: "Bob", handle: "bob" },
+    {
+      id: "01900000-0000-7000-8000-000000000013",
+      name: "Casey",
+      handle: "casey",
+    },
+  ];
+  state.members.push(
+    ...profiles.map((profile, index) => ({
+      actor: profile.id,
+      role: "member" as const,
+      version: index + 2,
+      profile,
+    })),
+  );
+  let writes = 0;
+  await page.route(
+    (url) => url.pathname === `/api/organizations/${id}/members/removal`,
+    (route) => {
+      expect(route.request().method()).toBe("POST");
+      expect(route.request().headers()["x-csrf-token"]).toBe("csrf");
+      expect(route.request().postDataJSON()).toEqual({
+        members: profiles.map((profile, index) => ({
+          actor: profile.id,
+          version: index + 2,
+        })),
+      });
+      writes += 1;
+      state.members = state.members.filter((member) => member.actor === alice);
+      return route.fulfill({ json: { removed: 2 } });
+    },
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(root);
+  await page.getByRole("checkbox", { name: "Select Bob" }).check();
+  await page.getByRole("checkbox", { name: "Select Casey" }).check();
+  const trigger = page.getByRole("button", { name: "2 selected", exact: true });
+  const remove = page.getByRole("menuitem", {
+    name: "Remove from organization",
+  });
+  const dialog = page.getByRole("dialog", { name: "Remove from organization" });
+  await trigger.press("Enter");
+  await remove.press("Enter");
+  await expect(dialog).toContainText(
+    "personal private forks of organization repositories",
+  );
+  await expect(dialog.getByText("Bob", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Casey", { exact: true })).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(trigger).toBeFocused();
+  expect(writes).toBe(0);
+  await trigger.click();
+  await remove.click();
+  await dialog
+    .getByRole("button", { name: "Remove members", exact: true })
+    .click();
+  await expect(
+    page.getByRole("status").filter({ hasText: "Removed 2 members." }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("checkbox", { name: "Select Alice" }),
+  ).toBeVisible();
+  for (const profile of profiles) {
+    await expect(
+      page.getByRole("checkbox", { name: `Select ${profile.name}` }),
+    ).toHaveCount(0);
+  }
+  expect(writes).toBe(1);
 });
 
 test("owners invite by stable account, preserve a conflicted form, and cancel without granting membership", async ({
@@ -882,6 +967,42 @@ test("an invitee accepts through their own endpoint and reload shows the persist
   await expect(
     page.getByRole("button", { name: "Join organization", exact: true }),
   ).toHaveCount(0);
+});
+
+test("owners can choose to restore a former member's previous access", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  state.reinstatement = { role: "owner", version: 4 };
+  await page.goto(root);
+  await page
+    .getByRole("button", { name: "Invite member", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Username", { exact: true }).fill("bob");
+  await dialog.getByRole("button", { name: "Bob @bob", exact: true }).click();
+  await expect(
+    dialog.getByRole("button", { name: "Invite and start fresh" }),
+  ).toBeEnabled();
+  await dialog.getByRole("combobox", { name: "Previous access" }).click();
+  await page.getByRole("option", { name: "Restore previous access" }).click();
+  await expect(
+    dialog.getByText("Rejoin as an owner", { exact: false }),
+  ).toBeVisible();
+  await expect(
+    dialog.getByRole("combobox", { name: "Organization role" }),
+  ).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Invite and reinstate" }).click();
+  await expect(page.getByRole("status")).toContainText("Invitation created.");
+  expect(state.writes).toEqual([
+    { version: 0, role: "owner", reinstate_version: 4 },
+  ]);
+  await page.goto(`${root}/invitation`);
+  await expect(
+    page.getByText(
+      "Accepting restores your eligible team and repository access.",
+    ),
+  ).toBeVisible();
 });
 
 test("organization settings and read-only people remain accessible at mobile widths in both themes", async ({

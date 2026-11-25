@@ -620,6 +620,7 @@ async fn join(client: &CellClient, organization: Uuid, owner: Uuid, person: Uuid
             recipient: person,
             version,
             role: Role::Member,
+            reinstate_version: None,
         },
     )
     .await

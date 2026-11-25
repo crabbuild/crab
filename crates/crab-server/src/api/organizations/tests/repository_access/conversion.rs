@@ -3,18 +3,19 @@ use crate::{
     RepositoryAccess,
     catalog::{
         MembershipActor,
-        conversion::{Begin, RetainedMember},
+        membership_changes::{Begin, DepartureGrants, Pending},
     },
     cells::{
         Address,
         directory::{IdentityKey, RegisterAccounts},
         organization::{
-            Conversion, ConversionMember, DecideInvitation, Decision, FinalizeConversion,
+            DecideInvitation, Decision, Departure, DepartureMember, DepartureMode,
+            FinalizeDeparture,
         },
     },
 };
 
-async fn invite_vendor(f: &AccessFixture, role: &str) -> Uuid {
+pub(super) async fn invite_vendor(f: &AccessFixture, role: &str) -> Uuid {
     let cells = f.h.server.cells().unwrap();
     let issuer = f.h.server.auth.as_ref().unwrap().issuer().to_owned();
     let registered = cells
@@ -253,7 +254,7 @@ async fn batch_conversion_validates_all_versions_and_keeps_each_members_team_acc
     assert_eq!(snapshot.members[0].access, RepositoryAccess::Write);
     assert_eq!(snapshot.groups[0].group, "release-admins");
     let (document, _) = catalog.load().await.unwrap();
-    assert!(document.pending_conversions.is_empty());
+    assert!(document.pending_membership_changes.is_empty());
     f.h.close().await;
 }
 
@@ -268,14 +269,15 @@ async fn recovery_clears_an_already_finalized_conversion_exactly_once() {
     let member = format!("{}/members/{}", f.org, f.member);
     let loaded = f.h.json(&member, &f.alice).await;
     let version = loaded["member"]["version"].as_u64().unwrap();
-    let decision = Conversion {
+    let decision = Departure {
         owner: f.owner_id,
+        mode: DepartureMode::Convert,
         members: vec![
-            ConversionMember {
+            DepartureMember {
                 actor: f.member,
                 version,
             },
-            ConversionMember {
+            DepartureMember {
                 actor: vendor,
                 version: vendor_version,
             },
@@ -284,19 +286,25 @@ async fn recovery_clears_an_already_finalized_conversion_exactly_once() {
     let catalog = f.h.server.catalog().unwrap();
     let (document, _) = catalog.load().await.unwrap();
     catalog
-        .prepare_conversion(
+        .prepare_departure(
             Begin {
                 organization: f.organization,
                 revision: document.version,
                 decision: decision.clone(),
-                retain: vec![
-                    RetainedMember {
-                        subject: "bob-id".into(),
+                members: vec![
+                    DepartureGrants {
+                        identity: Some(MembershipActor {
+                            issuer: f.h.provider.issuer.clone(),
+                            subject: "bob-id".into(),
+                        }),
                         name: "Bob".into(),
                         teams: [f.team].into_iter().collect(),
                     },
-                    RetainedMember {
-                        subject: "vendor-id".into(),
+                    DepartureGrants {
+                        identity: Some(MembershipActor {
+                            issuer: f.h.provider.issuer.clone(),
+                            subject: "vendor-id".into(),
+                        }),
                         name: "Vendor".into(),
                         teams: Default::default(),
                     },
@@ -313,7 +321,7 @@ async fn recovery_clears_an_already_finalized_conversion_exactly_once() {
     assert_eq!(f.h.json(&member, &f.alice).await["member"]["active"], true);
     let cells = f.h.server.cells().unwrap();
     cells
-        .command::<FinalizeConversion>(
+        .command::<FinalizeDeparture>(
             crate::cells::Address::Organization(f.organization),
             crate::app::mutation_identity().unwrap(),
             decision.clone(),
@@ -321,15 +329,18 @@ async fn recovery_clears_an_already_finalized_conversion_exactly_once() {
         .await
         .unwrap();
     let (pending, _) = catalog.load().await.unwrap();
-    assert_eq!(pending.pending_conversions[&f.organization], decision);
+    assert_eq!(
+        pending.pending_membership_changes[&f.organization],
+        Pending::Departure(decision)
+    );
 
     for _ in 0..2 {
-        crate::api::recover_collaborator_conversion(&f.h.server, f.organization)
+        crate::api::recover_organization_membership_change(&f.h.server, f.organization)
             .await
             .unwrap();
     }
     let (recovered, _) = catalog.load().await.unwrap();
-    assert!(recovered.pending_conversions.is_empty());
+    assert!(recovered.pending_membership_changes.is_empty());
     let finalized = f.h.json(&member, &f.alice).await;
     assert_eq!(finalized["member"]["version"], version + 1);
     assert_eq!(finalized["member"]["active"], false);

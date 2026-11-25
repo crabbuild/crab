@@ -47,11 +47,13 @@ impl Scope {
     fn includes(&self, repo: &Repository) -> bool {
         match self {
             Self::All | Self::Public => true,
-            Self::Personal(owner) => repo.organization.is_none() && repo.config.owner == *owner,
+            Self::Personal(owner) => {
+                repo.owning_organization().is_none() && repo.config.owner == *owner
+            }
             Self::Organization(id)
             | Self::Team {
                 organization: id, ..
-            } => repo.organization == Some(*id),
+            } => repo.owning_organization() == Some(*id),
         }
     }
 }

@@ -13,6 +13,7 @@ use super::{
 
 pub(in crate::cells) const CLASS: &str = "Organization";
 pub(in crate::cells) const NAMESPACE: &str = "ORGANIZATIONS";
+const SCHEMA_FORMAT: u64 = 2;
 pub(crate) const MAX_VERSION: u64 = 9_007_199_254_740_991;
 
 pub(crate) mod automation;
@@ -33,9 +34,12 @@ use teams::repository_access::{
 };
 pub(crate) mod teams;
 pub(crate) use commands::{
-    Bootstrap, BootstrapInput, ChangeMember, ChangeOutcome, CheckConversion, Conversion,
-    ConversionMember, Edit, EditInput, FinalizeConversion, MAX_CONVERSION_MEMBERS, MemberChange,
+    Bootstrap, BootstrapInput, ChangeMember, ChangeOutcome, CheckDeparture, Departure,
+    DepartureMember, DepartureMode, Edit, EditInput, FinalizeDeparture, MAX_DEPARTURE_MEMBERS,
+    MemberChange,
 };
+#[cfg(test)]
+pub(crate) use invitations::Reinstatement;
 pub(crate) use invitations::{
     CancelInvitation, DecideInvitation, Decision, FindInvitations, GetInvitation, Invitation,
     InvitationKey, InvitationState, InvitationView, Invite, InviteInput, ListInvitations,
@@ -171,6 +175,7 @@ pub(crate) enum Action {
     MemberConverted {
         member: Uuid,
         version: u64,
+        cancelled_invitations: u64,
     },
     Automation {
         identity: Uuid,
@@ -223,12 +228,15 @@ pub(crate) enum Action {
         member: Uuid,
         role: Option<Role>,
         version: u64,
+        cancelled_invitations: u64,
     },
     Invitation {
         recipient: Uuid,
         role: Role,
         version: u64,
         state: InvitationState,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reinstates: bool,
     },
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -291,8 +299,8 @@ pub(in crate::cells) fn initialize(
         }
         context.install_schema(include_str!("schema.sql"))?;
         context.query(
-            "INSERT INTO organization_identity(singleton, id, format) VALUES (1, ?, 1)",
-            &[blob(id)],
+            "INSERT INTO organization_identity(singleton, id, format) VALUES (1, ?, ?)",
+            &[blob(id), integer(SCHEMA_FORMAT)?],
         )?;
     }
     let rows = context.query(
@@ -302,10 +310,20 @@ pub(in crate::cells) fn initialize(
     let Some([stored, format]) = rows.rows.first().map(Vec::as_slice) else {
         return Err(Error::Invalid("organization identity is missing"));
     };
-    if uuid(stored)? != id || uint(format)? != 1 {
+    if uuid(stored)? != id {
         return Err(Error::Invalid(
             "organization identity does not match its native target",
         ));
+    }
+    if uint(format)? != SCHEMA_FORMAT {
+        return if create {
+            Err(Error::Invalid(
+                "bootstrap with a fresh organization UUID for this schema",
+            ))
+        } else {
+            // Directory candidates can outlive development-only organizations.
+            Err(Error::NotInitialized)
+        };
     }
     Ok(())
 }
@@ -376,9 +394,9 @@ pub(in crate::cells) fn authorize(
             return Ok(());
         }
         (discovery::GetLanding::ID, false) => return Ok(()),
-        // The catalog commits conversion grants before trusted recovery
-        // submits this operation. A self-conversion may already be applied.
-        (CheckConversion::ID, false) | (FinalizeConversion::ID, true) => return Ok(()),
+        // Only trusted catalog recovery finalizes a prepared departure.
+        // Self-removal may already have ended the original owner's access.
+        (CheckDeparture::ID, false) | (FinalizeDeparture::ID, true) => return Ok(()),
         (GetOrganization::ID | ListMembers::ID | FindMembers::ID, false) => false,
         (
             GetMember::ID
@@ -533,7 +551,7 @@ pub(in crate::cells) fn dispatch_read(
         ListMembers::ID => invoke_read::<ListMembers>(context, input),
         FindMembers::ID => invoke_read::<FindMembers>(context, input),
         ActiveMembers::ID => invoke_read::<ActiveMembers>(context, input),
-        CheckConversion::ID => invoke_read::<CheckConversion>(context, input),
+        CheckDeparture::ID => invoke_read::<CheckDeparture>(context, input),
         GetMember::ID => invoke_read::<GetMember>(context, input),
         ListActivity::ID => invoke_read::<ListActivity>(context, input),
         GetInvitation::ID => invoke_read::<GetInvitation>(context, input),
@@ -591,7 +609,7 @@ pub(in crate::cells) fn dispatch_mutation(
         automation::Change::ID => invoke_mutation::<automation::Change>(context, input),
         Edit::ID => invoke_mutation::<Edit>(context, input),
         ChangeMember::ID => invoke_mutation::<ChangeMember>(context, input),
-        FinalizeConversion::ID => invoke_mutation::<FinalizeConversion>(context, input),
+        FinalizeDeparture::ID => invoke_mutation::<FinalizeDeparture>(context, input),
         Invite::ID => invoke_mutation::<Invite>(context, input),
         CancelInvitation::ID => invoke_mutation::<CancelInvitation>(context, input),
         DecideInvitation::ID => invoke_mutation::<DecideInvitation>(context, input),

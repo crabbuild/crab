@@ -344,3 +344,129 @@ test("a current organization owner can resume a shared import", async ({
   await expect(page).toHaveURL(`/${owner}/widgets`);
   await expect(page.locator(".global-repository h1")).toContainText("widgets");
 });
+
+test("a personal fork keeps its job scope across reload and resume", async ({
+  page,
+}) => {
+  const organization = "01900000-0000-7000-8000-000000000030";
+  const id = "01900000-0000-7000-8000-000000000031";
+  const owner = `org-${organization.replaceAll("-", "")}`;
+  const source = {
+    id,
+    owner,
+    name: "library",
+    organization_id: organization,
+    visibility: "private",
+    can_fork: true,
+    can_fork_to_organization: true,
+    can_admin: true,
+  };
+  const fork = {
+    id: "01900000-0000-7000-8000-000000000032",
+    owner: "user-personal",
+    name: "library",
+    visibility: "private",
+    forked_from: { id, owner, name: "library" },
+  };
+  let jobId: string | undefined;
+  let reads = 0;
+  const job = () => ({
+    id: jobId,
+    owner: fork.owner,
+    name: fork.name,
+    source: `${owner}/library`,
+    fork_source: id,
+    state: "interrupted",
+    message: "Fork interrupted",
+    resumable: true,
+  });
+  await page.route("**/api/**", (route) => {
+    const req = route.request();
+    const { pathname, searchParams } = new URL(req.url());
+    if (pathname === "/api/session")
+      return route.fulfill({
+        json: {
+          authenticated: true,
+          csrf: "csrf",
+          mode: "oidc",
+          user: { issuer: "fixture", subject: "alice", name: "Alice" },
+        },
+      });
+    if (pathname === `/api/organizations/${organization}`)
+      return route.fulfill({
+        json: {
+          organization: {
+            id: organization,
+            name: "Crab Engineering",
+            version: 1,
+          },
+          role: "owner",
+          actor: id,
+        },
+      });
+    if (pathname === "/api/repos")
+      return route.fulfill({
+        json: {
+          repositories: [
+            searchParams.get("owner") === fork.owner ? fork : source,
+          ],
+        },
+      });
+    if (pathname.endsWith("/refs"))
+      return route.fulfill({
+        json: { head: null, unborn_head: "refs/heads/main", refs: [] },
+      });
+    if (pathname === `/api/repos/${owner}/library/forks`) {
+      expect(req.headers()["x-crab-repository-id"]).toBe(id);
+      const input = req.postDataJSON();
+      expect(input).toEqual({
+        request_id: expect.any(String),
+        name: "library",
+        destination: "personal",
+      });
+      jobId = input.request_id;
+      return route.fulfill({ status: 202, json: job() });
+    }
+    if (pathname === `/api/imports/git/${jobId}`) {
+      reads += 1;
+      return route.fulfill({ json: job() });
+    }
+    if (pathname === `/api/imports/git/${jobId}/resume`) {
+      expect(req.postDataJSON()).toEqual({});
+      return route.fulfill({
+        status: 202,
+        json: {
+          ...job(),
+          state: "succeeded",
+          resumable: false,
+          repository: fork,
+        },
+      });
+    }
+    return route.fulfill({
+      status: 404,
+      json: { error: { message: "Fixture route unavailable" } },
+    });
+  });
+
+  await page.goto(`/${owner}/library`);
+  await page
+    .getByRole("button", { name: "Fork repository", exact: true })
+    .click();
+  const destination = page.getByRole("combobox", { name: "Fork owner" });
+  await destination.click();
+  await page.getByRole("option", { name: "Personal", exact: true }).click();
+  await expect(page.getByLabel("Repository name")).toHaveValue("library");
+  await page.getByRole("button", { name: "Create fork", exact: true }).click();
+  await expect(
+    page.getByText("Fork interrupted", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Fork status link" }),
+  ).toHaveCount(0);
+  await page.reload();
+  await expect(destination).toHaveText("Personal");
+  await page.getByRole("button", { name: "Resume fork", exact: true }).click();
+  await expect(page).toHaveURL(/\/user-personal\/library$/);
+  expect(reads).toBeGreaterThan(0);
+});
