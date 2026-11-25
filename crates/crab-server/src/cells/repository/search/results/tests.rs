@@ -142,6 +142,12 @@ async fn mixed_query_kinds_counts_and_scoped_cursors_share_the_authoritative_sna
         ("draft:true", 1),
         ("is:issue OR draft:true", 4),
         ("is:issue is:pr", 0),
+        ("base:main", 3),
+        ("base:mai", 0),
+        ("head:topic-", 3),
+        ("head:Topic-", 0),
+        ("is:pr -head:topic-2", 2),
+        ("is:issue OR (base:main head:\"topic-3\")", 4),
     ] {
         let page = cell
             .client

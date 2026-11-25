@@ -3425,6 +3425,13 @@ issues and PRs. Counts use the same authoritative predicate as results.
 Prefix a term or qualifier with `-` to exclude it. Missing-metadata qualifiers
 cannot be negated. Unknown qualifiers and malformed syntax return 400.
 
+Use `base:release/2.0` for pull requests targeting that exact branch, or
+`head:backport/` for source branches beginning with that prefix. Use short
+branch names with their original case. Repository search suggests both
+qualifiers; they also work in workspace search, grouped conditions, and
+exclusions. A merged pull request remains searchable by its recorded branch
+names after the source branch is deleted.
+
 For organization repositories, open **Types** above the issue list or add
 `type:"Incident report"` to the search. Names match case-insensitively. Use
 `no:type` to find issues without an enabled type. Disabling an issue type

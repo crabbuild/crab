@@ -78,6 +78,8 @@ fn empty_search_offers_qualifiers_before_values_and_state_completes() {
         "assignee:",
         "milestone:",
         "review:",
+        "base:",
+        "head:",
     ] {
         assert!(
             result.items.iter().any(|item| item.value == expected),

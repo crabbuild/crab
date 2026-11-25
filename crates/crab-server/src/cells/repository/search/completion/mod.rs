@@ -266,6 +266,8 @@ fn suggestions(
             ("milestone:", "Filter by repository milestone"),
             ("review:", "Filter review status"),
             ("review-requested:", "Filter pending reviewers"),
+            ("base:", "Filter by the exact target branch"),
+            ("head:", "Filter by the source branch prefix"),
             ("type:", "Filter by issue type"),
             ("in:", "Choose which discussion text to search"),
             ("no:", "Find work with missing metadata"),

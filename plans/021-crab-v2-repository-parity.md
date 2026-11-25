@@ -214,6 +214,8 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   finds outstanding requests by visible team or by the viewer's current team
   memberships. Automatic assignment, organization creation policy and base
   permissions remain open.
+- Repository and workspace discussion search support exact target branch and
+  source branch prefix filters. Repository search suggests both qualifiers.
 - CODEOWNERS evaluates the base-commit policy against the merge-base diff.
   The UI shows owner review coverage, and branch protection rechecks required
   approvals before merge publication. Ready PR creation and transitions out

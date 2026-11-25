@@ -640,6 +640,14 @@ fn scoped_expression(
             Term::ReviewStatus(super::super::reviews::status::Status::None) => super::super::reviews::status::UNREVIEWED.into(),
             Term::ReviewStatus(super::super::reviews::status::Status::ChangesRequested) => super::super::reviews::status::CHANGES_REQUESTED.into(),
             Term::ReviewStatus(status)=> bindings.review.as_ref().ok_or(crate::cells::Error::Invalid("Review source was not bound"))?.predicate(*status),
+            Term::BaseBranch(branch) => {
+                let reference = bindings.text(&format!("refs/heads/{branch}"));
+                format!("d.kind = 1 AND EXISTS (SELECT 1 FROM repository_pulls p WHERE p.number = d.number AND p.base_ref = {reference})")
+            }
+            Term::HeadBranch(prefix) => {
+                let reference = bindings.text(&format!("refs/heads/{prefix}"));
+                format!("d.kind = 1 AND EXISTS (SELECT 1 FROM repository_pulls p WHERE p.number = d.number AND instr(p.head_ref, {reference}) = 1)")
+            }
             Term::Reviewer { kind, name } => {
                 use super::super::reviews::Kind;
                 let direct = bindings.person(name).map_or_else(|| "0".into(), |value| {

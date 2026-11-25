@@ -52,6 +52,8 @@ enum Term {
     Reviewer { kind: reviews::Kind, name: String },
     ReviewStatus(reviews::status::Status),
     TeamReviewRequested(String),
+    BaseBranch(String),
+    HeadBranch(String),
     Count(counts::Filter),
     Text(String),
     Label(Vec<String>),
@@ -362,6 +364,8 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
                 Term::TeamReviewRequested(reviews::teams::name(&unquote(value)?)?)
             }
             "review" => Term::ReviewStatus(reviews::status::Status::parse(&unquote(value)?)?),
+            "base" => Term::BaseBranch(unquote(value)?),
+            "head" => Term::HeadBranch(unquote(value)?),
             "label" => Term::Label(label_names(value)?),
             "reason" => Term::Reason(match unquote(value)?.to_lowercase().as_str() {
                 "completed" => super::issues::lifecycle::Reason::Completed,

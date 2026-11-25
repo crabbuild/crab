@@ -220,6 +220,11 @@ async fn workspace_discussion_search_combines_types_and_rechecks_repository_scop
         h.json(&exact, &bob).await["items"][0]["title"],
         "Release checklist"
     );
+    let branches = format!("{SEARCH}?q=base%3Amain+head%3Afeat&scope=team");
+    let matching = h.json(&branches, &bob).await;
+    let items = matching["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["title"], "Release pipeline");
     assert_eq!(
         h.json(&format!("{SEARCH}?q=author%3A%40me&scope=team"), &alice)
             .await["items"]
@@ -241,6 +246,8 @@ async fn workspace_discussion_search_combines_types_and_rechecks_repository_scop
     );
     let missing = format!("{SEARCH}?q=release&scope=team%2Fmissing&kind=issue");
     assert_eq!(h.json(&exact, &bob).await, h.json(&missing, &bob).await);
+    revoke(&h, "private").await;
+    assert_eq!(h.json(&branches, &bob).await["items"], json!([]));
     h.close().await;
 }
 

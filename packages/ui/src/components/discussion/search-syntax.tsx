@@ -2,6 +2,7 @@ import { Fragment } from "react";
 import {
   CircleDotIcon,
   FlagIcon,
+  GitBranchIcon,
   GitPullRequestIcon,
   HashIcon,
   MessageSquareIcon,
@@ -16,6 +17,8 @@ const icons = new Map<string, LucideIcon>([
   ["is", CircleDotIcon],
   ["state", CircleDotIcon],
   ["draft", GitPullRequestIcon],
+  ["base", GitBranchIcon],
+  ["head", GitBranchIcon],
   ["label", TagIcon],
   ["milestone", FlagIcon],
   ["type", SquareIcon],
