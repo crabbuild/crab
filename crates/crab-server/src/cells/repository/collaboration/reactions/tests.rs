@@ -219,6 +219,7 @@ async fn every_discussion_target_is_scoped_to_its_parent() {
             body: "Review".into(),
             state: ReviewState::Commented,
             commit_oid: "b".repeat(40),
+            comparison: None,
         },
     )
     .await;

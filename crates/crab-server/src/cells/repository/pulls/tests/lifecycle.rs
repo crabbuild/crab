@@ -195,6 +195,7 @@ async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay
                 body: "Review".into(),
                 state: ReviewState::Commented,
                 commit_oid: "b".repeat(40),
+                comparison: None,
             },
         )
         .await,
@@ -300,6 +301,7 @@ async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay
             body: "New review".into(),
             state: ReviewState::Commented,
             commit_oid: "b".repeat(40),
+            comparison: None,
         },
     )
     .await;

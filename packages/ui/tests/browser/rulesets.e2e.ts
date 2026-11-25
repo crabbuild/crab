@@ -119,6 +119,11 @@ test("repository admins manage rulesets and readers see active rules", async ({
   await page.getByLabel("Exclude patterns").fill("release/sandbox");
   await page.getByLabel("Required approving reviews").fill("2");
   await page
+    .getByRole("checkbox", {
+      name: "Require approval of the most recent reviewable push",
+    })
+    .check();
+  await page
     .getByLabel("Restrict who can dismiss pull request reviews")
     .check();
   await page
@@ -168,6 +173,7 @@ test("repository admins manage rulesets and readers see active rules", async ({
     require_merge_queue: true,
     required_checks: ["ci/release"],
     required_approvals: 2,
+    require_last_push_approval: true,
     review_dismissal: [
       { kind: "user", id: releaseReviewer },
       { kind: "team", id: releaseTeam },
@@ -186,6 +192,11 @@ test("repository admins manage rulesets and readers see active rules", async ({
     page.getByRole("heading", { name: "Release branches" }),
   ).toBeVisible();
   await expect(page.getByText("Require 2 approving reviews")).toBeVisible();
+  await expect(
+    page.getByText("Require approval of the most recent reviewable push", {
+      exact: true,
+    }),
+  ).toBeVisible();
   await expect(
     page.getByText("Restrict review dismissal", { exact: true }),
   ).toBeVisible();

@@ -94,7 +94,9 @@ export function MergePanel({
   const requirements = pull.merge_requirements;
   const unresolved = requirements.unresolved_conversations;
   const reviewsSatisfied =
-    (requirements.required_approvals === 0 && !requirements.code_owners) ||
+    (requirements.required_approvals === 0 &&
+      !requirements.code_owners &&
+      !requirements.last_push_approval) ||
     (requirements.changes_requested === 0 &&
       requirements.approvals >= requirements.required_approvals);
   const headBranch = pull.state !== "open" && (
@@ -364,6 +366,22 @@ export function MergePanel({
                 ? `${requirements.changes_requested} current change request${requirements.changes_requested === 1 ? "" : "s"} must be resolved.`
                 : `${Math.max(0, requirements.required_approvals - requirements.approvals)} more approving review${requirements.required_approvals - requirements.approvals === 1 ? " is" : "s are"} required.`}
             </p>
+          )}
+          {!unavailable && requirements.last_push_approval === "pending" && (
+            <p className="merge-blocked-note">
+              The latest push needs approval from a repository writer who did
+              not make that push.
+            </p>
+          )}
+          {!unavailable &&
+            requirements.last_push_approval === "pusher_unavailable" && (
+              <p className="merge-blocked-note">
+                Crab could not verify who made the latest push. Push a new
+                commit before requesting approval.
+              </p>
+            )}
+          {!unavailable && requirements.last_push_approval === "approved" && (
+            <p>The latest push has an independent approval.</p>
           )}
         </div>
       </div>

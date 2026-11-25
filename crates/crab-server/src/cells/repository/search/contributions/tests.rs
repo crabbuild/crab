@@ -255,6 +255,7 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
                     body: String::new(),
                     state: ReviewState::Approved,
                     commit_oid: "b".repeat(40),
+                    comparison: None,
                 }
             )
             .await,

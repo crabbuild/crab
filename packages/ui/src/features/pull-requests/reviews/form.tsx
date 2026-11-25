@@ -210,7 +210,8 @@ export function ReviewChanges({
                 autoFocus
               />
               {pull.review_counts_for_merge === false &&
-                pull.merge_requirements.required_approvals > 0 && (
+                (pull.merge_requirements.required_approvals > 0 ||
+                  pull.merge_requirements.last_push_approval) && (
                   <p className="muted">
                     Required reviews count approvals from repository writers and
                     administrators.

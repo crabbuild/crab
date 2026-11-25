@@ -169,10 +169,23 @@ async fn submit(
     // A consumed draft is handled by its durable receipt, even if the old
     // branch has moved or disappeared since publication.
     let mut source_error = None;
+    let mut approved_comparison = None;
     let source = if saved.version == Some(input.expected) && !saved.comments.is_empty() {
         let record = load_pull(&server, &repo, pull).await?;
         match comparison(&server, &principal, &repo, &record).await {
-            Ok(source) if source.live => Some((source.base_oid, source.head_oid)),
+            Ok(source) if source.live => {
+                if input.state == ReviewState::Approved {
+                    approved_comparison = super::super::last_push::capture(
+                        &server,
+                        &repo,
+                        &record,
+                        &source.head_oid,
+                        Some(&source.base_oid),
+                    )
+                    .await?;
+                }
+                Some((source.base_oid, source.head_oid))
+            }
             Ok(_) => None,
             Err(error) => {
                 source_error = Some(error);
@@ -198,6 +211,7 @@ async fn submit(
                     body: input.body,
                     state: input.state,
                     comparison: source,
+                    approved_comparison,
                     base_revision: input.base_revision,
                 },
             )

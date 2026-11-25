@@ -14,6 +14,7 @@ mod branch_restore;
 mod branch_update;
 mod candidate;
 mod check_history;
+mod last_push;
 mod merged_comparison;
 mod open_comparison;
 mod recent_pushes;
@@ -606,6 +607,7 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
         branch: "main".into(),
         required_approvals: 0,
         required_code_owner_reviews: false,
+        require_last_push_approval: false,
         require_conversation_resolution: false,
         require_up_to_date: false,
         require_merge_queue: false,

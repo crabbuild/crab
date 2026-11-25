@@ -122,6 +122,15 @@ pub(crate) struct PullReviewDecision {
     pub author: RepositoryAuthor,
     pub state: ReviewState,
     pub commit_oid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<ReviewComparison>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReviewComparison {
+    pub head: super::push_attribution::RefVersion,
+    pub base_oid: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -378,6 +387,8 @@ pub(crate) struct CreatePullReviewInput {
     pub body: String,
     pub state: ReviewState,
     pub commit_oid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<ReviewComparison>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_revision: Option<u64>,
 }

@@ -377,6 +377,7 @@ pub(in crate::cells) fn dispatch_read(
     match id {
         recent_pushes::List::ID => invoke_read::<recent_pushes::List>(context, input),
         push_attribution::Verify::ID => invoke_read::<push_attribution::Verify>(context, input),
+        push_attribution::Latest::ID => invoke_read::<push_attribution::Latest>(context, input),
         pull_branch::HasPullForPush::ID => {
             invoke_read::<pull_branch::HasPullForPush>(context, input)
         }

@@ -47,6 +47,7 @@ interface Ruleset {
   require_pull_request: boolean;
   required_approvals: number;
   required_code_owner_reviews: boolean;
+  require_last_push_approval?: boolean;
   require_conversation_resolution: boolean;
   require_up_to_date?: boolean;
   require_merge_queue?: boolean;
@@ -123,6 +124,7 @@ const pullRules = {
   require_pull_request: false,
   required_approvals: 0,
   required_code_owner_reviews: false,
+  require_last_push_approval: false,
   require_conversation_resolution: false,
   require_up_to_date: false,
   require_merge_queue: false,
@@ -412,6 +414,7 @@ function RulesetSummary({
           rule.require_merge_queue ||
           rule.required_approvals > 0 ||
           rule.required_code_owner_reviews ||
+          rule.require_last_push_approval ||
           rule.require_conversation_resolution ||
           rule.required_checks.length > 0 ||
           rule.required_integrations.length > 0) && (
@@ -424,6 +427,9 @@ function RulesetSummary({
           </li>
         )}
         {rule.required_code_owner_reviews && <li>Require code owner review</li>}
+        {rule.require_last_push_approval && (
+          <li>Require approval of the most recent reviewable push</li>
+        )}
         {rule.require_conversation_resolution && (
           <li>Require conversation resolution</li>
         )}
@@ -710,6 +716,15 @@ function RulesetForm({
                 }
               />{" "}
               Require code owner review
+            </label>
+            <label className="flex items-center gap-2">
+              <Checkbox
+                checked={Boolean(rule.require_last_push_approval)}
+                onCheckedChange={(checked) =>
+                  change({ require_last_push_approval: checked === true })
+                }
+              />
+              Require approval of the most recent reviewable push
             </label>
             <label className="flex items-center gap-2">
               <Checkbox

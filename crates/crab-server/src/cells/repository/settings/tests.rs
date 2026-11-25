@@ -17,6 +17,7 @@ fn branch_protections_reopen_the_existing_record_format() {
             branch: "main".into(),
             required_approvals: 2,
             required_code_owner_reviews: false,
+            require_last_push_approval: false,
             require_conversation_resolution: false,
             require_up_to_date: false,
             require_merge_queue: false,
@@ -34,6 +35,7 @@ fn branch_protection_edits_preserve_earlier_record_formats() {
             branch: "main".into(),
             required_approvals: 2,
             required_code_owner_reviews: true,
+            require_last_push_approval: true,
             require_conversation_resolution: true,
             require_up_to_date: true,
             require_merge_queue: true,
@@ -45,6 +47,7 @@ fn branch_protection_edits_preserve_earlier_record_formats() {
             branch: "stable".into(),
             required_approvals: 0,
             required_code_owner_reviews: false,
+            require_last_push_approval: false,
             require_conversation_resolution: false,
             require_up_to_date: false,
             require_merge_queue: false,
@@ -57,6 +60,11 @@ fn branch_protection_edits_preserve_earlier_record_formats() {
         codec::decode(&codec::encode(&rules).unwrap()).unwrap(),
         rules
     );
+
+    rules[0].require_last_push_approval = false;
+    let previous = codec::encode(&rules).unwrap();
+    assert_eq!(&previous[..4], &106_u32.to_be_bytes());
+    assert_eq!(codec::decode(&previous).unwrap(), rules);
 
     rules[0].require_linear_history = false;
     let previous = codec::encode(&rules).unwrap();

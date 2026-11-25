@@ -130,18 +130,25 @@ fn pull_from_rows(
 ) -> crate::cells::Result<PullRecord> {
     let submission = <[u8; 16]>::try_from(result_blob(row, 1)?)
         .map_err(|_| crate::cells::Error::Invalid("repository pull submission ID is invalid"))?;
+    let number = result_u64_from_row(row, 0)?;
+    let comparisons = if decisions.is_empty() {
+        Default::default()
+    } else {
+        review_comparisons(context, number)?
+    };
     let review_decisions = decisions
         .iter()
         .map(|decision| {
+            let review = result_u64_from_row(decision, 0)?;
             Ok(PullReviewDecision {
-                review: result_u64_from_row(decision, 0)?,
+                review,
                 author: author_from_row(decision, 1)?,
                 state: ReviewState::from_code(result_u64_from_row(decision, 4)?)?,
                 commit_oid: result_text(decision, 5)?,
+                comparison: comparisons.get(&review).cloned(),
             })
         })
         .collect::<crate::cells::Result<Vec<_>>>()?;
-    let number = result_u64_from_row(row, 0)?;
     Ok(PullRecord {
         draft: readiness::load(context, number)? == PullReadiness::Draft,
         number,
@@ -165,6 +172,39 @@ fn pull_from_rows(
         created_at_ms: result_u64_from_row(row, 17)?,
         updated_at_ms: result_u64_from_row(row, 18)?,
     })
+}
+
+fn review_comparisons_key(pull: u64) -> String {
+    format!("collaboration/v1/pulls/{pull:016x}/approved-comparisons")
+}
+
+fn review_comparisons(
+    context: &Transaction<'_>,
+    pull: u64,
+) -> crate::cells::Result<std::collections::BTreeMap<u64, ReviewComparison>> {
+    Ok(context
+        .document(&review_comparisons_key(pull))?
+        .unwrap_or_default())
+}
+
+pub(super) fn save_review_comparison(
+    context: &Transaction<'_>,
+    pull: &PullRecord,
+    record: &PullReviewRecord,
+    comparison: ReviewComparison,
+) -> crate::cells::Result<()> {
+    validate_oid(&comparison.base_oid)?;
+    let mut comparisons = std::collections::BTreeMap::new();
+    // Only the current decision for each eligible account can satisfy policy.
+    // Drop superseded and dismissed comparison proofs during the next approval.
+    comparisons.extend(pull.review_decisions.iter().filter_map(|decision| {
+        if same_author(&decision.author, &record.author) {
+            return None;
+        }
+        Some((decision.review, decision.comparison.clone()?))
+    }));
+    comparisons.insert(record.number, comparison);
+    context.put_document(&review_comparisons_key(pull.number), &comparisons)
 }
 
 pub(super) fn author_from_row(

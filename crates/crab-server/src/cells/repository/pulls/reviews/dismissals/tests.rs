@@ -73,6 +73,7 @@ async fn review(cell: &RepositoryCell, name: &str, state: ReviewState) -> PullRe
             state,
             body: "Review".into(),
             commit_oid: "b".repeat(40),
+            comparison: None,
         },
     )
     .await
@@ -259,6 +260,7 @@ async fn protected_branch_policy_versions_and_invalid_states_leave_no_dismissal(
                 branch: "main".into(),
                 required_approvals: 1,
                 required_code_owner_reviews: false,
+                require_last_push_approval: false,
                 require_conversation_resolution: false,
                 require_up_to_date: false,
                 require_merge_queue: false,
@@ -485,6 +487,7 @@ async fn original_review_receipts_replay_without_restoring_a_dismissed_decision(
         state: ReviewState::Approved,
         body: "Original approval".into(),
         commit_oid: "b".repeat(40),
+        comparison: None,
     };
     let identity = crate::app::mutation_identity().unwrap();
     let created = cell
@@ -574,6 +577,7 @@ async fn persisted_protections_override_the_configured_seed_in_both_directions()
                 branch: "main".into(),
                 required_approvals: 1,
                 required_code_owner_reviews: false,
+                require_last_push_approval: false,
                 require_conversation_resolution: false,
                 require_up_to_date: false,
                 require_merge_queue: false,

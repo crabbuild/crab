@@ -427,6 +427,7 @@ impl Harness {
             branch: "main".into(),
             required_approvals: 1,
             required_code_owner_reviews: false,
+            require_last_push_approval: false,
             require_conversation_resolution: false,
             require_up_to_date: false,
             require_merge_queue: false,

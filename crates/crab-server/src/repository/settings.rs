@@ -614,6 +614,7 @@ impl RefPolicy {
                     .to_owned(),
                 required_approvals: 0,
                 required_code_owner_reviews: false,
+                require_last_push_approval: false,
                 require_conversation_resolution: false,
                 require_up_to_date: false,
                 require_merge_queue: false,
@@ -623,6 +624,7 @@ impl RefPolicy {
             });
             rule.required_approvals = rule.required_approvals.max(ruleset.required_approvals);
             rule.required_code_owner_reviews |= ruleset.required_code_owner_reviews;
+            rule.require_last_push_approval |= ruleset.require_last_push_approval;
             rule.require_conversation_resolution |= ruleset.require_conversation_resolution;
             rule.require_up_to_date |= ruleset.require_up_to_date;
             rule.require_merge_queue |= ruleset.require_merge_queue;
@@ -792,6 +794,7 @@ pub(crate) fn protection_record(rule: BranchProtection) -> BranchProtectionRecor
         branch: rule.branch,
         required_approvals: rule.required_approvals,
         required_code_owner_reviews: rule.required_code_owner_reviews,
+        require_last_push_approval: rule.require_last_push_approval,
         require_conversation_resolution: rule.require_conversation_resolution,
         require_up_to_date: rule.require_up_to_date,
         require_merge_queue: rule.require_merge_queue,
@@ -811,6 +814,7 @@ fn branch_protections(settings: BranchProtectionSettings) -> Result<BranchProtec
                 branch: rule.branch,
                 required_approvals: rule.required_approvals,
                 required_code_owner_reviews: rule.required_code_owner_reviews,
+                require_last_push_approval: rule.require_last_push_approval,
                 require_conversation_resolution: rule.require_conversation_resolution,
                 require_up_to_date: rule.require_up_to_date,
                 require_merge_queue: rule.require_merge_queue,

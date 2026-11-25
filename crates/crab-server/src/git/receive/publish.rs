@@ -422,6 +422,7 @@ async fn run_request(
     let plan_id = input.plan_id.clone().or_else(|| {
         if sends_publication_webhook(server, principal, &entry, &request.updates)
             || tracks_issue_closures(server, principal, &request.updates)
+            || super::push_attribution::tracks(server, principal, &request.updates)
         {
             // A ref can be deleted and recreated with identical old and new
             // OIDs. Give an unplanned write its own receipt for this operation.
@@ -1588,8 +1589,8 @@ async fn commit_authorized(
         ))
         .await
     {
-        // Git remains writable when attribution is unavailable. Scheduled
-        // merges cannot follow a publication with missing proof.
+        // Git remains writable when attribution is unavailable. Merge policy
+        // cannot use an unproven publication to meet a review requirement.
         tracing::warn!(repository = %entry.id, ?error, "Git push attribution was not recorded");
     }
     let outcome = artifacts

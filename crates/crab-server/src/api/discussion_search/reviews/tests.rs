@@ -116,6 +116,7 @@ async fn reviewer_filters_resolve_public_handles_and_current_accounts() {
                 body: "Review submitted".into(),
                 state: ReviewState::Commented,
                 commit_oid: "b".repeat(40),
+                comparison: None,
             },
         )
         .await
@@ -358,6 +359,7 @@ async fn real_git_review_transitions_filter_both_list_kinds_with_consistent_roll
                 state: ReviewState::Approved,
                 body: String::new(),
                 commit_oid: advanced.clone(),
+                comparison: None,
             },
         )
         .await

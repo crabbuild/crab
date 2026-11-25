@@ -9,10 +9,13 @@ const CONVERSATION_RULES_FORMAT: usize = 103;
 const UP_TO_DATE_RULES_FORMAT: usize = 104;
 const QUEUE_RULES_FORMAT: usize = 105;
 const LINEAR_HISTORY_RULES_FORMAT: usize = 106;
+const LAST_PUSH_APPROVAL_RULES_FORMAT: usize = 107;
 
 pub(super) fn encode(rules: &[BranchProtectionRecord]) -> Result<Vec<u8>, RecordError> {
     let mut encoder = RecordEncoder::new(MAX_PROTECTION_BYTES)?;
-    let format = if rules.iter().any(|rule| rule.require_linear_history) {
+    let format = if rules.iter().any(|rule| rule.require_last_push_approval) {
+        LAST_PUSH_APPROVAL_RULES_FORMAT
+    } else if rules.iter().any(|rule| rule.require_linear_history) {
         LINEAR_HISTORY_RULES_FORMAT
     } else if rules.iter().any(|rule| rule.require_merge_queue) {
         QUEUE_RULES_FORMAT
@@ -60,13 +63,16 @@ pub(super) fn encode(rules: &[BranchProtectionRecord]) -> Result<Vec<u8>, Record
         if format >= LINEAR_HISTORY_RULES_FORMAT {
             encoder.write_u8(u8::from(rule.require_linear_history))?;
         }
+        if format >= LAST_PUSH_APPROVAL_RULES_FORMAT {
+            encoder.write_u8(u8::from(rule.require_last_push_approval))?;
+        }
     }
     Ok(encoder.finish())
 }
 
 pub(super) fn decode(bytes: &[u8]) -> Result<Vec<BranchProtectionRecord>, RecordError> {
     let mut decoder = RecordDecoder::new(bytes, MAX_PROTECTION_BYTES)?;
-    let format = bounded_count(&mut decoder, LINEAR_HISTORY_RULES_FORMAT)?;
+    let format = bounded_count(&mut decoder, LAST_PUSH_APPROVAL_RULES_FORMAT)?;
     let count = if format >= PROVIDER_RULES_FORMAT {
         bounded_count(&mut decoder, 100)?
     } else {
@@ -99,6 +105,9 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Vec<BranchProtectionRecord>, Record
         if format >= LINEAR_HISTORY_RULES_FORMAT {
             rule.require_linear_history = flag(&mut decoder)?;
         }
+        if format >= LAST_PUSH_APPROVAL_RULES_FORMAT {
+            rule.require_last_push_approval = flag(&mut decoder)?;
+        }
         rules.push(rule);
     }
     decoder.finish()?;
@@ -128,6 +137,7 @@ impl StoredRecord for BranchProtectionRecord {
             branch,
             required_approvals,
             required_code_owner_reviews: false,
+            require_last_push_approval: false,
             require_conversation_resolution: false,
             require_up_to_date: false,
             require_merge_queue: false,

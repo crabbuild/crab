@@ -191,6 +191,7 @@ async fn request_review_cancel_replay_and_refresh_preserve_indexed_participation
         body: "Review comment".into(),
         state: ReviewState::Commented,
         commit_oid: "b".repeat(40),
+        comparison: None,
     };
     write::<CreatePullReview>(&cell, review.clone()).await;
     assert_eq!(
@@ -264,6 +265,7 @@ async fn rebuild_pages_review_history_and_sparse_requests_without_changing_versi
                 body: "Reviewed".into(),
                 state: ReviewState::Commented,
                 commit_oid: "b".repeat(40),
+                comparison: None,
             },
         )
         .await;

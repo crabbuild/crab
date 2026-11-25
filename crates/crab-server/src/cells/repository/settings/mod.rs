@@ -25,6 +25,8 @@ pub(crate) struct BranchProtectionRecord {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub required_code_owner_reviews: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_last_push_approval: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_conversation_resolution: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_up_to_date: bool,
@@ -275,6 +277,7 @@ pub(in crate::cells::repository) fn validate_protections(
             branch: rule.branch.clone(),
             required_approvals: rule.required_approvals,
             required_code_owner_reviews: rule.required_code_owner_reviews,
+            require_last_push_approval: rule.require_last_push_approval,
             require_conversation_resolution: rule.require_conversation_resolution,
             require_up_to_date: rule.require_up_to_date,
             require_merge_queue: rule.require_merge_queue,

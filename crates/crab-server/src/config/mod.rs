@@ -165,6 +165,9 @@ pub struct BranchProtection {
     pub required_code_owner_reviews: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(test, ts(optional = nullable))]
+    pub require_last_push_approval: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(test, ts(optional = nullable))]
     pub require_conversation_resolution: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(test, ts(optional = nullable))]

@@ -138,6 +138,7 @@ async fn review(cell: &RepositoryCell, who: &str, state: ReviewState) {
             body: "Review context".into(),
             state,
             commit_oid: "b".repeat(40),
+            comparison: None,
         },
     )
     .await;

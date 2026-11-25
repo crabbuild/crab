@@ -1293,6 +1293,15 @@ Changing the default branch records a new symbolic HEAD through the ref journal.
 
 Branch protection uses exact short branch names. A configuration can seed version zero; after the first administrative save, the stored object is authoritative across restarts and server instances. Set `require_conversation_resolution` to require resolved review threads.
 
+**Require approval of the most recent reviewable push** is available in exact
+branch protection and in repository and organization branch rulesets. A
+currently eligible writer other than the authenticated pusher must approve
+the current head publication and comparison merge base. The rule also
+applies to fork heads, auto-merge, queued merges, and final publication.
+The merge panel shows whether an independent approval is pending or the
+pusher could not be verified. Older or imported heads without authenticated
+publication evidence need a new push before the rule can be satisfied.
+
 Archived repositories remain readable and searchable. Browser writes, native pushes, and LFS uploads return a read-only error. Native Git and LFS check archive state again immediately before publication.
 
 ### Manage branch and tag rulesets
@@ -1341,7 +1350,7 @@ under the ref and policy leases.
 collection with matching `expected_version`. Each entry contains `id` (UUID),
 `name`, `target` (`branch` or `tag`), `enforcement` (`active` or `disabled`),
 `include`, `exclude`, `restrict_creations`, `restrict_updates`, `restrict_deletions`,
-`require_pull_request`, `required_approvals`, `required_code_owner_reviews`,
+`require_pull_request`, `required_approvals`, `required_code_owner_reviews`, `require_last_push_approval`,
 `require_conversation_resolution`, `require_up_to_date`, `require_merge_queue`, `require_linear_history`,
 `required_checks`, `required_integrations`, and optional `review_dismissal`.
 Branch-only settings must have

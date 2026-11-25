@@ -1,7 +1,5 @@
 use std::collections::BTreeSet;
 
-use crab_read::capsule_protocol::CapsuleRefView;
-
 use super::*;
 use crate::cells::repository::push_attribution::{Authority, RefVersion, Verify, VerifyInput};
 
@@ -33,16 +31,9 @@ pub(super) async fn comparison(
         head.refs().get(&pull.head_ref).map(|oid| Comparison {
             base: base.clone(),
             head: oid.clone(),
-            head_version: ref_version(head, &pull.head_ref),
+            head_version: RefVersion::visible(head, &pull.head_ref),
         })
     }))
-}
-
-fn ref_version(view: &CapsuleRefView, reference: &str) -> Option<RefVersion> {
-    Some(RefVersion {
-        epoch: view.root_snapshot().record().root().ref_epoch().to_owned(),
-        transaction: view.visible_ref_transactions().get(reference)?.clone(),
-    })
 }
 
 pub(super) async fn unchanged(
@@ -53,7 +44,7 @@ pub(super) async fn unchanged(
     let names = BTreeSet::from([reference.to_owned()]);
     let view = source.ref_view_for_refs(&names).await?;
     Ok(view.refs().get(reference) == Some(&head.oid)
-        && ref_version(&view, reference).as_ref() == Some(&head.version))
+        && RefVersion::visible(&view, reference).as_ref() == Some(&head.version))
 }
 
 pub(super) async fn follows(

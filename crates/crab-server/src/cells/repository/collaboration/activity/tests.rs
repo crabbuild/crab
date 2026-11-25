@@ -395,6 +395,7 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
             body: String::new(),
             state: ReviewState::Approved,
             commit_oid: "b".repeat(40),
+            comparison: None,
         },
     )
     .await;

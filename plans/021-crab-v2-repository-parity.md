@@ -15,6 +15,10 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
 - Protected merge checks direct reviewer grants, evaluates same-name statuses
   and check runs together, leases both refs and reconciles with a durable receipt.
   The prior tag's pending records still use their tagged retry contract.
+- Branch protection and branch rulesets can require independent approval of
+  the latest push. A review binds to the verified Git head publication and
+  merge base. The merge panel reports pending approval or missing push
+  attribution, and publication checks the reviewer's current access.
 - Merged pull requests retain access to check runs and commit statuses for
   the exact reviewed head and, when published, the tested candidate. The
   Checks tab separates these commits after squash or rebase and branch

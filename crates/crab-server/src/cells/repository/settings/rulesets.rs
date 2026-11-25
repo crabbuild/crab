@@ -169,6 +169,8 @@ pub(crate) struct Ruleset {
     pub require_pull_request: bool,
     pub required_approvals: u8,
     pub required_code_owner_reviews: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_last_push_approval: bool,
     #[serde(default)]
     pub require_conversation_resolution: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -191,6 +193,7 @@ impl Ruleset {
             || self.require_merge_queue
             || self.required_approvals > 0
             || self.required_code_owner_reviews
+            || self.require_last_push_approval
             || self.require_conversation_resolution
             || !self.required_checks.is_empty()
             || !self.required_integrations.is_empty()
