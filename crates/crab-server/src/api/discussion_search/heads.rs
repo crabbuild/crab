@@ -26,7 +26,15 @@ pub(super) async fn bind(
     let stamp = loop {
         let page = app::query_output(
             cell.client
-                .query::<ListForkRefs>(&cell.target, None, ForkRefInput { after, stamp })
+                .query::<ListForkRefs>(
+                    &cell.target,
+                    None,
+                    ForkRefInput {
+                        after,
+                        stamp,
+                        query: input.query.clone(),
+                    },
+                )
                 .await,
         )?;
         for reference in page.refs {

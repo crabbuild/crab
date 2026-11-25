@@ -152,6 +152,7 @@ async fn input(
             heads::ForkRefInput {
                 after: 0,
                 stamp: None,
+                query: Some(query.into()),
             },
         )
         .await;
@@ -441,6 +442,85 @@ async fn an_empty_repository_needs_no_git_source_and_comment_only_reviews_are_un
             .unwrap(),
         Error::StaleSearch
     ));
+    fixtures::close(&server).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fork_head_discovery_pages_only_globally_required_branches() {
+    let server = fixtures::fixture().await;
+    let cell = server
+        .cells()
+        .unwrap()
+        .repository(server.repositories.values()[0].id)
+        .unwrap();
+    let mut matching = Vec::new();
+    for number in 1..=132 {
+        let base = if number == 1 { "release" } else { "main" };
+        let kind = if number == 132 { "hotfix" } else { "topic" };
+        let head_ref = format!("refs/heads/{kind}-{number}");
+        let fork = Uuid::from_u128(1 + number % 12);
+        assert!(matches!(
+            write::<CreatePull>(
+                &cell,
+                CreatePullInput {
+                    code_owner_requests: Default::default(),
+                    metadata: Default::default(),
+                    draft: false,
+                    submission_id: *Uuid::now_v7().as_bytes(),
+                    author: actor("Alice"),
+                    title: format!("Fork change {number}"),
+                    body: String::new(),
+                    base_ref: format!("refs/heads/{base}"),
+                    head_ref: head_ref.clone(),
+                    head_repository: Some(fork),
+                    base_oid: "a".repeat(40),
+                    head_oid: "b".repeat(40),
+                },
+            )
+            .await,
+            CreatePullOutcome::Created(_)
+        ));
+        if base == "main" && kind == "topic" {
+            matching.push(format!("{fork}:{head_ref}"));
+        }
+    }
+    let query = Some("is:open base:main head:topic status:success".into());
+    let first = read::<heads::ListForkRefs>(
+        &cell,
+        heads::ForkRefInput {
+            after: 0,
+            stamp: None,
+            query: query.clone(),
+        },
+    )
+    .await;
+    let next = read::<heads::ListForkRefs>(
+        &cell,
+        heads::ForkRefInput {
+            after: first.next.unwrap(),
+            stamp: Some(first.stamp),
+            query,
+        },
+    )
+    .await;
+    assert!(next.next.is_none());
+    assert_eq!([first.refs, next.refs].concat(), matching);
+
+    for query in [
+        "(base:main OR status:success) -head:hotfix",
+        "status:success -head:topic",
+    ] {
+        let page = read::<heads::ListForkRefs>(
+            &cell,
+            heads::ForkRefInput {
+                after: 0,
+                stamp: None,
+                query: Some(query.into()),
+            },
+        )
+        .await;
+        assert!(page.refs[0].ends_with(":refs/heads/topic-1"));
+    }
     fixtures::close(&server).await;
 }
 

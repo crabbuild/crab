@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::{Expression, Query, Term};
 use crate::cells::{
     Error, Result,
     application::{Read, SqlValue, Transaction},
@@ -149,6 +150,7 @@ pub(crate) fn fork_ref(qualified: &str) -> Result<(Uuid, &str)> {
 pub(crate) struct ForkRefInput {
     pub after: u64,
     pub stamp: Option<DiscussionStamp>,
+    pub query: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -161,6 +163,39 @@ pub(crate) struct ForkRefPage {
 
 pub(crate) struct ListForkRefs;
 
+fn branch_predicates(expression: &Expression, bindings: &mut Vec<SqlValue>, sql: &mut String) {
+    let (condition, value) = match expression {
+        Expression::Scope { expression, .. } => {
+            return branch_predicates(expression, bindings, sql);
+        }
+        Expression::And(parts) => {
+            for part in parts {
+                branch_predicates(part, bindings, sql);
+            }
+            return;
+        }
+        Expression::Term {
+            value: Term::BaseBranch(branch),
+            ..
+        } => (
+            " AND base_ref = ?",
+            SqlValue::Text(format!("refs/heads/{branch}")),
+        ),
+        Expression::Term {
+            value: Term::HeadBranch(branch),
+            ..
+        } => (
+            " AND instr(head_ref, ?) = 38",
+            SqlValue::Blob(format!("refs/heads/{branch}").into_bytes()),
+        ),
+        // These must be true both for result rows and for state navigation
+        // counts. Branch terms inside OR or NOT do not constrain this scan.
+        _ => return,
+    };
+    sql.push_str(condition);
+    bindings.push(value);
+}
+
 impl Read for ListForkRefs {
     const CLASS: &'static str = repository::CLASS;
     const ID: u32 = 476;
@@ -172,14 +207,20 @@ impl Read for ListForkRefs {
         if input.stamp.is_some_and(|expected| expected != stamp) {
             return Err(Error::StaleSearch);
         }
-        // Merged rows carry the recorded head. Only unmerged rows depend on a
-        // live fork ref, and the document key supports bounded paging.
-        let rows = context.query(
-            "SELECT document,head_ref FROM discussion_index_pull_sources WHERE document>?
-               AND merged_head_oid IS NULL AND instr(head_ref,X'3a')=37
-               ORDER BY document LIMIT ?",
-            &[integer(input.after)?, integer((REF_PAGE + 1) as u64)?],
-        )?;
+        let query = Query::parse(input.query.as_deref()).map_err(Error::Invalid)?;
+        let mut predicates = String::new();
+        let mut bindings = vec![integer(input.after)?];
+        branch_predicates(&query.expression, &mut bindings, &mut predicates);
+        // Merged rows carry the recorded head. Keep live fork discovery ordered
+        // by document. Qualified refs start with a UUID and colon before the
+        // branch prefix, so the branch begins at byte 38 in the blob.
+        let sql = format!(
+            "SELECT document,head_ref FROM discussion_index_pull_sources
+             WHERE document>? AND merged_head_oid IS NULL AND instr(head_ref,X'3a')=37
+             {predicates} ORDER BY document LIMIT ?"
+        );
+        bindings.push(integer((REF_PAGE + 1) as u64)?);
+        let rows = context.query(&sql, &bindings)?;
         let refs = rows
             .rows
             .iter()

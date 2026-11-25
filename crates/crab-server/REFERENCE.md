@@ -4806,6 +4806,10 @@ at least one active approval. Checks and other merge conditions are independent.
 
 Head-dependent filters bind the verified Git source token to a ready immutable
 ref projection and capture current private fork heads from their own repositories.
+When a query requires `base:` or `head:` across all results, fork discovery
+uses the projected exact base or head prefix before reading object storage.
+The same scope covers matching rows and open/closed totals. Mixed Boolean
+queries retain the fork heads needed by every arm.
 Pending reconciliation returns 503 `review_index_pending` with visible retry.
 Source changes and effective rule edits invalidate repository and workspace cursors.
 An empty repository requires no Git manifest. Completed merges use the recorded
