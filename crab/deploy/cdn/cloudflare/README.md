@@ -73,6 +73,11 @@ For rotation, coordinate client updates with the Worker deploy. Replace
 `viewer-token` with a new private file containing 32 random bytes encoded
 as unpadded base64url, then repeat the deploy command.
 
+In qualification builds, Git, capsule, LFS, and xorb reads get up to 30 seconds
+per attempt across range requests, verification, and any permitted native
+restart. Each edge request in these attempts gets up to 10 seconds. Both
+budgets respect the CLI operation timeout.
+
 Use a published Crab v2 repository with a root-authenticated sample and run
 `crab doctor --cdn-probe`. Check that the whole or ranged edge bytes match
 native R2 and that requests for mutable data are denied. Use fresh client

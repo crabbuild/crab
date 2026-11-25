@@ -247,7 +247,15 @@ impl CdnPolicy {
                         full_bytes: 8 * 1024 * 1024,
                         ranged_object_bytes: u64::MAX,
                         range_bytes: 8 * 1024 * 1024,
-                        timeout: Duration::from_secs(5),
+                        // Batched payload reads can queue several cold R2 fills
+                        // and restart at the origin under the same deadline.
+                        timeout: Duration::from_secs(match family {
+                            CdnReadFamily::Git
+                            | CdnReadFamily::Capsule
+                            | CdnReadFamily::Lfs
+                            | CdnReadFamily::Xorb => 30,
+                            CdnReadFamily::ChunkPage | CdnReadFamily::Shard => 5,
+                        }),
                     },
                     None if fixture_build => ReadLimits::FIXTURE,
                     _ => return None,
@@ -274,9 +282,21 @@ mod tests {
         assert!(policy.select_limits(cloudfront, false).is_empty());
         let limits = policy.select_limits(cloudfront, true);
         assert_eq!(limits.len(), CdnReadFamily::ALL.len());
-        for (_, limit) in limits {
+        for (family, limit) in limits {
             assert!(limit.admits(16 * 1024 * 1024, Some(8 * 1024 * 1024)));
             assert!(!limit.admits(16 * 1024 * 1024, None));
+            let expected_seconds = match family {
+                CdnReadFamily::Git
+                | CdnReadFamily::Capsule
+                | CdnReadFamily::Lfs
+                | CdnReadFamily::Xorb => 30,
+                CdnReadFamily::ChunkPage | CdnReadFamily::Shard => 5,
+            };
+            assert_eq!(
+                limit.timeout,
+                Duration::from_secs(expected_seconds),
+                "{family:?}"
+            );
         }
         assert!(
             CdnPolicy {
