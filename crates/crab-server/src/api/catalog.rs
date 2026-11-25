@@ -208,6 +208,7 @@ pub(super) struct VisibleRepository {
     pub(super) repository: Arc<crate::repository::Repository>,
     pub(super) topics: Vec<String>,
     pub(super) team_access: Option<RepositoryAccess>,
+    pub(super) team_access_inherited: bool,
     pub(super) principal: Principal,
     pub(super) organization_owner: bool,
     forking: Option<(bool, crate::catalog::forking::Forking)>,
@@ -231,7 +232,7 @@ pub(super) async fn visible(
 pub(super) async fn visible_matching(
     server: &Server,
     principal: &Principal,
-    team: Option<Uuid>,
+    team: Option<(Uuid, &[Uuid])>,
     mut include: impl FnMut(&crate::repository::Repository) -> bool,
 ) -> app::Result<Vec<VisibleRepository>> {
     let selected: Vec<_> = server
@@ -296,6 +297,7 @@ pub(super) async fn visible_matching(
             .and_then(|grants| grants.get(&repository.id))
             .copied();
         let mut team_access = None;
+        let mut team_access_inherited = false;
         let current = if local_listing && repository.organization.is_none() {
             principal.clone()
         } else if let Some(grants) = &grants {
@@ -311,12 +313,19 @@ pub(super) async fn visible_matching(
             let source = record
                 .access_record(record.forked_from.and_then(|id| grants.get(&id).copied()))
                 .map_err(|error| app::Error::Membership(Box::new(error)))?;
-            if let Some(team) = team {
-                team_access = source
-                    .organization
-                    .as_ref()
-                    .and_then(|access| access.teams.iter().find(|grant| grant.team == team))
-                    .map(|grant| grant.access);
+            if let Some((team, ancestors)) = team
+                && let Some(access) = &source.organization
+            {
+                let direct = access.teams.iter().find(|grant| grant.team == team);
+                let inherited = access
+                    .teams
+                    .iter()
+                    .filter(|grant| ancestors.contains(&grant.team))
+                    .map(|grant| grant.access)
+                    .max();
+                let direct = direct.map(|grant| grant.access);
+                team_access = direct.max(inherited);
+                team_access_inherited = inherited > direct;
             }
             let mut config = repository.config.clone();
             config.members = source.members.clone();
@@ -373,6 +382,7 @@ pub(super) async fn visible_matching(
                 record.visibility.value
             }),
             team_access,
+            team_access_inherited,
         });
     }
     Ok(visible)

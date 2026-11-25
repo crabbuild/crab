@@ -145,11 +145,14 @@ impl Read for FindMembers {
                 return Err(Error::AccessDenied);
             }
             values.push(blob(team));
+            let descendants = teams::DESCENDANT_STEP;
             predicate.push_str(&format!(
                 " AND EXISTS (
-                SELECT 1 FROM organization_team_members m
+                WITH RECURSIVE root(id) AS (SELECT ?), team_tree(root,team) AS (
+                    SELECT id,id FROM root UNION {descendants}
+                ) SELECT 1 FROM team_tree tree JOIN organization_team_members m ON m.team=tree.team
                 JOIN organization_membership_epochs e ON e.actor=o.actor
-                WHERE m.actor=o.actor AND m.team=? AND {}
+                WHERE m.actor=o.actor AND {}
             )",
                 teams::ACTIVE_MEMBERSHIP
             ));

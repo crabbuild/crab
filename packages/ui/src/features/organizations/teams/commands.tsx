@@ -202,13 +202,25 @@ export function TeamFeedback({ commands }: { commands: Commands }) {
     );
   if (!resolved) return null;
   const cancelled = resolved.acknowledgement.outcome === "cancelled";
+  const command = resolved.intent.body.command;
+  const decisionMessages = {
+    approve: "Team request approved.",
+    decline: "Team request declined.",
+    withdraw: "Team request withdrawn.",
+  };
+  const message =
+    command.kind === "propose_hierarchy"
+      ? "Team request sent."
+      : command.kind === "decide_hierarchy"
+        ? decisionMessages[command.decision]
+        : `${resolved.intent.label} completed.`;
   return (
     <Alert className="mb-5" role="status" aria-label="Team submission result">
       <AlertDescription>
         {cancelled
           ? "Submission cancelled. A late request cannot apply this change."
-          : `${resolved.intent.label} completed.`}
-        {!cancelled && resolved.intent.body.command.kind === "create" && (
+          : message}
+        {!cancelled && command.kind === "create" && (
           <>
             {" "}
             <Link
@@ -218,6 +230,20 @@ export function TeamFeedback({ commands }: { commands: Commands }) {
               )}
             >
               Open team
+            </Link>
+          </>
+        )}
+        {!cancelled && command.kind === "propose_hierarchy" && (
+          <>
+            {" "}
+            <Link
+              href={teamHref(
+                resolved.intent.organization,
+                undefined,
+                "requests",
+              )}
+            >
+              View team requests
             </Link>
           </>
         )}

@@ -17,6 +17,7 @@ pub(in crate::cells::organization) fn handles(operation: u32, mutation: bool) ->
                 | GetPolicy::ID
                 | MentionMembers::ID
                 | ResolveReviewTeams::ID
+                | hierarchy_requests::List::ID
         )
     }
 }
@@ -72,10 +73,31 @@ pub(in crate::cells::organization) fn authorize(
     if mutation {
         let request: Request = serde_json::from_value(input.clone())?;
         let allowed = match request.command {
-            Command::Create { .. } => owner || policy(context)?.member_creation,
+            Command::Create { parent, .. } => {
+                (owner || policy(context)?.member_creation)
+                    && hierarchy::can_choose_parent(context, who.actor, owner, parent)?
+            }
             Command::Policy { .. } => owner,
+            Command::Reparent { team, parent, .. } => {
+                (owner || view(context, who.actor, team)?.is_some_and(|view| view.can_manage))
+                    && hierarchy::can_choose_parent(context, who.actor, owner, parent)?
+            }
+            Command::ProposeHierarchy {
+                team, parent, side, ..
+            } => {
+                owner
+                    || view(context, who.actor, side.requesting(team, parent))?
+                        .is_some_and(|view| view.can_manage)
+            }
+            // Each decision checks its exact request and reviewing side inside
+            // the mutation so a vanished or hidden request resolves uniformly.
+            Command::DecideHierarchy { .. } => true,
+            Command::Delete { team, .. } => {
+                owner
+                    || (view(context, who.actor, team)?.is_some_and(|view| view.can_manage)
+                        && !hierarchy::has_children(context, team)?)
+            }
             Command::Edit { team, .. }
-            | Command::Delete { team, .. }
             | Command::Member { team, .. }
             | Command::ReviewRouting { team, .. } => {
                 owner || view(context, who.actor, team)?.is_some_and(|view| view.can_manage)
@@ -87,7 +109,10 @@ pub(in crate::cells::organization) fn authorize(
             Err(Error::AccessDenied)
         };
     }
-    if matches!(operation, List::ID | ResolveReviewTeams::ID) {
+    if matches!(
+        operation,
+        List::ID | ResolveReviewTeams::ID | hierarchy_requests::List::ID
+    ) {
         return Ok(());
     }
     #[derive(Deserialize)]

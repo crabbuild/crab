@@ -95,6 +95,41 @@ test("repository search pages on the server and restores a stale continuation", 
           },
         });
       }
+      const publicQuery =
+        'project props.region:"US East" archived:true fork:only is:public';
+      if (q === publicQuery) {
+        return route.fulfill({
+          json: {
+            repositories: [
+              {
+                ...repo(
+                  after ? "archive-public-two" : "archive-public-one",
+                  true,
+                ),
+                fork: true,
+                visibility: "public",
+              },
+            ],
+            next: after ? null : "visibility-token",
+          },
+        });
+      }
+      if (q === `${publicQuery} sort:created-desc`) {
+        expect(after).toBeNull();
+        return route.fulfill({
+          json: {
+            repositories: [
+              {
+                ...repo("archive-newest", true),
+                fork: true,
+                visibility: "public",
+                created_at_ms: Date.UTC(2026, 0, 15),
+              },
+            ],
+            next: null,
+          },
+        });
+      }
       return route.fulfill({
         json: { repositories: [repo("org-project")], next: null },
       });
@@ -215,5 +250,33 @@ test("repository search pages on the server and restores a stale continuation", 
     page.getByRole("link", { name: "archive-fork", exact: true }),
   ).toBeVisible();
   await expect(page.getByText("Fork", { exact: true })).toBeVisible();
+  await chooseSelectOption(
+    page.getByRole("combobox", { name: "Visibility" }),
+    "public",
+  );
+  await page.getByRole("link", { name: "Next page", exact: true }).click();
+  await expect(
+    page.getByRole("link", { name: "archive-public-two" }),
+  ).toBeVisible();
+  expect(requests.at(-1)?.get("after")).toBe("visibility-token");
+  await chooseSelectOption(
+    page.getByRole("combobox", { name: "Sort repositories" }),
+    "created-desc",
+  );
+  await expect(
+    page.getByRole("link", { name: "archive-newest" }),
+  ).toBeVisible();
+  await expect(search).toHaveValue(
+    'project props.region:"US East" archived:true fork:only is:public sort:created-desc',
+  );
+  await expect(
+    page
+      .getByRole("list", { name: "Repository results" })
+      .getByText("Public", { exact: true }),
+  ).toBeVisible();
+  await expect(page.locator("relative-time")).toHaveAttribute(
+    "datetime",
+    "2026-01-15T00:00:00.000Z",
+  );
   await expectNoAccessibilityViolations(page);
 });

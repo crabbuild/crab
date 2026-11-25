@@ -142,15 +142,15 @@ pub(super) fn active_team_rows(
     include_names: bool,
 ) -> Result<Vec<Vec<SqlValue>>> {
     ensure_ready(context)?;
+    let teams = hierarchy::effective_teams_sql();
     let rows = context.query(
         &format!(
-            "SELECT m.team, t.visibility = 'closed', CASE WHEN ?2 THEN t.name END
-             FROM organization_team_members m
-             JOIN organization_teams t ON t.id=m.team
-             JOIN organization_members o ON o.actor=m.actor
-             JOIN organization_membership_epochs e ON e.actor=o.actor
-             WHERE m.actor=?1 AND t.deleted_at_ms IS NULL AND {ACTIVE_MEMBERSHIP}
-             ORDER BY m.team LIMIT ?3"
+            "WITH RECURSIVE {teams}
+             SELECT t.id, t.visibility = 'closed' AND direct.team IS NOT NULL,
+               CASE WHEN ?2 THEN t.name END
+             FROM effective JOIN organization_teams t ON t.id=effective.team
+             LEFT JOIN direct ON direct.team=t.id
+             ORDER BY t.id LIMIT ?3"
         ),
         &[
             blob(actor),
@@ -256,14 +256,18 @@ pub(super) fn team_members(
     let ids = vec!["?"; teams.len()].join(",");
     let mut params = teams.into_iter().map(blob).collect::<Vec<_>>();
     params.push(SqlValue::Integer((MAX_TEAM_ACCESS_ROWS + 1) as i64));
+    let descendants = hierarchy::DESCENDANT_STEP;
     let rows = context.query(
         &format!(
-            "SELECT m.team,m.actor FROM organization_team_members m
-                 JOIN organization_teams t ON t.id=m.team
+            "WITH RECURSIVE team_tree(root,team) AS (
+                 SELECT id,id FROM organization_teams WHERE id IN ({ids}) AND deleted_at_ms IS NULL
+                 UNION {descendants}
+             ) SELECT DISTINCT tree.root,m.actor FROM team_tree tree
+                 JOIN organization_team_members m ON m.team=tree.team
                  JOIN organization_members o ON o.actor=m.actor
                  JOIN organization_membership_epochs e ON e.actor=o.actor
-                 WHERE m.team IN ({ids}) AND t.deleted_at_ms IS NULL AND {ACTIVE_MEMBERSHIP}
-                 ORDER BY m.team,m.actor LIMIT ?"
+                 WHERE {ACTIVE_MEMBERSHIP}
+                 ORDER BY tree.root,m.actor LIMIT ?"
         ),
         &params,
     )?;
@@ -350,27 +354,32 @@ impl Read for CodeOwnerTeams {
             return Ok(Vec::new());
         }
         ensure_ready(context)?;
+        let teams = vec!["?"; input.teams.len()].join(",");
+        let descendants = hierarchy::DESCENDANT_STEP;
         let approval = if input.approvers.is_empty() {
             "0".to_owned()
         } else {
             let ids = vec!["?"; input.approvers.len()].join(",");
             format!(
-                "EXISTS (SELECT 1 FROM organization_team_members m
+                "EXISTS (SELECT 1 FROM team_tree tree
+                     JOIN organization_team_members m ON m.team=tree.team
                      JOIN organization_members o ON o.actor=m.actor
                      JOIN organization_membership_epochs e ON e.actor=o.actor
-                     WHERE m.team=t.id AND m.actor IN ({ids}) AND {ACTIVE_MEMBERSHIP})"
+                     WHERE tree.root=t.id AND m.actor IN ({ids}) AND {ACTIVE_MEMBERSHIP})"
             )
         };
-        let teams = vec!["?"; input.teams.len()].join(",");
         let params = input
-            .approvers
+            .teams
             .into_iter()
-            .chain(input.teams)
+            .chain(input.approvers)
             .map(blob)
             .collect::<Vec<_>>();
         let rows = context.query(
-            &format!("SELECT t.id, t.name, {approval} FROM organization_teams t
-                      WHERE t.id IN ({teams}) AND t.visibility='closed' AND t.deleted_at_ms IS NULL"),
+            &format!("WITH RECURSIVE requested(id) AS (
+                          SELECT id FROM organization_teams WHERE id IN ({teams})
+                          AND visibility='closed' AND deleted_at_ms IS NULL
+                      ), team_tree(root,team) AS (SELECT id,id FROM requested UNION {descendants})
+                      SELECT t.id,t.name,{approval} FROM requested JOIN organization_teams t ON t.id=requested.id"),
             &params,
         )?;
         rows.rows
@@ -458,15 +467,15 @@ impl Read for GetRepositoryTeamAccess {
             SqlValue::Integer(i64::from(include_names)),
         ];
         params.extend(input.teams.into_iter().map(blob));
+        let effective = hierarchy::effective_teams_sql();
         // Team deletion and an old organization-membership incarnation must not
         // leave a catalog grant usable after the membership has been removed.
         let rows = context.query(
             &format!(
-                "SELECT t.id, CASE WHEN ?2 THEN t.name END FROM organization_teams t
-                 LEFT JOIN organization_team_members m ON m.team=t.id AND m.actor=?1
-                 LEFT JOIN organization_membership_epochs e ON e.actor=m.actor
+                "WITH RECURSIVE {effective}
+                 SELECT t.id, CASE WHEN ?2 THEN t.name END FROM organization_teams t
                  WHERE t.deleted_at_ms IS NULL AND t.id IN ({placeholders})
-                   AND (?1 IS NULL OR (m.role IS NOT NULL AND m.membership_epoch=e.epoch))"
+                   AND (?1 IS NULL OR t.id IN (SELECT team FROM effective))"
             ),
             &params,
         )?;

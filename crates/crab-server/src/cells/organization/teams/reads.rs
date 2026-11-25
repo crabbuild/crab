@@ -6,6 +6,8 @@ pub(crate) struct QueryCursor {
     pub organization: Uuid,
     pub revision: u64,
     pub search: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<Uuid>,
     pub after: Uuid,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -13,6 +15,8 @@ pub(crate) struct QueryCursor {
 pub(crate) struct ListInput {
     pub actor: Uuid,
     pub search: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<Uuid>,
     pub after: Option<QueryCursor>,
     pub limit: u8,
 }
@@ -56,10 +60,16 @@ impl Read for List {
             .is_some_and(|member| member.active && member.role == OrganizationRole::Owner);
         let can_create = owner || policy(context)?.member_creation;
         let search = input.search.to_lowercase();
+        if let Some(parent) = input.parent
+            && view(context, input.actor, parent)?.is_none()
+        {
+            return Err(Error::AccessDenied);
+        }
         if input.after.as_ref().is_some_and(|cursor| {
             cursor.organization != organization.id
                 || cursor.revision != organization.version
                 || cursor.search != search
+                || cursor.parent != input.parent
         }) {
             return Ok(Listing {
                 page: Page::Changed,
@@ -77,27 +87,42 @@ impl Read for List {
         } else {
             SqlValue::Null
         };
-        let rows=context.query(&format!("SELECT t.id,t.name,t.description,t.visibility,t.version,t.created_at_ms,t.updated_at_ms,(SELECT COUNT(*) FROM organization_team_members m JOIN organization_members o ON o.actor=m.actor JOIN organization_membership_epochs e ON e.actor=o.actor WHERE m.team=t.id AND {ACTIVE_MEMBERSHIP}),CASE WHEN s.membership_epoch=se.epoch THEN s.role END FROM organization_teams t LEFT JOIN organization_team_members s ON s.team=t.id AND s.actor=?3 LEFT JOIN organization_membership_epochs se ON se.actor=s.actor WHERE t.deleted_at_ms IS NULL AND instr(t.name_key,?1)>0 AND (?2=1 OR t.visibility='closed' OR (s.role IS NOT NULL AND s.membership_epoch=se.epoch)) AND (?4 IS NULL OR t.name_key>?4) ORDER BY t.name_key LIMIT ?5"),&[SqlValue::Text(search.clone()),SqlValue::Integer(i64::from(owner)),blob(input.actor),after,SqlValue::Integer(i64::from(input.limit)+1)])?;
+        let rows = context.query(
+            &format!("SELECT t.id,t.name,t.description,t.visibility,t.version,t.created_at_ms,t.updated_at_ms,t.parent,
+              (SELECT COUNT(*) FROM organization_team_members m JOIN organization_members o ON o.actor=m.actor
+                JOIN organization_membership_epochs e ON e.actor=o.actor WHERE m.team=t.id AND {ACTIVE_MEMBERSHIP}),
+              CASE WHEN s.membership_epoch=se.epoch THEN s.role END
+              FROM organization_teams t LEFT JOIN organization_team_members s ON s.team=t.id AND s.actor=?3
+              LEFT JOIN organization_membership_epochs se ON se.actor=s.actor
+              WHERE t.deleted_at_ms IS NULL AND instr(t.name_key,?1)>0
+                AND (?2=1 OR t.visibility='closed' OR (s.role IS NOT NULL AND s.membership_epoch=se.epoch))
+                AND (?4 IS NULL OR t.name_key>?4) AND (?6 IS NULL OR t.parent=?6)
+              ORDER BY t.name_key LIMIT ?5"),
+            &[SqlValue::Text(search.clone()),SqlValue::Integer(i64::from(owner)),blob(input.actor),after,
+              SqlValue::Integer(i64::from(input.limit)+1), input.parent.map_or(SqlValue::Null, blob)],
+        )?;
         let mut items = rows
             .rows
             .iter()
             .map(|row| {
-                if row.len() != 9 {
+                if row.len() != 10 {
                     return Err(Error::Invalid("team summary is invalid"));
                 }
-                let team = team_row(&row[..7])?;
-                let role = if row[8] == SqlValue::Null {
+                let team = team_row(&row[..8])?;
+                let role = if row[9] == SqlValue::Null {
                     None
                 } else {
-                    Some(Role::parse(&text(&row[8])?)?)
+                    Some(Role::parse(&text(&row[9])?)?)
                 };
                 Ok(Summary {
                     view: View {
                         team,
                         role,
                         can_manage: owner || role == Some(Role::Maintainer),
+                        ancestors: None,
+                        tree_version: None,
                     },
-                    members: uint(&row[7])?,
+                    members: uint(&row[8])?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -108,6 +133,7 @@ impl Read for List {
                 organization: organization.id,
                 revision: organization.version,
                 search,
+                parent: input.parent,
                 after: item.view.team.id,
             })
         } else {
@@ -130,7 +156,18 @@ impl Read for Get {
     type Input = Key;
     type Output = Option<View>;
     fn execute(context: &mut Transaction<'_>, input: Key) -> Result<Self::Output> {
-        view(context, input.actor, input.team)
+        let Some(mut team) = view(context, input.actor, input.team)? else {
+            return Ok(None);
+        };
+        if team.team.parent.is_some() {
+            let mut ancestors = hierarchy::ancestors(context, input.team)?;
+            ancestors.retain(|id| *id != input.team);
+            team.ancestors = Some(ancestors);
+        }
+        if hierarchy::has_children(context, input.team)? {
+            team.tree_version = Some(record(context)?.ok_or(Error::NotInitialized)?.version);
+        }
+        Ok(Some(team))
     }
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -182,8 +219,15 @@ fn people(
     let after = input
         .after
         .map_or(SqlValue::Null, |cursor| blob(cursor.after));
+    let descendants = hierarchy::DESCENDANT_STEP;
     let query=match collection {
-        Collection::Members=>format!("SELECT m.actor,m.role,m.version FROM organization_team_members m JOIN organization_members o ON o.actor=m.actor JOIN organization_membership_epochs e ON e.actor=o.actor WHERE m.team=?1 AND {ACTIVE_MEMBERSHIP} AND (?2 IS NULL OR m.actor>?2) ORDER BY m.actor LIMIT ?3"),
+        Collection::Members=>format!("WITH RECURSIVE team_tree(root,team) AS (SELECT ?1,?1 UNION {descendants})
+            SELECT m.actor, COALESCE(MAX(CASE WHEN m.team=?1 THEN m.role END),'member'),
+                COALESCE(MAX(CASE WHEN m.team=?1 THEN m.version END),0)
+            FROM team_tree tree JOIN organization_team_members m ON m.team=tree.team
+            JOIN organization_members o ON o.actor=m.actor JOIN organization_membership_epochs e ON e.actor=o.actor
+            WHERE {ACTIVE_MEMBERSHIP} AND (?2 IS NULL OR m.actor>?2)
+            GROUP BY m.actor ORDER BY m.actor LIMIT ?3"),
         Collection::Candidates=>"SELECT o.actor,CASE WHEN m.membership_epoch=e.epoch THEN m.role END,COALESCE(m.version,0) FROM organization_members o JOIN organization_membership_epochs e ON e.actor=o.actor LEFT JOIN organization_team_members m ON m.actor=o.actor AND m.team=?1 WHERE o.active=1 AND (?2 IS NULL OR o.actor>?2) ORDER BY o.actor LIMIT ?3".into(),
     };
     let rows = context.query(
@@ -321,9 +365,15 @@ impl Read for MentionMembers {
         }
         let revision = record(context)?.ok_or(Error::NotInitialized)?.version;
         let mut recipients = Vec::new();
+        let teams = hierarchy::effective_teams_sql();
+        let query = format!("WITH RECURSIVE {teams} SELECT 1 FROM effective WHERE team=?2");
         for candidate in candidates {
             actor(candidate)?;
-            if membership(context, input.team, candidate)?.role.is_some() {
+            if !context
+                .query(&query, &[blob(candidate), blob(input.team)])?
+                .rows
+                .is_empty()
+            {
                 recipients.push(candidate);
             }
         }

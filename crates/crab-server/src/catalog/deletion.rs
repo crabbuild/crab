@@ -87,6 +87,9 @@ impl CatalogDocument {
                 || entry.deleted_at_ms == 0
                 || entry.deleted_at_ms > 9_007_199_254_740_991
                 || record.placement_generation == 0
+                || record
+                    .created_at_ms
+                    .is_some_and(|time| time > crate::app::MAX_NUMBER)
                 || record.ownership_epoch != record.name_version()
                 || record.application != RepositoryApplicationState::CellReady
                 || record.transfer.is_some()

@@ -8,6 +8,7 @@ async fn cancellation_and_change_serialize_to_one_permanent_outcome() {
         let input = request(
             f.bob,
             Command::Create {
+                parent: None,
                 name: format!("Concurrent {index}"),
                 description: String::new(),
                 visibility: Visibility::Secret,
@@ -39,6 +40,7 @@ async fn cancellation_and_change_serialize_to_one_permanent_outcome() {
         assert_eq!(visible.is_ok(), matches!(applied, Outcome::Applied { .. }));
         let mut changed = input.clone();
         changed.command = Command::Create {
+            parent: None,
             name: "Changed payload".into(),
             description: String::new(),
             visibility: Visibility::Closed,
@@ -58,6 +60,7 @@ async fn cancellation_fences_late_writes_and_preserves_actor_ownership_after_rem
     let input = request(
         f.bob,
         Command::Create {
+            parent: None,
             name: "Cancelled draft".into(),
             description: String::new(),
             visibility: Visibility::Secret,
@@ -122,6 +125,7 @@ async fn terminal_rejections_fence_delayed_transports_after_mutable_precondition
     let original = request(
         f.bob,
         Command::Create {
+            parent: None,
             name: "Reserved".into(),
             description: String::new(),
             visibility: Visibility::Secret,
@@ -142,6 +146,7 @@ async fn terminal_rejections_fence_delayed_transports_after_mutable_precondition
         request(
             f.owner,
             Command::Delete {
+                hierarchy_version: None,
                 team: existing,
                 version: 1,
             },

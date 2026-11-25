@@ -8,8 +8,43 @@ pub(super) struct Query {
     pub terms: Vec<Term>,
     pub archived: Option<bool>,
     pub fork: Option<bool>,
+    pub visibility: Option<Visibility>,
+    pub order: Order,
     topics: Vec<(String, bool)>,
     topic_counts: Vec<(u16, u16, bool)>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum Order {
+    #[default]
+    Relevance,
+    NameAsc,
+    NameDesc,
+    CreatedAsc,
+    CreatedDesc,
+}
+
+impl Order {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value.to_ascii_lowercase().as_str() {
+            "relevance" => Self::Relevance,
+            "name-asc" => Self::NameAsc,
+            "name-desc" => Self::NameDesc,
+            "created-asc" => Self::CreatedAsc,
+            "created-desc" => Self::CreatedDesc,
+            _ => return None,
+        })
+    }
+
+    fn value(self) -> &'static [u8] {
+        match self {
+            Self::Relevance => b"relevance",
+            Self::NameAsc => b"name-asc",
+            Self::NameDesc => b"name-desc",
+            Self::CreatedAsc => b"created-asc",
+            Self::CreatedDesc => b"created-desc",
+        }
+    }
 }
 
 const INVALID_TERM: &str = "Use props.NAME:VALUE and quote values containing spaces";
@@ -21,6 +56,8 @@ impl Query {
         let mut terms = Vec::new();
         let mut archived = None;
         let mut fork = None;
+        let mut visibility = None;
+        let mut order = None;
         let mut topics = Vec::new();
         let mut topic_counts = Vec::new();
         while !source.trim_start().is_empty() {
@@ -32,6 +69,29 @@ impl Query {
                 .strip_prefix('-')
                 .map_or((false, word), |term| (true, term));
             if let Some((name, value)) = qualified.split_once(':') {
+                if name.eq_ignore_ascii_case("is") {
+                    let public = match value.to_ascii_lowercase().as_str() {
+                        "public" => true,
+                        "private" => false,
+                        _ => return Err(Error::Invalid("Use is:public or is:private")),
+                    };
+                    let selected = if public != exclude {
+                        Visibility::Public
+                    } else {
+                        Visibility::Private
+                    };
+                    require_value(&mut visibility, selected)?;
+                    source = end;
+                    continue;
+                }
+                if name.eq_ignore_ascii_case("sort") {
+                    let selected = Order::parse(value).filter(|_| !exclude).ok_or(Error::Invalid(
+                        "Use sort:relevance, sort:name-asc, sort:name-desc, sort:created-asc, or sort:created-desc",
+                    ))?;
+                    require_value(&mut order, selected)?;
+                    source = end;
+                    continue;
+                }
                 if name.eq_ignore_ascii_case("topic") {
                     let value = value.to_ascii_lowercase();
                     if !valid_topic(&value) {
@@ -140,6 +200,8 @@ impl Query {
             terms,
             archived,
             fork,
+            visibility,
+            order: order.unwrap_or_default(),
             topics,
             topic_counts,
         })
@@ -149,6 +211,8 @@ impl Query {
         !self.terms.is_empty()
             || self.archived.is_some()
             || self.fork.is_some()
+            || self.visibility.is_some()
+            || self.order != Order::Relevance
             || !self.topics.is_empty()
             || !self.topic_counts.is_empty()
     }
@@ -201,6 +265,11 @@ impl Query {
             digest.update(b"crab-server.repository-state.v1");
             digest.update(&[state(self.archived), state(self.fork)]);
         }
+        if self.visibility.is_some() || self.order != Order::Relevance {
+            digest.update(b"crab-server.repository-order.v1");
+            digest.update(&[state(self.visibility.map(Visibility::is_public))]);
+            hash_field(&mut digest, self.order.value());
+        }
         if !self.topics.is_empty() || !self.topic_counts.is_empty() {
             digest.update(b"crab-server.repository-topics.v1");
             digest.update(&(self.topics.len() as u64).to_le_bytes());
@@ -251,10 +320,10 @@ fn state(value: Option<bool>) -> u8 {
     value.map_or(0, |value| u8::from(value) + 1)
 }
 
-fn require_value(filter: &mut Option<bool>, value: bool) -> Result<()> {
+fn require_value<T: PartialEq + Copy>(filter: &mut Option<T>, value: T) -> Result<()> {
     if filter.is_some_and(|previous| previous != value) {
         return Err(Error::Invalid(
-            "Choose one value for each repository state filter",
+            "Choose one value for each repository filter or sort",
         ));
     }
     *filter = Some(value);

@@ -1,7 +1,7 @@
 CREATE TABLE organization_identity (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     id BLOB NOT NULL CHECK (length(id) = 16),
-    format INTEGER NOT NULL CHECK (format = 2),
+    format INTEGER NOT NULL CHECK (format = 3),
     app_revision INTEGER NOT NULL DEFAULT 0 CHECK (app_revision BETWEEN 0 AND 9007199254740991)
 ) STRICT;
 CREATE TABLE organization_details (

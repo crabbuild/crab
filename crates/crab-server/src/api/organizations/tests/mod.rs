@@ -17,6 +17,7 @@ mod offboarding;
 mod repositories;
 mod repository_access;
 mod review_workload;
+mod team_hierarchy;
 
 #[tokio::test]
 async fn people_search_filters_current_profiles_roles_teams_and_invitation_status() {

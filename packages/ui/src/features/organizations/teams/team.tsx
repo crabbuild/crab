@@ -18,6 +18,7 @@ import { IdentityGroupSettings } from "./identity-group";
 import { useTeamRead } from "./read";
 import { TeamReviewRouting } from "./review-routing";
 import { RepositoryGrant } from "./repository-grant";
+import { ChildTeams, HierarchyRequests, HierarchySettings } from "./hierarchy";
 
 export function TeamDetail({
   organization,
@@ -37,7 +38,11 @@ export function TeamDetail({
   commands: Commands;
 }) {
   const [draft, setDraft] = useState<Draft | null>(null);
-  const [deleting, setDeleting] = useState(false);
+  const [addingChild, setAddingChild] = useState(false);
+  const [deleting, setDeleting] = useState<{
+    version: number;
+    hierarchy_version?: number;
+  }>();
   const [grantSaved, setGrantSaved] = useState<{
     name: string;
     count: number;
@@ -47,6 +52,11 @@ export function TeamDetail({
     commands.generation,
   );
   const current = state.data;
+  const parentId = current?.team.parent;
+  const parent = useTeamRead<TeamView>(
+    parentId ? `/api/organizations/${organization}/teams/${parentId}` : null,
+    commands.generation,
+  );
   const resolution = commands.resolved;
   const command =
     resolution?.intent.actor === actor &&
@@ -78,7 +88,10 @@ export function TeamDetail({
   const settings = tab === "settings";
   const repositories = tab === "repositories";
   const projects = tab === "projects";
-  const members = !settings && !repositories && !projects;
+  const children = tab === "children";
+  const requests = tab === "requests";
+  const members =
+    !settings && !repositories && !projects && !children && !requests;
   const failure = commands.failure?.body.command;
   const conflict =
     commands.conflict && failure?.kind === "edit" && failure.team === team;
@@ -119,6 +132,17 @@ export function TeamDetail({
                     {view.team.description}
                   </p>
                 )}
+                {view.team.parent && (
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    Parent team{" "}
+                    <Link
+                      href={teamHref(organization, view.team.parent)}
+                      className="wrap-anywhere font-medium"
+                    >
+                      {parent.data?.team.name ?? "View parent team"}
+                    </Link>
+                  </p>
+                )}
               </div>
               <Button variant="outline" onClick={state.retry}>
                 Refresh team
@@ -152,6 +176,24 @@ export function TeamDetail({
                   Projects
                 </Link>
               </Button>
+              <Button asChild variant={children ? "secondary" : "ghost"}>
+                <Link
+                  href={teamHref(organization, team, "children")}
+                  aria-current={children ? "page" : undefined}
+                >
+                  Child teams
+                </Link>
+              </Button>
+              {view.can_manage && (
+                <Button asChild variant={requests ? "secondary" : "ghost"}>
+                  <Link
+                    href={teamHref(organization, team, "requests")}
+                    aria-current={requests ? "page" : undefined}
+                  >
+                    Requests
+                  </Link>
+                </Button>
+              )}
               {view.can_manage && (
                 <Button asChild variant={settings ? "secondary" : "ghost"}>
                   <Link
@@ -201,6 +243,45 @@ export function TeamDetail({
                 url={url}
                 scope={{ target: { team }, canLink: view.can_manage }}
               />
+            ) : requests ? (
+              <HierarchyRequests
+                organization={organization}
+                actor={actor}
+                team={team}
+                commands={commands}
+              />
+            ) : children ? (
+              <div className="grid gap-4">
+                {view.can_manage && view.team.visibility === "closed" && (
+                  <>
+                    <Button
+                      type="button"
+                      className="w-fit"
+                      variant="outline"
+                      aria-expanded={addingChild}
+                      onClick={() => setAddingChild(!addingChild)}
+                    >
+                      {addingChild
+                        ? "Close child team picker"
+                        : "Add a child team"}
+                    </Button>
+                    {addingChild && (
+                      <HierarchySettings
+                        organization={organization}
+                        actor={actor}
+                        team={view.team}
+                        side="parent"
+                        commands={commands}
+                      />
+                    )}
+                  </>
+                )}
+                <ChildTeams
+                  organization={organization}
+                  team={team}
+                  generation={commands.generation}
+                />
+              </div>
             ) : members ? (
               <TeamMembers
                 organization={organization}
@@ -286,6 +367,30 @@ export function TeamDetail({
                     Save team changes
                   </Button>
                 </form>
+                {view.team.visibility === "closed" && (
+                  <>
+                    <Separator />
+                    <HierarchySettings
+                      key={view.team.parent ?? "root"}
+                      organization={organization}
+                      actor={actor}
+                      team={view.team}
+                      side="child"
+                      currentParent={
+                        view.team.parent
+                          ? {
+                              id: view.team.parent,
+                              name:
+                                parent.data?.team.name ?? "Current parent team",
+                              version: parent.data?.team.version ?? 0,
+                              canManage: parent.data?.can_manage ?? false,
+                            }
+                          : null
+                      }
+                      commands={commands}
+                    />
+                  </>
+                )}
                 {owner && (
                   <>
                     <Separator />
@@ -303,56 +408,72 @@ export function TeamDetail({
                   team={team}
                   commands={commands}
                 />
-                <Separator />
-                <section className="flex flex-col items-start gap-3">
-                  <h3 className="font-semibold">Delete this team</h3>
-                  <p className="text-sm text-muted-foreground">
-                    Deleting a team removes its memberships. A new team with the
-                    same name will start with new memberships.
-                  </p>
-                  {!deleting ? (
-                    <Button
-                      variant="destructive"
-                      disabled={commands.locked}
-                      onClick={() => setDeleting(true)}
-                    >
-                      Delete team
-                    </Button>
-                  ) : (
-                    <Alert variant="destructive">
-                      <AlertDescription>
-                        <p>Delete {view.team.name}? This cannot be undone.</p>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          <Button
-                            variant="destructive"
-                            disabled={commands.locked}
-                            onClick={() =>
-                              void commands.submit(
-                                organization,
-                                actor,
-                                {
-                                  kind: "delete",
-                                  team,
-                                  version: view.team.version,
-                                },
-                                "Delete team",
-                              )
-                            }
-                          >
-                            Confirm delete team
-                          </Button>
-                          <Button
-                            variant="outline"
-                            disabled={commands.locked}
-                            onClick={() => setDeleting(false)}
-                          >
-                            Keep team
-                          </Button>
-                        </div>
-                      </AlertDescription>
-                    </Alert>
-                  )}
-                </section>
+                {(owner || view.tree_version === undefined) && (
+                  <>
+                    <Separator />
+                    <section className="flex flex-col items-start gap-3">
+                      <h3 className="font-semibold">Delete this team</h3>
+                      <p className="text-sm text-muted-foreground">
+                        {view.tree_version === undefined
+                          ? "Deleting this team removes its memberships and repository grants."
+                          : "Deleting this team also deletes all of its child teams and their grants."}
+                      </p>
+                      {!deleting ? (
+                        <Button
+                          variant="destructive"
+                          disabled={commands.locked}
+                          onClick={() =>
+                            setDeleting({
+                              version: view.team.version,
+                              hierarchy_version: view.tree_version,
+                            })
+                          }
+                        >
+                          Delete team
+                        </Button>
+                      ) : (
+                        <Alert variant="destructive">
+                          <AlertDescription>
+                            <p>
+                              Delete {view.team.name}
+                              {deleting.hierarchy_version === undefined
+                                ? ""
+                                : " and all of its child teams"}
+                              ? This cannot be undone.
+                            </p>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              <Button
+                                variant="destructive"
+                                disabled={commands.locked}
+                                onClick={() =>
+                                  void commands.submit(
+                                    organization,
+                                    actor,
+                                    {
+                                      kind: "delete",
+                                      team,
+                                      ...deleting,
+                                    },
+                                    "Delete team",
+                                  )
+                                }
+                              >
+                                Confirm delete team
+                              </Button>
+                              <Button
+                                variant="outline"
+                                disabled={commands.locked}
+                                onClick={() => setDeleting(undefined)}
+                              >
+                                Keep team
+                              </Button>
+                            </div>
+                          </AlertDescription>
+                        </Alert>
+                      )}
+                    </section>
+                  </>
+                )}
               </div>
             ) : (
               <p className="text-sm text-muted-foreground">

@@ -16,6 +16,9 @@ pub(crate) enum Command {
         name: String,
         description: String,
         visibility: Visibility,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        parent: Option<Uuid>,
     },
     Edit {
         team: Uuid,
@@ -27,6 +30,25 @@ pub(crate) enum Command {
     Delete {
         team: Uuid,
         version: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        hierarchy_version: Option<u64>,
+    },
+    Reparent {
+        team: Uuid,
+        version: u64,
+        parent: Option<Uuid>,
+    },
+    ProposeHierarchy {
+        team: Uuid,
+        parent: Uuid,
+        version: u64,
+        side: hierarchy_requests::Side,
+    },
+    DecideHierarchy {
+        team: Uuid,
+        request: Uuid,
+        decision: hierarchy_requests::Decision,
     },
     Member {
         team: Uuid,
@@ -59,6 +81,8 @@ pub(crate) enum Outcome {
     Conflict,
     InvalidName,
     InvalidDescription,
+    InvalidParent,
+    NestedVisibility,
     InvalidRouting,
     InvalidRoutingExclusions,
     NameTaken,
@@ -148,7 +172,8 @@ impl Mutation for Change {
                 name,
                 description,
                 visibility,
-            } => create(context, &input, name, description, *visibility)?,
+                parent,
+            } => create(context, &input, name, description, *visibility, *parent)?,
             Command::Edit {
                 team,
                 version,
@@ -164,7 +189,27 @@ impl Mutation for Change {
                 description,
                 *visibility,
             )?,
-            Command::Delete { team, version } => delete(context, input.actor, *team, *version)?,
+            Command::Delete {
+                team,
+                version,
+                hierarchy_version,
+            } => delete(context, input.actor, *team, *version, *hierarchy_version)?,
+            Command::Reparent {
+                team,
+                version,
+                parent,
+            } => reparent(context, input.actor, *team, *version, *parent)?,
+            Command::ProposeHierarchy {
+                team,
+                parent,
+                version,
+                side,
+            } => hierarchy_requests::propose(context, &input, *team, *parent, *version, *side)?,
+            Command::DecideHierarchy {
+                team,
+                request,
+                decision,
+            } => hierarchy_requests::decide(context, input.actor, *team, *request, *decision)?,
             Command::Member {
                 team,
                 member,
@@ -210,6 +255,7 @@ fn create(
     name: &str,
     description: &str,
     visibility: Visibility,
+    parent: Option<Uuid>,
 ) -> Result<Outcome> {
     if !context
         .query(
@@ -224,8 +270,11 @@ fn create(
     if taken(context, name, input.request_id)? {
         return Ok(Outcome::NameTaken);
     }
+    if !hierarchy::valid_parent(context, input.request_id, visibility, parent)? {
+        return Ok(Outcome::InvalidParent);
+    }
     let epoch = membership_epoch(context, input.actor)?;
-    context.query("INSERT INTO organization_teams(id,name,name_key,description,visibility,version,created_at_ms,updated_at_ms) VALUES (?,?,?,?,?,1,?,?)",&[blob(input.request_id),SqlValue::Text(name.into()),SqlValue::Text(name.to_lowercase()),SqlValue::Text(description.into()),SqlValue::Text(visibility.name().into()),SqlValue::Integer(context.now_ms()),SqlValue::Integer(context.now_ms())])?;
+    context.query("INSERT INTO organization_teams(id,name,name_key,description,visibility,parent,version,created_at_ms,updated_at_ms) VALUES (?,?,?,?,?,?,1,?,?)",&[blob(input.request_id),SqlValue::Text(name.into()),SqlValue::Text(name.to_lowercase()),SqlValue::Text(description.into()),SqlValue::Text(visibility.name().into()),parent.map_or(SqlValue::Null,blob),SqlValue::Integer(context.now_ms()),SqlValue::Integer(context.now_ms())])?;
     context.query("INSERT INTO organization_team_members(team,actor,membership_epoch,role,version) VALUES (?,?,?,'maintainer',1)",&[blob(input.request_id),blob(input.actor),integer(epoch)?])?;
     advance(
         context,
@@ -256,23 +305,85 @@ fn edit(
     if taken(context, name, id)? {
         return Ok(Outcome::NameTaken);
     }
+    if visibility == Visibility::Secret
+        && (old.parent.is_some() || hierarchy::has_children(context, id)?)
+    {
+        return Ok(Outcome::NestedVisibility);
+    }
     if old.name == name && old.description == description && old.visibility == visibility {
         return Ok(Outcome::Applied { id });
     }
     context.query("UPDATE organization_teams SET name=?,name_key=?,description=?,visibility=?,version=?,updated_at_ms=MAX(updated_at_ms,?) WHERE id=?",&[SqlValue::Text(name.into()),SqlValue::Text(name.to_lowercase()),SqlValue::Text(description.into()),SqlValue::Text(visibility.name().into()),integer(next(version)?)?,SqlValue::Integer(context.now_ms()),blob(id)])?;
+    if visibility == Visibility::Secret {
+        hierarchy_requests::discard_for_team(context, id)?;
+    }
     advance(context, who, Action::TeamEdited { team: id })?;
     Ok(Outcome::Applied { id })
 }
-fn delete(context: &Transaction<'_>, who: Uuid, id: Uuid, version: u64) -> Result<Outcome> {
+pub(super) fn reparent(
+    context: &Transaction<'_>,
+    who: Uuid,
+    id: Uuid,
+    version: u64,
+    parent: Option<Uuid>,
+) -> Result<Outcome> {
     let Some(old) = team(context, id)? else {
         return Ok(Outcome::Missing);
     };
     if old.version != version {
         return Ok(Outcome::Conflict);
     }
+    if old.parent != parent {
+        if !hierarchy::valid_parent(context, id, old.visibility, parent)? {
+            return Ok(Outcome::InvalidParent);
+        }
+        context.query(
+            "UPDATE organization_teams SET parent=?,version=?,updated_at_ms=MAX(updated_at_ms,?) WHERE id=?",
+            &[parent.map_or(SqlValue::Null, blob), integer(next(version)?)?, SqlValue::Integer(context.now_ms()), blob(id)],
+        )?;
+        context.query(
+            "DELETE FROM organization_team_hierarchy_requests WHERE child=?",
+            &[blob(id)],
+        )?;
+        advance(context, who, Action::TeamEdited { team: id })?;
+    }
+    Ok(Outcome::Applied { id })
+}
+
+fn delete(
+    context: &Transaction<'_>,
+    who: Uuid,
+    id: Uuid,
+    version: u64,
+    hierarchy_version: Option<u64>,
+) -> Result<Outcome> {
+    let Some(old) = team(context, id)? else {
+        return Ok(Outcome::Missing);
+    };
+    if old.version != version {
+        return Ok(Outcome::Conflict);
+    }
+    if (hierarchy_version.is_some() || hierarchy::has_children(context, id)?)
+        && record(context)?.map(|org| org.version) != hierarchy_version
+    {
+        return Ok(Outcome::Conflict);
+    }
     // Tombstones preserve references and original submissions. A new team with
     // the same name has a different UUID and cannot inherit these memberships.
-    context.query("UPDATE organization_teams SET version=?,updated_at_ms=MAX(updated_at_ms,?),deleted_at_ms=MAX(updated_at_ms,?) WHERE id=?",&[integer(next(version)?)?,SqlValue::Integer(context.now_ms()),SqlValue::Integer(context.now_ms()),blob(id)])?;
+    context.query(
+        "WITH RECURSIVE tree(id) AS (
+            SELECT ?1 UNION SELECT t.id FROM organization_teams t
+            JOIN tree ON t.parent=tree.id WHERE t.deleted_at_ms IS NULL
+         ) UPDATE organization_teams SET version=version+1,updated_at_ms=MAX(updated_at_ms,?2),
+           deleted_at_ms=MAX(updated_at_ms,?2) WHERE id IN (SELECT id FROM tree)",
+        &[blob(id), SqlValue::Integer(context.now_ms())],
+    )?;
+    context.query(
+        "DELETE FROM organization_team_hierarchy_requests
+         WHERE child IN (SELECT id FROM organization_teams WHERE deleted_at_ms IS NOT NULL)
+            OR parent IN (SELECT id FROM organization_teams WHERE deleted_at_ms IS NOT NULL)",
+        &[],
+    )?;
     advance(context, who, Action::TeamDeleted { team: id })?;
     Ok(Outcome::Applied { id })
 }
@@ -371,6 +482,9 @@ impl Mutation for Cancel {
             }
             Command::Edit { team, .. }
             | Command::Delete { team, .. }
+            | Command::Reparent { team, .. }
+            | Command::ProposeHierarchy { team, .. }
+            | Command::DecideHierarchy { team, .. }
             | Command::Member { team, .. }
             | Command::ReviewRouting { team, .. } => team,
         };

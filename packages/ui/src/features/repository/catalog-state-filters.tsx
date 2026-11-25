@@ -1,6 +1,14 @@
 import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
 
+const sorting = [
+  ["", "Best match"],
+  ["name-asc", "Name (A to Z)"],
+  ["name-desc", "Name (Z to A)"],
+  ["created-desc", "Newest created"],
+  ["created-asc", "Oldest created"],
+] as const;
+
 const filters = [
   {
     key: "archived",
@@ -20,31 +28,56 @@ const filters = [
       ["only", "Forks only"],
     ],
   },
+  {
+    key: "is",
+    label: "Visibility",
+    options: [
+      ["", "Any visibility"],
+      ["public", "Public"],
+      ["private", "Private"],
+    ],
+  },
+  {
+    key: "sort",
+    label: "Sort repositories",
+    options: sorting,
+  },
 ] as const;
 
 function terms(query: string) {
   return query.match(/(?:[^\s"]|"[^"]*(?:"|$))+/g) ?? [];
 }
 
-function selected(key: "archived" | "fork", term: string | undefined) {
+function selected(
+  key: (typeof filters)[number]["key"],
+  term: string | undefined,
+) {
   const value = term?.toLowerCase();
   if (key === "archived") {
     if (value === "archived:true" || value === "-archived:false") return "true";
     if (value === "archived:false" || value === "-archived:true")
       return "false";
-  } else {
+  } else if (key === "fork") {
     if (value === "fork:only" || value === "-fork:false") return "only";
     if (value === "fork:false" || value === "-fork:only") return "false";
+  } else if (key === "is") {
+    if (value === "is:public" || value === "-is:private") return "public";
+    if (value === "is:private" || value === "-is:public") return "private";
+  } else if (value?.startsWith("sort:")) {
+    const sort = value.slice(5);
+    if (sorting.some(([option]) => option === sort)) return sort;
   }
   return "";
 }
 
 export function RepositoryStateFilters({
   query,
+  showVisibility,
   draft,
   apply,
 }: {
   query: string;
+  showVisibility: boolean;
   draft: () => string;
   apply: (query: string) => boolean;
 }) {
@@ -52,32 +85,34 @@ export function RepositoryStateFilters({
   const queryTerms = terms(query);
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {filters.map(({ key, label, options }) => {
-        const qualifier = new RegExp(`^-?${key}:`, "i");
-        return (
-          <FieldSelect
-            key={key}
-            aria-label={label}
-            value={selected(
-              key,
-              queryTerms.find((term) => qualifier.test(term)),
-            )}
-            onValueChange={(nextValue) => {
-              const next = terms(draft()).filter(
-                (term) => !qualifier.test(term),
-              );
-              if (nextValue) next.push(`${key}:${nextValue}`);
-              setTooLong(!apply(next.join(" ")));
-            }}
-            options={[
-              ...options.map(([value, title]) => ({
-                value: value,
-                label: title,
-              })),
-            ]}
-          />
-        );
-      })}
+      {filters
+        .filter(({ key }) => key !== "is" || showVisibility)
+        .map(({ key, label, options }) => {
+          const qualifier = new RegExp(`^-?${key}:`, "i");
+          return (
+            <FieldSelect
+              key={key}
+              aria-label={label}
+              value={selected(
+                key,
+                queryTerms.find((term) => qualifier.test(term)),
+              )}
+              onValueChange={(nextValue) => {
+                const next = terms(draft()).filter(
+                  (term) => !qualifier.test(term),
+                );
+                if (nextValue) next.push(`${key}:${nextValue}`);
+                setTooLong(!apply(next.join(" ")));
+              }}
+              options={[
+                ...options.map(([value, title]) => ({
+                  value: value,
+                  label: title,
+                })),
+              ]}
+            />
+          );
+        })}
       {tooLong && (
         <p role="alert">
           Shorten the search to fit this filter within 200 characters.

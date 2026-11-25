@@ -199,6 +199,7 @@ pub(crate) async fn materialize_record(
         )?,
     );
     repository.organization = record.organization_id();
+    repository.created_at_ms = record.created_at_ms;
     repository.ownership_epoch = record.ownership_epoch;
     repository.forked_from = record.forked_from;
     repository.topics.clone_from(&record.topics.names);

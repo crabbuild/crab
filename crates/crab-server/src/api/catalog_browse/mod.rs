@@ -1,4 +1,5 @@
 use std::{
+    cmp::Reverse,
     collections::{HashMap, HashSet},
     sync::Arc,
 };
@@ -13,7 +14,7 @@ mod properties;
 mod query;
 mod scan;
 
-use query::{Cursor, Query};
+use query::{Cursor, Order, Query};
 
 use super::catalog::visible_matching;
 use crate::{
@@ -30,7 +31,11 @@ pub(super) enum Scope {
     Public,
     Personal(String),
     Organization(Uuid),
-    Team { organization: Uuid, team: Uuid },
+    Team {
+        organization: Uuid,
+        team: Uuid,
+        ancestors: Vec<Uuid>,
+    },
 }
 
 impl Scope {
@@ -70,6 +75,8 @@ pub(super) struct Search {
 #[derive(Serialize)]
 struct Entry<'a> {
     id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at_ms: Option<u64>,
     owner: &'a str,
     name: &'a str,
     description: &'a str,
@@ -82,6 +89,8 @@ struct Entry<'a> {
     can_admin: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     team_access: Option<RepositoryAccess>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    team_access_inherited: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     can_manage_team_access: bool,
 }
@@ -113,7 +122,9 @@ pub(super) async fn list(
     }
     let organization = scope.organization();
     let team = match &scope {
-        Scope::Team { team, .. } => Some(*team),
+        Scope::Team {
+            team, ancestors, ..
+        } => Some((*team, ancestors.as_slice())),
         _ => None,
     };
     let query = Query::parse(&search.query, organization)?;
@@ -162,6 +173,12 @@ pub(super) async fn list(
             if matches!(scope, Scope::Public) && !row.visibility.is_public() {
                 return None;
             }
+            if query
+                .visibility
+                .is_some_and(|selected| selected != row.visibility)
+            {
+                return None;
+            }
             let priority = ranks.remove(&row.repository.id)?;
             if !query.matches_topics(&row.topics) {
                 return None;
@@ -169,14 +186,37 @@ pub(super) async fn list(
             topics.insert(row.repository.id, row.topics);
             visibility.insert(row.repository.id, row.visibility);
             if let Some(access) = row.team_access {
-                team_grants.insert(row.repository.id, (access, row.organization_owner));
+                team_grants.insert(
+                    row.repository.id,
+                    (access, row.organization_owner, row.team_access_inherited),
+                );
             }
             Some((priority, row.repository))
         })
         .collect();
-    ranked.sort_by(|(rank_a, a), (rank_b, b)| {
-        (rank_a, &a.config.owner, &a.config.name).cmp(&(rank_b, &b.config.owner, &b.config.name))
-    });
+    let name = |repo: &Repository| {
+        (
+            repo.config.owner.to_ascii_lowercase(),
+            repo.config.name.to_ascii_lowercase(),
+        )
+    };
+    match query.order {
+        Order::Relevance => ranked.sort_by(|(rank_a, a), (rank_b, b)| {
+            (rank_a, &a.config.owner, &a.config.name).cmp(&(
+                rank_b,
+                &b.config.owner,
+                &b.config.name,
+            ))
+        }),
+        Order::NameAsc => ranked.sort_by_cached_key(|(_, repo)| name(repo)),
+        Order::NameDesc => ranked.sort_by_cached_key(|(_, repo)| Reverse(name(repo))),
+        Order::CreatedAsc => ranked.sort_by_cached_key(|(_, repo)| {
+            (repo.created_at_ms.is_none(), repo.created_at_ms, name(repo))
+        }),
+        Order::CreatedDesc => {
+            ranked.sort_by_cached_key(|(_, repo)| (Reverse(repo.created_at_ms), name(repo)))
+        }
+    }
     let visible: Vec<_> = ranked.into_iter().map(|(_, repo)| repo).collect();
     let start = after.as_ref().map_or(Ok(0), |cursor| {
         visible
@@ -268,12 +308,13 @@ pub(super) async fn list(
                     && fresh.config.owner == repo.config.owner
                     && fresh.config.name == repo.config.name
                     && fresh.config.description == repo.config.description
+                    && fresh.created_at_ms == repo.created_at_ms
                     && topics.get(&repo.id) == Some(&row.topics)
                     && visibility.get(&repo.id) == Some(&row.visibility)
                     && team_grants.get(&repo.id).copied()
-                        == row
-                            .team_access
-                            .map(|access| (access, row.organization_owner))
+                        == row.team_access.map(|access| {
+                            (access, row.organization_owner, row.team_access_inherited)
+                        })
                     && fresh.organization == repo.organization
                     && fresh.ownership_epoch == repo.ownership_epoch
                     && fresh.forked_from == repo.forked_from
@@ -305,6 +346,7 @@ pub(super) async fn list(
         .zip(archives)
         .map(|(repo, lifecycle)| Entry {
             id: repo.id,
+            created_at_ms: repo.created_at_ms,
             owner: &repo.config.owner,
             name: &repo.config.name,
             description: &repo.config.description,
@@ -313,8 +355,13 @@ pub(super) async fn list(
             visibility: visibility.get(&repo.id).copied().unwrap_or_default(),
             fork: repo.forked_from.is_some(),
             can_admin: admins.contains(&repo.id),
-            team_access: team_grants.get(&repo.id).map(|&(access, _)| access),
-            can_manage_team_access: team_grants.get(&repo.id).is_some_and(|&(_, owner)| owner)
+            team_access: team_grants.get(&repo.id).map(|&(access, _, _)| access),
+            team_access_inherited: team_grants
+                .get(&repo.id)
+                .is_some_and(|&(_, _, inherited)| inherited),
+            can_manage_team_access: team_grants
+                .get(&repo.id)
+                .is_some_and(|&(_, owner, _)| owner)
                 && repo.forked_from.is_none(),
         })
         .collect();

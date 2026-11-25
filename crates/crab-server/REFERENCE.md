@@ -1436,6 +1436,19 @@ access. It examines up to 128 candidates per archive-filtered response. Follow
 boundary repository and the readable candidates. If either changes, restart at
 page one. Later pages read live archive state for their candidates.
 
+### Filter by visibility and sort repositories
+
+Choose **Visibility** to add `is:public` or `is:private`. **Sort repositories**
+uses `sort:name-asc`, `sort:name-desc`, `sort:created-asc`, or `sort:created-desc`.
+Best match keeps the catalog's normal search order. Sorting runs on the server
+across all matching repositories. A continuation binds visibility and sort, so
+switching either starts at the first page.
+
+Catalog registration records `created_at_ms` in the same write that reserves
+the repository. Retries and later renames, transfers, and restorations retain
+that date. Entries without a recorded date appear after dated repositories
+when sorting by creation. The catalog leaves those dates blank.
+
 ### Grant ruleset bypass access
 
 Ruleset administrators can grant bypass access to repository administrators,
@@ -5735,12 +5748,12 @@ The OIDC dependency includes `rsa` for public-key signature verification. [RUSTS
 
 ## Organization authority foundation
 
-The `Organization` native class uses schema 2 under `cells/organization/` and
+The `Organization` native class uses schema 3 under `cells/organization/` and
 shares the Cellar transaction, receipt and output gate. Explicit private
 `cells bootstrap-organization --organization UUID --input-file JSON` resolves the
 first owner's exact `{issuer, subject}` through Directory without profile
 enrollment. It returns `/-/organizations/UUID`. Public HTTP has no bootstrap route.
-Use fresh Organization Cell UUIDs for schema 2.
+Use fresh Organization Cell UUIDs for schema 3.
 
 `/api/organizations/{id}` reads/edits metadata; `/members` lists bounded current
 members, and `/members/{actor}` changes/removes active grants with expected
@@ -5805,8 +5818,41 @@ Discovery starts with fresh organization state. Bootstrap owners and invitees
 are indexed automatically. People searches accept `q`, `role`, and an optional visible
 `team` UUID. Invitation searches use `q`, `role`, and `status` for owners.
 Search cursors bind the account, filters, and current organization revision.
-Nested teams and cross-authority repository/project fencing remain separate
-work. See `CELLAR.md`
+Visible teams can choose a parent when created or be moved from **Team →
+Settings**. Owners can move any team. Maintainers can move teams they manage
+under visible parents they also manage. The Organization Cell rejects cycles,
+secret parents, and a visibility change that would make a nested team secret.
+A team's direct memberships control its administration. Its members inherit
+repository grants from all ancestors. Descendant members receive parent team
+mentions and appear in the parent roster without editable direct roles.
+
+Maintainers who manage one side can propose the move from **Team → Settings**
+or **Team → Child teams**. The other team's maintainers can approve or decline
+under **Teams → Team requests**. The requester can withdraw their own request.
+Approval rechecks both actors' current authority and the child version, then
+applies the same cycle and visibility checks as a direct move.
+
+`GET /api/organizations/{id}/teams/hierarchy-requests` lists the caller's pending
+requests and those they are authorized to review. It accepts optional `team`,
+`request`, `after`, and `limit`. `propose_hierarchy` takes the child `team` and `version`,
+the proposed `parent`, and the requester's `side` of `child` or `parent`.
+`decide_hierarchy` takes the child `team`, exact `request` UUID and an `approve`,
+`decline`, or `withdraw` decision. The proposal submission UUID identifies the
+request. Proposing, declining, and withdrawing leave repository access unchanged.
+
+**Notifications → Team requests** lists requests the caller can review across
+current organizations. `GET /api/notifications/team-requests` accepts an opaque
+`after` continuation. Each row links to the exact pending request, with review
+authority checked against current membership in the owning Organization Cell.
+
+Use `GET /api/organizations/{id}/teams?parent={team}` for a paginated child
+team list. A `reparent` team command takes the team's current `version` and a
+`parent` UUID or `null`. A parent-team delete requires an organization owner
+and the `hierarchy_version` returned as `tree_version` by the team detail.
+Deleting a parent removes its entire subtree. Team **Repositories** distinguishes
+roles inherited from ancestors from direct grants.
+
+Cross-authority repository and project fencing remains separate work. See `CELLAR.md`
 for preparation, expiry and coordinated deployment contracts. Native tests live
 in `cells/organization/tests/`, HTTP tests
 in `api/organizations/tests/`, and browser fixtures in

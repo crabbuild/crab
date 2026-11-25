@@ -9,6 +9,9 @@ use uuid::Uuid;
 
 mod access;
 mod commands;
+mod hierarchy;
+pub(crate) mod hierarchy_requests;
+pub(super) use hierarchy::DESCENDANT_STEP;
 mod preparation;
 mod reads;
 pub(crate) mod repository_access;
@@ -84,6 +87,9 @@ pub(crate) struct Team {
     pub name: String,
     pub description: String,
     pub visibility: Visibility,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub parent: Option<Uuid>,
     pub version: u64,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
@@ -96,6 +102,12 @@ pub(crate) struct View {
     pub team: Team,
     pub role: Option<Role>,
     pub can_manage: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub ancestors: Option<Vec<Uuid>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub tree_version: Option<u64>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -128,7 +140,7 @@ pub(crate) struct MemberKey {
     pub member: Uuid,
 }
 
-const COLUMNS: &str = "id,name,description,visibility,version,created_at_ms,updated_at_ms";
+const COLUMNS: &str = "id,name,description,visibility,version,created_at_ms,updated_at_ms,parent";
 pub(super) const ACTIVE_MEMBERSHIP: &str =
     "m.role IS NOT NULL AND o.active=1 AND m.membership_epoch=e.epoch";
 pub(super) fn active_ids(context: &Transaction<'_>, person: Uuid) -> Result<Vec<Uuid>> {
@@ -152,7 +164,17 @@ pub(super) fn team(context: &Transaction<'_>, id: Uuid) -> Result<Option<Team>> 
         .transpose()
 }
 fn team_row(row: &[SqlValue]) -> Result<Team> {
-    let [id, name, description, visibility, version, created, updated] = row else {
+    let [
+        id,
+        name,
+        description,
+        visibility,
+        version,
+        created,
+        updated,
+        parent,
+    ] = row
+    else {
         return Err(Error::Invalid("team record is invalid"));
     };
     Ok(Team {
@@ -160,6 +182,10 @@ fn team_row(row: &[SqlValue]) -> Result<Team> {
         name: text(name)?,
         description: text(description)?,
         visibility: Visibility::parse(&text(visibility)?)?,
+        parent: match parent {
+            SqlValue::Null => None,
+            value => Some(uuid(value)?),
+        },
         version: uint(version)?,
         created_at_ms: uint(created)?,
         updated_at_ms: uint(updated)?,
@@ -214,6 +240,8 @@ pub(super) fn view(context: &Transaction<'_>, person: Uuid, id: Uuid) -> Result<
         team,
         role,
         can_manage: owner || role == Some(Role::Maintainer),
+        ancestors: None,
+        tree_version: None,
     }))
 }
 fn next(value: u64) -> Result<u64> {

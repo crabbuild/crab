@@ -42,6 +42,7 @@ mod filters;
 mod issue_transfers;
 mod state;
 mod subscriptions;
+pub(super) mod team_requests;
 mod unsubscribe;
 mod watched;
 
@@ -49,6 +50,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/notifications", get(list))
         .route("/api/notifications/unread", get(unread))
+        .route("/api/notifications/team-requests", get(team_requests::list))
         .route("/api/notifications/email", get(email::get).put(email::set))
         .route(
             "/api/notifications/filters",

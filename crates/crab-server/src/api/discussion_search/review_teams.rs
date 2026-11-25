@@ -163,6 +163,7 @@ async fn visible_choices(
             ListInput {
                 actor,
                 search: prefix.to_owned(),
+                parent: None,
                 after: None,
                 limit: 12,
             },

@@ -100,6 +100,7 @@ async fn create(f: &Fixture, person: Uuid, name: &str, visibility: Visibility) -
     let input = request(
         person,
         Command::Create {
+            parent: None,
             name: name.into(),
             description: String::new(),
             visibility,
@@ -149,6 +150,7 @@ async fn listed(f: &Fixture, actor: Uuid, search: &str) -> reads::Listing {
         &f.server.cells().unwrap(),
         f.organization,
         ListInput {
+            parent: None,
             actor,
             search: search.into(),
             after: None,
@@ -207,6 +209,7 @@ async fn secret_visibility_maintainer_roles_and_creation_policy_are_native_autho
     let denied = request(
         carol,
         Command::Delete {
+            hierarchy_version: None,
             team: id,
             version: 3,
         },
@@ -240,6 +243,7 @@ async fn secret_visibility_maintainer_roles_and_creation_policy_are_native_autho
     let denied = request(
         f.bob,
         Command::Create {
+            parent: None,
             name: "Another".into(),
             description: String::new(),
             visibility: Visibility::Closed,
@@ -405,6 +409,7 @@ async fn permanent_creation_and_deletion_do_not_duplicate_or_rebind_name_reuse()
     let original = request(
         f.bob,
         Command::Create {
+            parent: None,
             name: "Platform".into(),
             description: String::new(),
             visibility: Visibility::Secret,
@@ -415,6 +420,7 @@ async fn permanent_creation_and_deletion_do_not_duplicate_or_rebind_name_reuse()
     let duplicate = request(
         f.owner,
         Command::Create {
+            parent: None,
             name: "PLATFORM".into(),
             description: String::new(),
             visibility: Visibility::Closed,
@@ -446,6 +452,7 @@ async fn permanent_creation_and_deletion_do_not_duplicate_or_rebind_name_reuse()
     let deletion = request(
         f.bob,
         Command::Delete {
+            hierarchy_version: None,
             team: id,
             version: 2,
         },
@@ -478,6 +485,7 @@ async fn permanent_creation_and_deletion_do_not_duplicate_or_rebind_name_reuse()
     ));
     let changed = Request {
         command: Command::Create {
+            parent: None,
             name: "Different".into(),
             description: String::new(),
             visibility: Visibility::Secret,
@@ -502,6 +510,7 @@ async fn visible_search_and_scoped_cursors_cover_all_native_pages() {
         client,
         f.organization,
         ListInput {
+            parent: None,
             actor: f.bob,
             search: String::new(),
             after: None,
@@ -518,6 +527,7 @@ async fn visible_search_and_scoped_cursors_cover_all_native_pages() {
         client,
         f.organization,
         ListInput {
+            parent: None,
             actor: f.bob,
             search: String::new(),
             after: Some(next.clone()),
@@ -541,6 +551,7 @@ async fn visible_search_and_scoped_cursors_cover_all_native_pages() {
             client,
             f.organization,
             ListInput {
+                parent: None,
                 actor: f.bob,
                 search: String::new(),
                 after: Some(next),
@@ -583,5 +594,6 @@ async fn visible_search_and_scoped_cursors_cover_all_native_pages() {
 }
 
 mod cancellation;
+mod hierarchy_requests;
 mod preparation;
 pub(in crate::cells::organization) use preparation::{FailedStep, WithoutTeams};

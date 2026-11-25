@@ -13,7 +13,7 @@ use super::{
 
 pub(in crate::cells) const CLASS: &str = "Organization";
 pub(in crate::cells) const NAMESPACE: &str = "ORGANIZATIONS";
-const SCHEMA_FORMAT: u64 = 2;
+const SCHEMA_FORMAT: u64 = 3;
 pub(crate) const MAX_VERSION: u64 = 9_007_199_254_740_991;
 
 pub(crate) mod automation;
@@ -520,6 +520,9 @@ pub(in crate::cells) fn dispatch_read(
         }
         teams::GetPreparation::ID => invoke_read::<teams::GetPreparation>(context, input),
         teams::List::ID => invoke_read::<teams::List>(context, input),
+        teams::hierarchy_requests::List::ID => {
+            invoke_read::<teams::hierarchy_requests::List>(context, input)
+        }
         teams::ResolveReviewTeams::ID => invoke_read::<teams::ResolveReviewTeams>(context, input),
         teams::Get::ID => invoke_read::<teams::Get>(context, input),
         teams::sync::GetSync::ID => invoke_read::<teams::sync::GetSync>(context, input),

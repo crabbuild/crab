@@ -182,7 +182,7 @@ described below. It is not a native grant cutover.
 
 ## Organization authority
 
-Organization schema 2 lives in `cells/organization/schema.sql`. Run the private
+Organization schema 3 lives in `cells/organization/schema.sql`. Run the private
 mTLS bootstrap to initialize a fresh Directory and organization:
 
 ```sh
@@ -201,9 +201,9 @@ Different bootstrap intent conflicts.
 Neither a catalog owner string nor a public handle creates authority. Upgrade
 all peers before bootstrapping this new class; existing Repository/Directory
 schemas and identities do not change, and no rebuild is required.
-Schema 2 requires a fresh Organization Cell UUID. Its invitation rows store the
-original sender directly. Development Organization Cells from schema 1 are
-unavailable through schema 2 peers.
+Schema 3 requires a fresh Organization Cell UUID. Team rows store their optional
+parent directly. Development Organization Cells from earlier schemas are
+unavailable through schema 3 peers.
 
 The returned `/-/organizations/{uuid}` page has People, Teams, Invitations and profile
 settings. Public APIs accept account sessions or local operator identity, never
@@ -248,15 +248,16 @@ offer in the Organization Cell. Candidate edges grant no access. This feature
 starts with fresh organization state, including organizations with no
 repositories. The email worker reconciles committed pending offers and binds
 delivery to the exact version and the verified recipient's opt-in.
-Nested teams, organization deletion, and cross-authority repository/project
-fencing remain separate work.
+Organization deletion and cross-authority repository/project fencing remain
+separate work.
 
-### Standalone teams
+### Organization teams
 
 `cells/organization/teams/` owns team metadata, visibility, direct member/maintainer
-edges, organization membership incarnations and permanent submission outcomes.
-Fresh private organization bootstrap installs this feature atomically. For an
-existing organization, update all peers, then explicitly prepare through mTLS:
+edges, hierarchy, organization membership incarnations and permanent submission
+outcomes. Fresh private organization bootstrap installs this feature atomically.
+An unprepared Cell on the current organization schema can be explicitly prepared
+through mTLS:
 
 ```sh
 crab-server --config server.toml cells prepare-organization-teams \
@@ -272,8 +273,9 @@ ordinary organization reads and invitation declines remain available.
 
 All current organization members see visible (`closed`) teams. Secret teams are
 visible only to their current direct members and organization owners. Owners and
-current team maintainers edit metadata and direct memberships or delete a
-standalone team. Members may create teams by default; owners can restrict creation
+current team maintainers edit metadata and direct memberships or delete a leaf
+team. Only organization owners can delete a subtree. Members may create teams
+by default; owners can restrict creation
 to owners. Creation makes its actor a maintainer. Leaving/rejoining the organization
 advances a membership incarnation; old team edges cannot become grants again.
 Role changes retain the same incarnation. Team deletion preserves tombstones and
@@ -289,8 +291,8 @@ Directory enrichment rechecks current team access and the same native revision
 before exposing associations. Candidate pages currently have pagination, without
 username autocomplete.
 
-POST `/teams/commands` accepts `{request_id, command}` with a tagged
-`create`, `edit`, `delete`, `member` or `policy` command. POST `/teams/cancel`
+POST `/teams/commands` accepts `{request_id, command}` with tagged commands for
+team metadata, membership, hierarchy, review routing, and policy. POST `/teams/cancel`
 accepts the identical body. The native transaction serializes execution and
 cancellation against one permanent actor/digest ledger. Cancellation recovers an
 applied write or durably fences an unapplied one; a late original cannot execute.
@@ -316,9 +318,11 @@ Repository team grants are catalog-owned alongside the organization binding.
 The native owner read checks live team UUIDs and current organization membership
 epochs. This lets HTTP replicas query one authority for current membership even
 when the team's owner is on another node. The read performs no schema changes.
+Visible parent teams extend repository grants to current descendant members.
+Direct team membership governs administration and approval of proposed moves.
 Team-backed review requests use the current grants and membership epochs.
-Nested teams, project grants, and atomic ordering between team removals and
-repository publication remain separate work.
+Atomic ordering between team removals and repository publication remains
+separate work.
 
 ## Repository collaboration
 

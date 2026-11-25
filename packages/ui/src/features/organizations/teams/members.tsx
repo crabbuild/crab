@@ -208,7 +208,9 @@ function MemberRow({
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-4">
         <Identity member={member} />
         <div className="flex flex-wrap items-center gap-2">
-          {manage ? (
+          {member.inherited ? (
+            <Badge variant="outline">Via child team</Badge>
+          ) : manage ? (
             <>
               <FieldSelect
                 label={`Team role for ${member.profile?.name ?? member.actor}`}

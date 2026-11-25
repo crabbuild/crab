@@ -38,6 +38,9 @@ pub(in crate::api) struct TeamMember {
     role: Option<native::Role>,
     version: u64,
     profile: Option<ActorSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    inherited: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -60,6 +63,10 @@ pub(in crate::api) enum Acknowledgement {
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new()
         .route("/api/organizations/{id}/teams", get(list))
+        .route(
+            "/api/organizations/{id}/teams/hierarchy-requests",
+            get(hierarchy_requests),
+        )
         .route("/api/organizations/{id}/teams/policy", get(policy))
         .route(
             "/api/organizations/{id}/teams/commands",
@@ -92,12 +99,56 @@ pub(super) fn routes() -> Router<Arc<Server>> {
             get(review_routing),
         )
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HierarchyParameters {
+    team: Option<Uuid>,
+    after: Option<Uuid>,
+    request: Option<Uuid>,
+    limit: Option<u8>,
+}
+
+async fn hierarchy_requests(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path(organization): Path<Uuid>,
+    Query(params): Query<HierarchyParameters>,
+) -> Result<Json<native::hierarchy_requests::Page>> {
+    let limit = params.limit.unwrap_or(30);
+    if !(1..=50).contains(&limit) {
+        return Err(Error::Invalid(
+            "Choose a team request page size from 1 to 50",
+        ));
+    }
+    let actor = actor(&server, &principal).await?;
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let result = cells
+        .query::<native::hierarchy_requests::List>(
+            target(organization)?,
+            None,
+            native::hierarchy_requests::ListInput {
+                actor,
+                team: params.team,
+                after: params.after,
+                request: params.request,
+                incoming: false,
+                limit,
+            },
+        )
+        .await
+        .map_err(read_error)?
+        .output;
+    app::account(&principal)?;
+    Ok(Json(result))
+}
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Parameters {
     after: Option<String>,
     limit: Option<u8>,
     search: String,
+    parent: Option<Uuid>,
 }
 impl Parameters {
     fn limit(&self) -> Result<u8> {
@@ -152,6 +203,7 @@ async fn list(
             native::ListInput {
                 actor,
                 search: params.search,
+                parent: params.parent,
                 after: decode::<native::QueryCursor>(params.after.as_deref())?,
                 limit,
             },
@@ -213,7 +265,11 @@ async fn repositories(
     let page = catalog_browse::list(
         &server,
         &principal,
-        Scope::Team { organization, team },
+        Scope::Team {
+            organization,
+            team,
+            ancestors: before.ancestors.clone().unwrap_or_default(),
+        },
         search,
     )
     .await?;
@@ -341,7 +397,7 @@ async fn people(
     params: Parameters,
     kind: People,
 ) -> Result<Json<TeamRoster>> {
-    if !params.search.is_empty() {
+    if !params.search.is_empty() || params.parent.is_some() {
         return Err(Error::Invalid(
             "Team member pages do not accept a search filter",
         ));
@@ -355,6 +411,7 @@ async fn people(
         after: decode::<native::MemberCursor>(params.after.as_deref())?,
         limit: params.limit()?,
     };
+    let roster = matches!(kind, People::Members);
     let page = match kind {
         People::Members => cells.query::<native::Members>(target, None, input).await,
         People::Candidates => cells.query::<native::Candidates>(target, None, input).await,
@@ -402,6 +459,7 @@ async fn people(
             role: membership.role,
             version: membership.version,
             profile,
+            inherited: (roster && membership.version == 0).then_some(true),
         })
         .collect();
     Ok(Json(TeamRoster {
@@ -528,6 +586,12 @@ async fn save(
         native::Outcome::InvalidDescription => Error::Invalid(
             "Team description must contain at most 1000 characters, without NUL characters",
         ),
+        native::Outcome::InvalidParent => {
+            Error::Invalid("Choose a visible parent team outside this team's own hierarchy")
+        }
+        native::Outcome::NestedVisibility => {
+            Error::Invalid("Remove the team from its hierarchy before making it secret")
+        }
         native::Outcome::InvalidRouting => Error::Invalid("Choose between 1 and 10 reviewers"),
         native::Outcome::InvalidRoutingExclusions => {
             Error::Invalid("Choose up to 256 current team members to exclude")

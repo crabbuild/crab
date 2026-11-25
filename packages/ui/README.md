@@ -328,6 +328,18 @@ dedicated pages for the organization profile, member privileges, and repository
 governance. The **Repositories** list links people with repository Admin access
 directly to that repository's settings.
 
+Visible teams can choose a **Parent team** when created. In **Team → Settings**,
+review and confirm any change to that parent. The **Child teams** tab shows the
+next level of the hierarchy. **Members** identifies people who belong through a
+child team, and **Repositories** marks inherited grants.
+
+When you maintain only one team in a proposed move, send a request from **Team →
+Settings** or **Team → Child teams**. Use **Teams → Team requests** to review
+incoming requests or withdraw one you sent. Inherited access updates when an
+authorized reviewer approves the move.
+**Notifications → Team requests** lists incoming requests from all your
+organizations and links directly to each review.
+
 When inviting a former member within 90 days of removal or conversion, choose
 **Restore previous access** to bring back their former role and eligible team
 and direct repository grants upon acceptance, or **Start fresh** to choose a
