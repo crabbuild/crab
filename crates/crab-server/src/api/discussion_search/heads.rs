@@ -6,8 +6,8 @@ use crate::{
     app::{self, Error, Result},
     cells::repository::{
         SearchInput,
-        search::check_status::{
-            Context, ForkRefInput, ListForkRefs, MAX_FORK_HEAD_BYTES, fork_ref,
+        search::heads::{
+            Context, ForkRefInput, GetSourceState, ListForkRefs, MAX_FORK_HEAD_BYTES, fork_ref,
         },
     },
     repository::Repository,
@@ -18,7 +18,7 @@ pub(super) async fn bind(
     server: &Server,
     repo: &Repository,
     input: &mut SearchInput,
-) -> Result<()> {
+) -> Result<String> {
     let cell = app::repository_cell(server, repo)?;
     let mut after = 0;
     let mut stamp = None;
@@ -40,10 +40,7 @@ pub(super) async fn bind(
         after = next;
         stamp = Some(page.stamp);
     };
-    let source_token = match &input.review_context {
-        Some(review) => review.source_token.clone(),
-        None => super::reviews::live_source(server, repo).await?.0,
-    };
+    let (source_token, default_ref) = live_source(server, repo).await?;
     let mut snapshots = stream::iter(forks)
         .map(|(id, refs)| async move {
             let tips = match crate::api::pulls::git::fork_repository(server, repo, id) {
@@ -65,16 +62,44 @@ pub(super) async fn bind(
             encoded_bytes += serde_json::to_string(&qualified)?.len() + oid.len() + 4;
             if encoded_bytes > MAX_FORK_HEAD_BYTES {
                 return Err(Error::Invalid(
-                    "Too many live fork branches to search check status",
+                    "Too many live fork branches to evaluate this search filter",
                 ));
             }
             fork_heads.insert(qualified, oid);
         }
     }
-    input.check_context = Some(Context {
+    input.pull_heads = Some(Context {
         source_token,
         stamp,
         fork_heads,
     });
-    Ok(())
+    Ok(default_ref)
+}
+
+async fn live_source(server: &Server, repo: &Repository) -> Result<(Option<String>, String)> {
+    let cell = app::repository_cell(server, repo)?;
+    let state = app::query_output(
+        cell.client
+            .query::<GetSourceState>(&cell.target, None, ())
+            .await,
+    )?;
+    Ok(if let Some(state) = state {
+        let source =
+            crate::repository::projection::current_source(repo, server, &server.cancellation)
+                .await?;
+        if state.ready_epoch.is_none()
+            || state.source_token.as_deref() != Some(source.source_token.as_str())
+        {
+            repo.schedule_maintenance(server, crate::repository::MaintenanceTrigger::Poll(&source))
+                .await?;
+            return Err(app::Error::ReviewIndexPending);
+        }
+        (
+            Some(source.source_token),
+            String::from_utf8(source.head_ref)
+                .map_err(|_| app::Error::CellContract("Invalid Git default branch"))?,
+        )
+    } else {
+        (None, String::new())
+    })
 }

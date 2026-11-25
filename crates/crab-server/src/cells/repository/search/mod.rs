@@ -8,6 +8,7 @@ pub(crate) mod check_status;
 pub(crate) mod completion;
 pub(crate) mod contributions;
 mod counts;
+pub(crate) mod heads;
 pub(crate) mod index;
 pub(crate) mod issue_types;
 pub(crate) mod labels;
@@ -80,6 +81,10 @@ enum Metadata {
 }
 
 impl Query {
+    pub(crate) fn needs_pull_heads(&self) -> bool {
+        self.needs_review_source() || self.uses_check_status()
+    }
+
     pub(crate) fn uses_check_status(&self) -> bool {
         self.expression
             .has_term(|term| matches!(term, Term::CheckStatus(_)))

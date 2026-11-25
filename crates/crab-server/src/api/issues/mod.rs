@@ -128,11 +128,7 @@ async fn list(
         super::discussion_search::resolve_people(&server, &principal, &repo, &mut input).await?;
     let type_scope =
         super::discussion_search::issue_types::bind(&server, &repo, &mut input).await?;
-    let review_source = input
-        .review_context
-        .as_ref()
-        .and_then(|value| value.source_token.clone());
-    let check_context = input.check_context.clone();
+    let pull_heads = input.pull_heads.clone();
     let page = crate::app::query_output(
         routed
             .client
@@ -145,8 +141,8 @@ async fn list(
         super::pulls::rollups::load(
             &server,
             &repo,
-            review_source.as_deref(),
-            check_context.as_ref().zip(page.check_revision),
+            pull_heads.as_ref(),
+            page.check_revision,
             page.items.iter().filter_map(|item| match item {
                 DiscussionSummary::Pull(pull) => Some(pull),
                 DiscussionSummary::Issue(_) => None,

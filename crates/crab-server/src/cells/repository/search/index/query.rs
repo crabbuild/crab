@@ -5,7 +5,7 @@ pub(crate) mod work;
 use super::*;
 use crate::cells::repository::collaboration::{SubjectState, reactions::Kind};
 use crate::cells::repository::search::{
-    Expression, Metadata, Query, Term, check_status,
+    Expression, Metadata, Query, Term, heads,
     text::{self, Fields},
 };
 
@@ -48,7 +48,7 @@ pub(crate) struct SearchInput {
     pub assignees: Vec<super::super::assignees::Binding>,
     pub review_context: Option<super::super::reviews::status::Context>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub check_context: Option<check_status::Context>,
+    pub pull_heads: Option<heads::Context>,
     #[serde(default)]
     pub review_teams: super::super::reviews::teams::Bindings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,7 +67,7 @@ impl Default for SearchInput {
             people: Vec::new(),
             assignees: Vec::new(),
             review_context: None,
-            check_context: None,
+            pull_heads: None,
             review_teams: Default::default(),
             issue_types: None,
             public_reader: false,
@@ -202,8 +202,7 @@ struct Bindings<'a> {
     people: &'a [super::super::people::Binding],
     assignees: &'a [super::super::assignees::Binding],
     review: Option<super::super::reviews::status::Bound>,
-    check_cte: String,
-    check_joins: String,
+    heads: Option<heads::Bound>,
     review_teams: &'a super::super::reviews::teams::Bindings,
     issue_types: &'a Option<super::super::issue_types::Binding>,
     public_reader: bool,
@@ -211,63 +210,51 @@ struct Bindings<'a> {
     now_ms: i64,
 }
 impl<'a> Bindings<'a> {
-    fn new(
-        input: &'a SearchInput,
-        prepared: Option<&super::super::reviews::status::Prepared>,
-        checks: Option<&CheckCriteria>,
-        archived: bool,
-        now_ms: i64,
-    ) -> crate::cells::Result<Self> {
+    fn new(input: &'a SearchInput, criteria: &Criteria, now_ms: i64) -> crate::cells::Result<Self> {
         let mut values = Self {
             people: &input.people,
             assignees: &input.assignees,
             review: None,
-            check_cte: String::new(),
-            check_joins: String::new(),
+            heads: None,
             values: Vec::new(),
             review_teams: &input.review_teams,
             issue_types: &input.issue_types,
             public_reader: input.public_reader,
-            archived,
+            archived: criteria.archived.unwrap_or(false),
             now_ms,
         };
-        if let Some(prepared) = prepared {
+        if let Some(prepared) = &criteria.review {
             values.review = Some(super::super::reviews::status::Bound::new(
                 prepared,
                 |value| values.bind(value),
             )?);
         }
-        if let Some(checks) = checks {
-            let epoch = checks
-                .epoch
-                .map(|epoch| integer(epoch).map(|value| values.bind(value)))
-                .transpose()?;
-            let source = epoch.map_or_else(
-                || "0".into(),
-                |epoch| format!("git_head.epoch_id={epoch} AND git_head.name=pr_source.head_ref"),
-            );
-            let mut head = "NULLIF(lower(hex(git_head.target_oid)),'')".to_owned();
-            let mut forks = "";
-            if let Some(input) = input
-                .check_context
-                .as_ref()
-                .filter(|input| !input.fork_heads.is_empty())
-            {
-                let tips = values.text(&serde_json::to_string(&input.fork_heads)?);
-                values.check_cte = format!(
-                    "WITH fork_heads AS MATERIALIZED (SELECT CAST(key AS BLOB) AS ref,value AS oid FROM json_each({tips}))"
-                );
-                forks = "LEFT JOIN fork_heads fork_head ON fork_head.ref=pr_source.head_ref";
-                head.push_str(",fork_head.oid");
+        if let Some(prepared) = &criteria.heads {
+            let mut heads = heads::Bound::new(prepared, |value| values.bind(value))?;
+            if criteria.check_revision.is_some() {
+                heads.joins.push_str(&format!(
+                    " LEFT JOIN repository_check_rollups ci ON ci.oid={}",
+                    heads.oid
+                ));
             }
-            values.check_joins = format!(
-                "LEFT JOIN discussion_index_pull_sources pr_source ON pr_source.document=d.rowid
-                 LEFT JOIN git_projection_refs git_head ON {source}
-                 {forks}
-                 LEFT JOIN repository_check_rollups ci ON ci.oid=COALESCE(pr_source.merged_head_oid,{head})"
-            );
+            values.heads = Some(heads);
         }
         Ok(values)
+    }
+
+    fn head_cte(&self) -> &str {
+        self.heads.as_ref().map_or("", |heads| &heads.cte)
+    }
+
+    fn head_joins(&self) -> &str {
+        self.heads.as_ref().map_or("", |heads| &heads.joins)
+    }
+
+    fn head_oid(&self) -> crate::cells::Result<&'static str> {
+        self.heads
+            .as_ref()
+            .map(|heads| heads.oid)
+            .ok_or(crate::cells::Error::Invalid("Search heads were not bound"))
     }
 
     fn bind(&mut self, value: SqlValue) -> String {
@@ -314,14 +301,9 @@ struct Criteria {
     query: Query,
     archived: Option<bool>,
     review: Option<super::super::reviews::status::Prepared>,
-    checks: Option<CheckCriteria>,
+    heads: Option<heads::Prepared>,
+    check_revision: Option<u64>,
     now_ms: u64,
-}
-
-#[derive(Serialize)]
-struct CheckCriteria {
-    epoch: Option<u64>,
-    revision: u64,
 }
 
 fn criteria(
@@ -343,19 +325,20 @@ fn criteria(
     } else {
         None
     };
-    let checks = if query.uses_check_status() {
+    let heads = if query.needs_pull_heads() {
         if input.public_reader {
             return Err(crate::cells::Error::Invalid(
-                "Check filters require repository access",
+                "Review and check filters require repository access",
             ));
         }
-        Some(CheckCriteria {
-            epoch: check_status::prepare(context, input.check_context.as_ref())?,
-            revision: crate::cells::repository::checks::summary::revision(context)?,
-        })
+        Some(heads::prepare(context, input.pull_heads.as_ref())?)
     } else {
         None
     };
+    let check_revision = query
+        .uses_check_status()
+        .then(|| crate::cells::repository::checks::summary::revision(context))
+        .transpose()?;
 
     if subject_kind != Some(SubjectKind::Pull) || query.needs_lifecycle() {
         super::super::super::issues::lifecycle::ensure_ready(context)?;
@@ -374,7 +357,8 @@ fn criteria(
         query,
         archived,
         review,
-        checks,
+        heads,
+        check_revision,
         now_ms,
     })
 }
@@ -388,13 +372,10 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     input.validate().map_err(crate::cells::Error::Invalid)?;
     let generation = ensure_ready(context)?;
     let revision = revision(context)?;
-    let Criteria {
-        query,
-        archived,
-        review,
-        checks,
-        now_ms,
-    } = criteria(context, &input, subject_kind)?;
+    let criteria = criteria(context, &input, subject_kind)?;
+    let query = &criteria.query;
+    let archived = criteria.archived;
+    let now_ms = criteria.now_ms;
     let identity = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT repository_uuid FROM repository_identity WHERE singleton = 1",
@@ -422,8 +403,12 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         &input.review_context,
         &input.review_teams,
         &input.issue_types,
-        review.as_ref().map(|prepared| &prepared.approvals),
-        (input.public_reader, &input.check_context, &checks),
+        &criteria.review,
+        (
+            input.public_reader,
+            &input.pull_heads,
+            criteria.check_revision,
+        ),
     ))?)
     .to_hex()
     .to_string();
@@ -442,13 +427,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     }) {
         return Err(crate::cells::Error::StaleSearch);
     }
-    let mut bindings = Bindings::new(
-        &input,
-        review.as_ref(),
-        checks.as_ref(),
-        archived.unwrap_or(false),
-        context.now_ms(),
-    )?;
+    let mut bindings = Bindings::new(&input, &criteria, context.now_ms())?;
     let kind_clause = kind_filter(subject_kind, &mut bindings);
     // Each counter describes its navigation query, even when the current query
     // selects only closed work. Rows and both targets share this native snapshot.
@@ -459,7 +438,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         statements: vec![statement(
             &format!(
                 "{} SELECT d.state, COUNT(*) FROM discussion_index d {} WHERE {count_filter} GROUP BY d.state",
-                bindings.check_cte, bindings.check_joins
+                bindings.head_cte(), bindings.head_joins()
             ),
             bindings.values.clone(),
         )],
@@ -486,13 +465,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         .ok_or(crate::cells::Error::Invalid(
             "discussion count exceeds its range",
         ))?;
-    let mut bindings = Bindings::new(
-        &input,
-        review.as_ref(),
-        checks.as_ref(),
-        archived.unwrap_or(false),
-        context.now_ms(),
-    )?;
+    let mut bindings = Bindings::new(&input, &criteria, context.now_ms())?;
     let kind_clause = kind_filter(subject_kind, &mut bindings);
     let predicate = expression(&query.expression, &mut bindings)?;
     let filter = format!("{kind_clause} AND ({predicate})");
@@ -534,7 +507,8 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     let limit = bindings.bind(SqlValue::Integer(i64::from(input.limit) + 1));
     let sql = format!(
         "{} SELECT number, sort_key, comments, reactions, kind FROM (SELECT d.kind, d.number, {order} AS sort_key, d.comments, d.reactions FROM discussion_index d {} WHERE {filter}) WHERE {seek} ORDER BY sort_key {direction}, number {direction}, kind {direction} LIMIT {limit}",
-        bindings.check_cte, bindings.check_joins
+        bindings.head_cte(),
+        bindings.head_joins()
     );
     let rows = context.sql(&SqlBatch {
         statements: vec![statement(&sql, bindings.values)],
@@ -651,7 +625,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         navigation,
         lock_filter: query.lock_filter(),
         labels,
-        check_revision: checks.map(|checks| checks.revision),
+        check_revision: criteria.check_revision,
     })
 }
 
@@ -712,10 +686,10 @@ fn scoped_expression(
             }
             Term::ReviewStatus(super::super::reviews::status::Status::None) => super::super::reviews::status::UNREVIEWED.into(),
             Term::ReviewStatus(super::super::reviews::status::Status::ChangesRequested) => super::super::reviews::status::CHANGES_REQUESTED.into(),
-            Term::ReviewStatus(status)=> bindings.review.as_ref().ok_or(crate::cells::Error::Invalid("Review source was not bound"))?.predicate(*status),
+            Term::ReviewStatus(status)=> bindings.review.as_ref().ok_or(crate::cells::Error::Invalid("Review source was not bound"))?.predicate(*status, bindings.head_oid()?),
             Term::CheckStatus(status) => format!(
-                "d.kind=1 AND (pr_source.merged_head_oid IS NOT NULL OR git_head.target_oid IS NOT NULL {}) AND ({})",
-                if bindings.check_cte.is_empty() { "" } else { "OR fork_head.oid IS NOT NULL" },
+                "d.kind=1 AND {} IS NOT NULL AND ({})",
+                bindings.head_oid()?,
                 status.predicate(),
             ),
             Term::BaseBranch(branch) => {

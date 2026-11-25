@@ -11,16 +11,15 @@ use std::sync::Arc;
 #[cfg(test)]
 mod tests;
 
-pub(super) async fn bind_source(
+pub(super) async fn bind_policy(
     server: &Server,
     principal: &Principal,
     repo: &crate::repository::Repository,
     input: &mut crate::cells::repository::SearchInput,
+    default_ref: String,
 ) -> Result<()> {
     use crate::cells::repository::search::reviews::status::Context;
-    let (source_token, default_ref) = live_source(server, repo).await?;
     input.review_context = Some(Context {
-        source_token,
         default_ref,
         inherited_rulesets: crate::repository::settings::inherited_rulesets(server, repo).await?,
         reviewers: app::membership(server, principal, repo)
@@ -36,38 +35,6 @@ pub(super) async fn bind_source(
             .collect(),
     });
     Ok(())
-}
-
-pub(super) async fn live_source(
-    server: &Server,
-    repo: &crate::repository::Repository,
-) -> Result<(Option<String>, String)> {
-    use crate::cells::repository::search::reviews::status::GetSourceState;
-    let cell = app::repository_cell(server, repo)?;
-    let state = app::query_output(
-        cell.client
-            .query::<GetSourceState>(&cell.target, None, ())
-            .await,
-    )?;
-    Ok(if let Some(state) = state {
-        let source =
-            crate::repository::projection::current_source(repo, server, &server.cancellation)
-                .await?;
-        if state.ready_epoch.is_none()
-            || state.source_token.as_deref() != Some(source.source_token.as_str())
-        {
-            repo.schedule_maintenance(server, crate::repository::MaintenanceTrigger::Poll(&source))
-                .await?;
-            return Err(app::Error::ReviewIndexPending);
-        }
-        (
-            Some(source.source_token),
-            String::from_utf8(source.head_ref)
-                .map_err(|_| app::Error::CellContract("Invalid Git default branch"))?,
-        )
-    } else {
-        (None, String::new())
-    })
 }
 
 #[derive(Default, serde::Deserialize)]

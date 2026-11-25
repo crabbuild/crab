@@ -1,5 +1,8 @@
 use super::*;
-use crate::test_support::{git, http::organizations};
+use crate::test_support::{
+    git,
+    http::{browser::Browser, organizations},
+};
 use reqwest::Method;
 use std::time::Duration;
 use uuid::Uuid;
@@ -36,11 +39,18 @@ pub(super) async fn ready_search(h: &Harness, actor: &str, path: &str, query: &s
     .expect("Git source projection did not become ready")
 }
 
-async fn write(h: &Harness, actor: &str, repository: &Value, path: &str, body: Value) {
+async fn write(
+    h: &Harness,
+    actor: &str,
+    repository: &Value,
+    method: Method,
+    path: &str,
+    body: Value,
+) {
     let session = h.json("/api/session", actor).await;
     let response = h
         .http
-        .post(format!("{}{path}", h.origin))
+        .request(method, format!("{}{path}", h.origin))
         .header(header::COOKIE, actor)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", session["csrf"].as_str().unwrap())
@@ -77,7 +87,17 @@ async fn remote(h: &Harness, actor: &str, owner: &str, name: &str) -> url::Url {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn check_status_search_follows_the_exact_upstream_and_fork_heads() {
+async fn review_and_check_search_follow_the_exact_upstream_and_fork_heads() {
+    exercise(None).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Chromium and the built embedded UI"]
+async fn browser_reclassifies_a_fork_review_after_a_push() {
+    exercise(Some(&Browser::new("fork-review-search"))).await;
+}
+
+async fn exercise(browser: Option<&Browser>) {
     let store =
         crab_storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
     let h = Harness::new_with_store_and_prefix(false, false, store, "check-status-fork").await;
@@ -119,6 +139,7 @@ async fn check_status_search_follows_the_exact_upstream_and_fork_heads() {
         &h,
         &alice,
         id,
+        Method::POST,
         &format!("{root}/forks"),
         json!({"request_id":fork_request,"name":"fork"}),
     )
@@ -142,10 +163,34 @@ async fn check_status_search_follows_the_exact_upstream_and_fork_heads() {
         .get(&(owner.to_owned(), "fork".into()))
         .unwrap();
     for (title, source) in [("Upstream change", None), ("Fork change", Some(fork.id))] {
-        write(&h, &alice, id, &pulls, json!({
+        write(&h, &alice, id, Method::POST, &pulls, json!({
             "request_id":Uuid::now_v7(),"title":title,"body":"",
                 "base_ref":"refs/heads/main","head_ref":"refs/heads/feature","head_repository":source,
                 "expected":{"base_oid":base,"head_oid":shared},
+        })).await;
+    }
+    let members = format!("{root}/members");
+    let acl = h.json(&members, &alice).await;
+    write(
+        &h,
+        &alice,
+        id,
+        Method::PUT,
+        &members,
+        json!({
+            "expected_revision":acl["revision"],
+            "members":[{"subject":"bob-id","name":"Bob","access":"write"}],"groups":[],
+        }),
+    )
+    .await;
+    write(&h, &alice, id, Method::PUT, &format!("{root}/settings/branch-protections"), json!({
+        "expected_version":0,"rules":[{"branch":"main","required_approvals":1,"required_checks":[]}],
+    })).await;
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    for number in 1..=2 {
+        write(&h, &bob, id, Method::POST, &format!("{pulls}/{number}/reviews"), json!({
+            "request_id":Uuid::now_v7(),"state":"approved","body":"Approved at the shared head","commit_oid":shared,
         })).await;
     }
     let searches = [
@@ -157,17 +202,49 @@ async fn check_status_search_follows_the_exact_upstream_and_fork_heads() {
         &h,
         &alice,
         id,
+        Method::POST,
         &status(&shared, ""),
         json!({
             "request_id":Uuid::now_v7(),"context":"ci/build","state":"success",
         }),
     )
     .await;
-    let mut cursors = Vec::new();
-    for search in &searches {
-        let first = ready_search(&h, &alice, search, "is:open status:success").await;
-        assert_eq!(first["items"][0]["title"], "Fork change");
-        cursors.push(first["next"].as_str().unwrap().to_owned());
+    let approved = "is:open review:approved";
+    let upstream_link = format!(".issue-list a[href='/{owner}/upstream/pull/1']");
+    let fork_link = format!(".issue-list a[href='/{owner}/upstream/pull/2']");
+    let mut continuations = Vec::new();
+    for (search, cursor_parameter) in searches.iter().zip(["before", "after"]) {
+        for query in [
+            approved,
+            "is:open status:success",
+            "review:approved status:success",
+        ] {
+            let first = ready_search(&h, &alice, search, query).await;
+            assert_eq!(first["items"][0]["title"], "Fork change");
+            continuations.push((
+                search,
+                cursor_parameter,
+                query,
+                first["next"].as_str().unwrap().to_owned(),
+            ));
+        }
+    }
+    if let Some(browser) = browser {
+        browser
+            .run(&["open", &format!("{}/{owner}/upstream/pulls", h.origin)])
+            .await;
+        browser.sign_in().await;
+        browser.run(&["wait", "--text", "Fork change"]).await;
+        select_review_filter(browser, "Approved review").await;
+        browser
+            .run(&[
+                "wait",
+                "--fn",
+                "new URL(location.href).searchParams.get('q')?.includes('review:approved')",
+            ])
+            .await;
+        browser.run(&["wait", &upstream_link]).await;
+        browser.run(&["wait", &fork_link]).await;
     }
     let fork_remote = remote(&h, &alice, owner, "fork").await;
     std::fs::write(path.join("README.md"), "Only the fork advanced\n").unwrap();
@@ -175,33 +252,63 @@ async fn check_status_search_follows_the_exact_upstream_and_fork_heads() {
     let next = git::success(path, &["rev-parse", "HEAD"]).await;
     git::success(path, &["push", fork_remote.as_str(), "feature"]).await;
 
-    for (index, search) in searches.iter().enumerate() {
+    for (search, cursor_parameter, query, cursor) in continuations {
         let continued = h
             .http
             .get(format!("{}{search}", h.origin))
             .header(header::COOKIE, &alice)
-            .query(&[
-                ("q", "is:open status:success"),
-                (if index == 0 { "before" } else { "after" }, &cursors[index]),
-            ])
+            .query(&[("q", query), (cursor_parameter, cursor.as_str())])
             .send()
             .await
             .unwrap();
         assert_eq!(continued.status(), StatusCode::CONFLICT);
-        let success = ready_search(&h, &alice, search, "status:success").await;
-        assert_eq!(success["items"][0]["title"], "Upstream change");
-        let pending = ready_search(&h, &alice, search, "status:pending").await;
-        assert_eq!(pending["items"][0]["title"], "Fork change");
     }
-    let pending = ready_search(&h, &alice, &pulls, "status:pending").await;
+    for search in &searches {
+        for (query, title) in [
+            ("status:success", "Upstream change"),
+            ("status:pending", "Fork change"),
+            ("review:approved", "Upstream change"),
+            ("review:required status:pending", "Fork change"),
+        ] {
+            let result = ready_search(&h, &alice, search, query).await;
+            assert_eq!(result["items"][0]["title"], title, "{query}");
+            assert_eq!(result["next"], Value::Null, "{query}");
+        }
+    }
+    if let Some(browser) = browser {
+        browser.run(&["reload"]).await;
+        browser.run(&["wait", &upstream_link]).await;
+        browser
+            .run(&[
+                "wait",
+                "--fn",
+                &format!(
+                    "!document.querySelector({})",
+                    serde_json::to_string(&fork_link).unwrap()
+                ),
+            ])
+            .await;
+        select_review_filter(browser, "Review required").await;
+        browser
+            .run(&[
+                "wait",
+                "--fn",
+                "new URL(location.href).searchParams.get('q')?.includes('review:required')",
+            ])
+            .await;
+        browser.run(&["wait", &fork_link]).await;
+    }
+    let pending = ready_search(&h, &alice, &pulls, "review:required").await;
     assert_eq!(pending["matching"], 1);
     assert_eq!(pending["counts"]["open"], 1);
     assert_eq!(pending["items"][0]["rollup"]["head_oid"], next);
+    assert_eq!(pending["items"][0]["rollup"]["reviews"]["outdated"], 1);
     for (context, state) in [("ci/lint", "pending"), ("ci/build", "failure")] {
         write(
             &h,
             &alice,
             id,
+            Method::POST,
             &status(&next, "?pull=2"),
             json!({
                 "request_id":Uuid::now_v7(),"context":context,"state":state,
@@ -220,6 +327,7 @@ async fn check_status_search_follows_the_exact_upstream_and_fork_heads() {
         &h,
         &alice,
         id,
+        Method::POST,
         &status(&next, "?pull=2"),
         json!({
             "request_id":Uuid::now_v7(),"context":"ci/build","state":"success",
@@ -244,6 +352,7 @@ async fn check_status_search_follows_the_exact_upstream_and_fork_heads() {
         &h,
         &alice,
         id,
+        Method::POST,
         &format!("{pulls}/1/merge"),
         json!({
             "request_id":Uuid::now_v7(),"version":first["version"],"method":"merge_commit",
@@ -252,8 +361,40 @@ async fn check_status_search_follows_the_exact_upstream_and_fork_heads() {
     )
     .await;
     git::success(path, &["push", upstream.as_str(), "--delete", "feature"]).await;
-    let merged = ready_search(&h, &alice, &pulls, "is:merged status:success").await;
+    let merged = ready_search(
+        &h,
+        &alice,
+        &pulls,
+        "is:merged review:approved status:success",
+    )
+    .await;
     assert_eq!(merged["matching"], 1);
     assert_eq!(merged["items"][0]["rollup"]["head_oid"], shared);
     h.close().await;
+}
+
+async fn select_review_filter(browser: &Browser, name: &str) {
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Filter by reviews",
+            "--exact",
+        ])
+        .await;
+    let input = "[role='dialog'] input[placeholder='Find a review filter…']";
+    browser.run(&["wait", input]).await;
+    browser.run(&["fill", input, name]).await;
+    browser
+        .run(&[
+            "wait",
+            "--fn",
+            "document.querySelectorAll('[role=listbox][aria-label=Reviews] [role=option]').length === 1",
+        ])
+        .await;
+    browser.run(&["press", "ArrowDown"]).await;
+    browser.run(&["press", "Enter"]).await;
 }

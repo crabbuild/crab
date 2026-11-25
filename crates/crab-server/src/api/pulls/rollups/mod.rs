@@ -3,7 +3,7 @@ use crate::{
     cells::repository::{
         PullState, PullSummary,
         rollups::{GetRollups, Head, Rollup},
-        search::check_status::Context,
+        search::heads::Context,
     },
     repository::Repository,
     server::Server,
@@ -13,8 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(in crate::api) async fn load<'a>(
     server: &Server,
     repo: &Repository,
-    source_token: Option<&str>,
-    checked: Option<(&Context, u64)>,
+    captured: Option<&Context>,
+    check_revision: Option<u64>,
     pulls: impl Iterator<Item = &'a PullSummary>,
 ) -> Result<BTreeMap<u64, Rollup>> {
     let pulls: Vec<_> = pulls.collect();
@@ -22,9 +22,10 @@ pub(in crate::api) async fn load<'a>(
         return Ok(BTreeMap::new());
     }
     let mut refs = BTreeMap::<_, BTreeSet<_>>::new();
-    for pull in pulls.iter().filter(|pull| {
-        pull.state != PullState::Merged && source_token.is_none() && checked.is_none()
-    }) {
+    for pull in pulls
+        .iter()
+        .filter(|pull| pull.state != PullState::Merged && captured.is_none())
+    {
         refs.entry(pull.head_repository)
             .or_default()
             .insert(pull.head_ref.clone());
@@ -46,8 +47,8 @@ pub(in crate::api) async fn load<'a>(
         .map(|pull| Head {
             number: pull.number,
             version: pull.version,
-            oid: match checked {
-                Some((captured, _)) => pull.head_repository.and_then(|fork| {
+            oid: match captured {
+                Some(captured) => pull.head_repository.and_then(|fork| {
                     captured
                         .fork_heads
                         .get(&format!("{fork}:{}", pull.head_ref))
@@ -62,11 +63,8 @@ pub(in crate::api) async fn load<'a>(
         .collect();
     let input = crate::cells::repository::rollups::Input {
         heads,
-        source_token: checked.map_or_else(
-            || source_token.map(str::to_owned),
-            |(captured, _)| captured.source_token.clone(),
-        ),
-        check_revision: checked.map(|(_, revision)| revision),
+        source_token: captured.and_then(|context| context.source_token.clone()),
+        check_revision,
     };
     let cell = app::repository_cell(server, repo)?;
     let rows = app::query_output(

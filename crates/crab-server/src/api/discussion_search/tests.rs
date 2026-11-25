@@ -2,7 +2,7 @@ use crate::test_support::http::Harness;
 use axum::http::{StatusCode, header};
 use serde_json::{Value, json};
 
-mod check_status;
+mod fork_heads;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Chromium and the built embedded UI"]
@@ -67,7 +67,7 @@ async fn browser_filters_pull_requests_by_branch_and_check_status() {
     .await
     .error_for_status()
     .unwrap();
-    check_status::ready_search(
+    fork_heads::ready_search(
         &h,
         &alice,
         "/api/repos/team/private/pulls",

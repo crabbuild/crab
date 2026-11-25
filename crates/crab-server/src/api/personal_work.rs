@@ -148,7 +148,7 @@ struct Position {
     kind: SubjectKind,
     repository: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    check_snapshot: Option<[u8; 32]>,
+    head_snapshot: Option<[u8; 32]>,
 }
 
 impl Position {
@@ -191,7 +191,7 @@ async fn scope(
 ) -> Result<Scope> {
     let query = crate::cells::repository::search::Query::parse(request.search.query.as_deref())
         .map_err(Error::Invalid)?;
-    let needs_member = query.uses_check_status() || query.needs_review_source();
+    let needs_member = query.needs_pull_heads();
     let mut repositories: Vec<_> = catalog::visible_matching(server, principal, None, |repo| {
         request.selection.includes(repo)
     })
@@ -407,10 +407,10 @@ async fn page(
     let mut items = Vec::new();
     let limit = usize::from(request.search.limit);
     let sort = request.search.sort;
-    let mut check_snapshots = BTreeMap::new();
+    let mut head_snapshots = BTreeMap::new();
     while let Some((repo, page)) = pages.try_next().await? {
-        if let Some(snapshot) = page.check_snapshot {
-            check_snapshots.insert(repo.id, snapshot);
+        if let Some(snapshot) = page.head_snapshot {
+            head_snapshots.insert(repo.id, snapshot);
         }
         items.extend(page.items.into_iter().map(|item| Row {
             repository: RepositoryLink {
@@ -423,12 +423,12 @@ async fn page(
         items.sort_unstable_by_key(|row| Reverse((row.item.key(sort), row.repository.id)));
         items.truncate(limit + 1);
     }
-    let check_snapshot = if check_snapshots.is_empty() {
+    let head_snapshot = if head_snapshots.is_empty() {
         None
     } else {
-        Some(*blake3::hash(&serde_json::to_vec(&check_snapshots)?).as_bytes())
+        Some(*blake3::hash(&serde_json::to_vec(&head_snapshots)?).as_bytes())
     };
-    if position.is_some_and(|position| position.check_snapshot != check_snapshot) {
+    if position.is_some_and(|position| position.head_snapshot != head_snapshot) {
         return Err(Error::PageChanged);
     }
     let current = scope(server, principal, account, request).await?;
@@ -446,7 +446,7 @@ async fn page(
                     number: row.item.number,
                     kind: row.item.kind,
                     repository: row.repository.id,
-                    check_snapshot,
+                    head_snapshot,
                 }
                 .encode(&initial.key)
             })

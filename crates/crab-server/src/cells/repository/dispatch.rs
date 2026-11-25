@@ -437,11 +437,11 @@ pub(in crate::cells) fn dispatch_read(
             invoke_read::<collaboration::bulk::Select>(context, input)
         }
         GetPullLifecycleStatus::ID => invoke_read::<GetPullLifecycleStatus>(context, input),
-        search::reviews::status::GetSourceState::ID => {
-            invoke_read::<search::reviews::status::GetSourceState>(context, input)
+        search::heads::GetSourceState::ID => {
+            invoke_read::<search::heads::GetSourceState>(context, input)
         }
-        search::check_status::ListForkRefs::ID => {
-            invoke_read::<search::check_status::ListForkRefs>(context, input)
+        search::heads::ListForkRefs::ID => {
+            invoke_read::<search::heads::ListForkRefs>(context, input)
         }
         review_dismissals::GetReviewState::ID => {
             invoke_read::<review_dismissals::GetReviewState>(context, input)

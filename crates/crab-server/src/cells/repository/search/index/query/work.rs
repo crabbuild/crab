@@ -38,7 +38,7 @@ pub(crate) struct Item {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Page {
     pub items: Vec<Item>,
-    pub check_snapshot: Option<[u8; 32]>,
+    pub head_snapshot: Option<[u8; 32]>,
 }
 
 impl Item {
@@ -74,28 +74,16 @@ impl Read for ListWorkspaceWork {
             return Err(crate::cells::Error::Invalid("Invalid workspace page"));
         }
         ensure_ready(context)?;
-        let Criteria {
-            query,
-            archived,
-            review,
-            checks,
-            ..
-        } = criteria(context, &input.search, input.kind)?;
+        let criteria = criteria(context, &input.search, input.kind)?;
         let mut items = Vec::new();
         // Each kind uses its existing time index before joining the canonical title.
         for kind in [SubjectKind::Issue, SubjectKind::Pull] {
             if input.kind.is_some_and(|selected| selected != kind) {
                 continue;
             }
-            let mut bindings = Bindings::new(
-                &input.search,
-                review.as_ref(),
-                checks.as_ref(),
-                archived.unwrap_or(false),
-                context.now_ms(),
-            )?;
+            let mut bindings = Bindings::new(&input.search, &criteria, context.now_ms())?;
             let by_kind = kind_filter(Some(kind), &mut bindings);
-            let predicate = expression(&query.expression, &mut bindings)?;
+            let predicate = expression(&criteria.query.expression, &mut bindings)?;
             let boundary = if let Some(after) = input.after {
                 validate_number(after.number)?;
                 let time = bindings.bind(integer(after.time)?);
@@ -123,7 +111,7 @@ impl Read for ListWorkspaceWork {
                            FROM discussion_index d {} WHERE {by_kind} AND ({predicate}) AND {boundary}
                            ORDER BY {column} DESC, d.number DESC LIMIT {limit}) work
                      JOIN {table} item ON item.number = work.number",
-                    bindings.check_cte, bindings.check_joins
+                    bindings.head_cte(), bindings.head_joins()
                 ),
                 &bindings.values,
             )?;
@@ -147,15 +135,18 @@ impl Read for ListWorkspaceWork {
         }
         items.sort_unstable_by_key(|item| Reverse(item.key(input.search.sort)));
         items.truncate(usize::from(input.search.limit) + 1);
-        let check_snapshot = checks
-            .map(|checks| {
-                serde_json::to_vec(&(&input.search.check_context, checks))
+        let head_snapshot = input
+            .search
+            .pull_heads
+            .as_ref()
+            .map(|heads| {
+                serde_json::to_vec(&(heads, &criteria.review, criteria.check_revision))
                     .map(|data| *blake3::hash(&data).as_bytes())
             })
             .transpose()?;
         Ok(Page {
             items,
-            check_snapshot,
+            head_snapshot,
         })
     }
 }

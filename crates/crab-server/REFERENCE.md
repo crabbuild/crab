@@ -4681,11 +4681,12 @@ An unprotected branch is never review-required, and an approved match still need
 at least one active approval. Checks and other merge conditions are independent.
 
 Head-dependent filters bind the verified Git source token to a ready immutable
-ref projection. Pending reconciliation returns 503 `review_index_pending` with
-visible retry. Source changes and effective rule edits invalidate cursors.
+ref projection and capture current private fork heads from their own repositories.
+Pending reconciliation returns 503 `review_index_pending` with visible retry.
+Source changes and effective rule edits invalidate repository and workspace cursors.
 An empty repository requires no Git manifest. Completed merges use the recorded
 source head, decoded by the canonical binary codec, even after branch deletion.
-Filtered rollups retain the same captured source rather than resolving newer refs.
+Filtered rollups retain the same captured source, including fork heads.
 Missing unmerged source refs have no proven latest head: rollups report null
 source/check/review fields. Retaining that historical source head remains parity
 work; the opening OID is not used as a freshness fallback.
@@ -4714,7 +4715,8 @@ Successful, neutral, and skipped reports count as completed without failure.
 An unmerged PR whose branch disappeared has no current result. Merged PRs
 retain the result of their recorded source commit.
 
-The filter and list rollup use the same per-commit CI counts. Local heads bind
+The filter and list rollup use the same per-commit CI counts. Both review and
+check filters use the same head capture. Local heads bind
 to the verified Git ref projection. Private fork branches are read from one
 pinned ref view per upstream-authorized fork. Fork lookups are concurrent and
 the captured head map is limited to 1 MiB by the Cell request budget. An
