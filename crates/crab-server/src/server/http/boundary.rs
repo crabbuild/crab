@@ -573,7 +573,9 @@ fn integration_api_path(path: &str) -> bool {
         && segments.next().is_some_and(|value| !value.is_empty())
         && segments.next().is_some_and(|value| !value.is_empty())
         && match segments.next() {
-            Some("check-runs") => segments.next().is_none(),
+            Some("check-runs") => segments
+                .next()
+                .is_none_or(|value| value == "sarif" && segments.next().is_none()),
             Some("statuses") => {
                 segments.next().is_some_and(|value| !value.is_empty()) && segments.next().is_none()
             }
@@ -667,6 +669,9 @@ mod tests {
         ));
         assert!(integration_api_path("/api/repos/team/repo/check-runs"));
         assert!(integration_api_path(
+            "/api/repos/team/repo/check-runs/sarif"
+        ));
+        assert!(integration_api_path(
             "/api/repos/team/repo/commits/0123456789012345678901234567890123456789/check-runs"
         ));
         assert!(integration_api_path(
@@ -675,6 +680,7 @@ mod tests {
         for path in [
             "/api/repos/team/repo/pulls/1",
             "/api/repos/team/repo/check-runs/1",
+            "/api/repos/team/repo/check-runs/sarif/extra",
             "/api/repos/team/repo/statuses/oid/extra",
             "/api/repos/team/repo/commits/oid/statuses",
             "/api/repos/team/repo/commits/oid/check-runs/1/extra",

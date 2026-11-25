@@ -310,6 +310,11 @@ Prioritize the workflows needed to change, govern, and operate private code
 with an external identity provider and CI. This order reflects workflow
 criticality and adoption dependencies.
 
+Repository-scoped SARIF uploads now create exact-commit check runs with
+visible findings, source-line links, and required-check enforcement. Alert
+history, baseline comparison, and audited policy exceptions remain separate
+delivery work.
+
 | Priority | Remaining delivery | Acceptance evidence |
 | --- | --- | --- |
 | P0 | The two-process RustFS gate uses Chromium for PR creation, review submission, and protected merge. The browser shows the required check provider and commit, blocks a revoked reviewer, and discards the successful merge reply. The test replays the browser's exact request on the surviving replica, verifies the merged browser view, and fetches the published commit with stock Git. Repeat on the target deployment with a live GitHub App. | With a deployed App and object store, prove that a revoked reviewer, an old head, and a wrong check provider cannot satisfy policy. Force a lost publication reply and peer handoff, then fetch the intended merge with stock Git. [Required check behavior](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks) |

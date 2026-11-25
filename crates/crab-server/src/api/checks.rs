@@ -26,6 +26,8 @@ use crate::{
     server::Server,
 };
 
+mod sarif;
+
 const MAX_STEPS: usize = 50;
 const MAX_ANNOTATIONS: usize = 50;
 const MAX_OUTPUT_BYTES: usize = 192 * 1024;
@@ -153,6 +155,7 @@ pub(crate) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             get(detail).patch(edit),
         )
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
+        .merge(sarif::routes())
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
 
@@ -290,11 +293,20 @@ async fn create(
     input: std::result::Result<Json<NewCheckRun>, JsonRejection>,
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &key)?;
-    let repo = repo.as_ref();
     if !principal.can_write(repo.id) {
         return Err(Error::CheckPermission);
     }
-    let Json(mut input) = input?;
+    let Json(input) = input?;
+    create_run(&server, &principal, &repo, scope, input).await
+}
+
+async fn create_run(
+    server: &Server,
+    principal: &Principal,
+    repo: &crate::repository::Repository,
+    scope: statuses::CommitScope,
+    mut input: NewCheckRun,
+) -> Result<(StatusCode, Json<Value>)> {
     let submission_id = app::submission_id(&input.request_id)?;
     validate_plain(
         &input.name,
@@ -310,8 +322,8 @@ async fn create(
     let parsed_oid = statuses::parse_oid(&input.head_sha)?;
     input.request_id = Uuid::from_bytes(submission_id).to_string();
     input.head_sha = parsed_oid.to_string();
-    let actor = app::actor(&principal)?;
-    let read = crate::app::repository_cell(&server, repo)?;
+    let actor = app::actor(principal)?;
+    let read = crate::app::repository_cell(server, repo)?;
     if let Some(saved) = crate::app::query_output(
         read.client
             .query::<GetCheckCreateSubmission>(
@@ -324,7 +336,7 @@ async fn create(
         if !same_create(&saved, &actor, &input)? {
             return Err(Error::RequestConflict);
         }
-        let routed = crate::app::repository_cell(&server, repo)?;
+        let routed = crate::app::repository_cell(server, repo)?;
         let detail = created_check(crate::app::command_output(
             routed
                 .client
@@ -340,12 +352,12 @@ async fn create(
     }
 
     input.head_sha = scope
-        .require_commit(&server, repo, parsed_oid, statuses::CommitAccess::Write)
+        .require_commit(server, repo, parsed_oid, statuses::CommitAccess::Write)
         .await?;
     if !principal.can_write(repo.id) {
         return Err(Error::CheckPermission);
     }
-    let routed = crate::app::repository_cell(&server, repo)?;
+    let routed = crate::app::repository_cell(server, repo)?;
     let detail = created_check(crate::app::command_output(
         routed
             .client

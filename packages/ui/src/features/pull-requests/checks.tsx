@@ -217,7 +217,12 @@ export function CheckRuns({
               </aside>
               <div className="check-run-detail">
                 <Result state={detail} timingLabel="Check details">
-                  {(run) => <CheckRunDetail run={run} />}
+                  {(run) => (
+                    <CheckRunDetail
+                      run={run}
+                      sourceRepo={scopeToPull || candidate ? undefined : repo}
+                    />
+                  )}
                 </Result>
               </div>
             </>
@@ -278,7 +283,13 @@ function MirrorRefspec({ refspec }: { refspec: string }) {
   );
 }
 
-function CheckRunDetail({ run }: { run: CheckRun }) {
+function CheckRunDetail({
+  run,
+  sourceRepo,
+}: {
+  run: CheckRun;
+  sourceRepo?: Repository;
+}) {
   const output = run.output;
   if (!output) return null;
   return (
@@ -306,25 +317,43 @@ function CheckRunDetail({ run }: { run: CheckRun }) {
         <section className="check-annotations" aria-label="Annotations">
           <h4>Annotations</h4>
           <ul>
-            {output.annotations.map((annotation, index) => (
-              <li
-                className={annotation.level}
-                key={`${annotation.path}:${annotation.start_line}:${index}`}
-              >
-                <DotFillIcon />
-                <div>
-                  <strong>
-                    {annotation.title ?? annotation.message.split("\n")[0]}
-                  </strong>
-                  <code>
-                    {annotation.path}:{annotation.start_line}
-                    {annotation.end_line !== annotation.start_line &&
-                      `–${annotation.end_line}`}
-                  </code>
-                  {annotation.title && <p>{annotation.message}</p>}
-                </div>
-              </li>
-            ))}
+            {output.annotations.map((annotation, index) => {
+              const severity = {
+                failure: "Error",
+                warning: "Warning",
+                notice: "Notice",
+              }[annotation.level];
+              const location =
+                `${annotation.path}:${annotation.start_line}` +
+                (annotation.end_line === annotation.start_line
+                  ? ""
+                  : `–${annotation.end_line}`);
+              const href =
+                sourceRepo &&
+                sourceLocation(sourceRepo, run.head_sha, annotation);
+              return (
+                <li
+                  className={annotation.level}
+                  key={`${annotation.path}:${annotation.start_line}:${index}`}
+                >
+                  <DotFillIcon aria-hidden="true" />
+                  <div>
+                    <strong className="wrap-anywhere">
+                      {severity}
+                      {annotation.title && ` · ${annotation.title}`}
+                    </strong>
+                    {href ? (
+                      <Link className="wrap-anywhere underline" href={href}>
+                        <code>{location}</code>
+                      </Link>
+                    ) : (
+                      <code className="wrap-anywhere">{location}</code>
+                    )}
+                    <p className="whitespace-pre-wrap">{annotation.message}</p>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         </section>
       )}
@@ -359,4 +388,27 @@ function CheckRunDetail({ run }: { run: CheckRun }) {
       </section>
     </article>
   );
+}
+
+function sourceLocation(
+  repo: Repository,
+  sha: string,
+  annotation: CheckAnnotation,
+) {
+  const path = annotation.path;
+  if (
+    path.includes("\\") ||
+    path.split("/").some((part) => !part || part === "." || part === "..")
+  )
+    return undefined;
+  const hex = Array.from(new TextEncoder().encode(path), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  const href = repoHref(repo, {
+    rev: sha,
+    path: hex,
+    kind: "Blob",
+    repository_id: repo.id,
+  });
+  return `${href}#L${annotation.start_line}`;
 }

@@ -5,6 +5,8 @@ use serde_json::Value;
 use serde_json::json;
 use url::Url;
 
+mod sarif;
+
 const ROOT: &str = "/api/repos/team/private/pulls";
 
 async fn mutate(

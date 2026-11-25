@@ -5534,6 +5534,34 @@ Each output can contain:
 
 Encoded output can contain at most 192 KiB. Requests can contain at most 256 KiB. A commit retains at most 100 runs. Lists default to 30 and accept 1 to 50 with an exclusive `before` cursor.
 
+### Publish SARIF findings
+
+Send `POST /api/repos/{owner}/{name}/check-runs/sarif` with repository Write
+access or a repository-scoped write token using Basic authentication
+(`crab` as the username). The JSON body supplies `request_id` (UUID),
+`head_sha` (exact commit), `category` (stable scanner name), and `sarif`
+(the SARIF 2.1.0 JSON object). Pass `?pull={number}` for the existing
+authorized live fork-head scope. Resend the same request ID and normalized
+findings to recover a lost response.
+
+A report creates the completed check `Code scanning / <category>`.
+It fails on errors by default. Use `"fail_on":"warning"` to fail on errors
+and warnings. A run that reports unsuccessful execution also fails the check.
+To require the scan before merging, add that exact check name to branch
+protection or a ruleset. Provider-bound checks still require their configured
+reporting integration.
+
+The request limit is 1 MiB with at most 50 current findings across all runs.
+The normal check-output size limits apply. Successful runs include an explicit
+results array, including an empty array for a clean scan. Report findings with
+inline text or Markdown messages. Emit explicit severity when a finding uses
+external rule components or the run supplies invocation-level rule overrides.
+Crab counts current findings and uses the first resolvable file and line per
+finding. For absolute file URIs, supply `checkout_uri` or a `%SRCROOT%`
+mapping. Unmapped or unlocated findings still count and appear in the check
+details. PR **Checks** links annotations from a branch in the repository to
+the reported commit and line.
+
 ### Send repository webhooks
 
 Add up to 20 distinct approved receivers per repository UUID in the server configuration. Set

@@ -7,6 +7,10 @@ Root `AGENTS.md` and `crates/AGENTS.md` apply. Read
 
 Owns the repository HTTP application, native Git endpoints, authentication, and embedded React assets. It composes remote-git/read/write/storage APIs; shared Git and storage mechanics remain in their owner crates.
 
+`api/checks/sarif.rs` normalizes scanner uploads into the exact-commit check
+owner. Finding output and replay use existing check records. Required checks
+evaluate the resulting conclusion through the existing provider policy.
+
 ## Read first
 
 Read `crates/crab-server/CELLAR.md` for native Cellar storage, lifecycle,
