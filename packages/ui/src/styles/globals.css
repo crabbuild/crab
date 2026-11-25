@@ -3909,11 +3909,6 @@ main {
   margin: -4px 0 --spacing(0.5);
   font-size: var(--text-xs);
 }
-.refs-page > h2 {
-  margin: 0 0 --spacing(5);
-  font-size: var(--text-2xl);
-  line-height: 1.3;
-}
 .refs-tabs {
   display: flex;
   gap: --spacing(1);
@@ -6738,9 +6733,6 @@ main {
   .database-preview > aside button {
     width: auto;
     flex: 0 0 auto;
-  }
-  .refs-page > h2 {
-    margin-bottom: --spacing(4);
   }
   .releases-heading {
     align-items: flex-start;

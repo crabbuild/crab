@@ -246,11 +246,11 @@ async fn native_browser_squashes_a_protected_private_fork_pull_request() {
         .run(&["open", &format!("{}/{owner}/library", h.origin)])
         .await;
     browser.sign_in().await;
-    for action in ["Fork repository", "Create fork"] {
-        browser.run(&["wait", "--text", action]).await;
+    for label in ["Fork repository", "Create fork"] {
+        browser.run(&["wait", "--text", label]).await;
         browser
             .run(&[
-                "find", "role", "button", "click", "--name", action, "--exact",
+                "find", "role", "button", "click", "--name", label, "--exact",
             ])
             .await;
     }
@@ -258,6 +258,56 @@ async fn native_browser_squashes_a_protected_private_fork_pull_request() {
     browser.run(&["wait", "--text", "README.md"]).await;
     let path = browser.run(&["get", "url"]).await;
     assert!(path.trim().ends_with(&format!("/{owner}/library-fork")));
+    browser
+        .run(&[
+            "find",
+            "role",
+            "link",
+            "click",
+            "--name",
+            "View forks",
+            "--exact",
+        ])
+        .await;
+    let fork_link = r#"[aria-label="Repository results"] a[href$="/library-fork"]"#;
+    browser.run(&["wait", fork_link]).await;
+    browser.run(&["click", fork_link]).await;
+    browser.run(&["wait", "--text", "Forked from"]).await;
+    let branches = format!("{}/{owner}/library-fork/branches", h.origin);
+    browser.run(&["open", &branches]).await;
+    browser.run(&["wait", "--text", "Copy from upstream"]).await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Copy from upstream",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", r#"[role="dialog"] [aria-label="Copy feature"]"#])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Copy feature",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", r#"a[href$="/library-fork/tree/feature"]"#])
+        .await;
+    browser
+        .run(&["find", "role", "link", "click", "--name", "Code", "--exact"])
+        .await;
+    browser.run(&["wait", "--text", "Forked from"]).await;
     git(local.path(), &["checkout", "main"]).await;
     std::fs::write(local.path().join("UPSTREAM.txt"), "upstream change\n").unwrap();
     git(local.path(), &["add", "UPSTREAM.txt"]).await;

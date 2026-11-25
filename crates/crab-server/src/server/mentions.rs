@@ -82,7 +82,7 @@ pub(super) async fn recipient_has_grant(
             !organization.teams.is_empty(),
         )
         .await?;
-        if access::organization_access(&grant, &organization.teams).is_some() {
+        if access::organization_access(&grant, &organization.teams, grants.baseline).is_some() {
             return Ok(true);
         }
     }
@@ -714,6 +714,7 @@ pub(crate) async fn drain_repository(server: &Server, repo: &Repository) -> Resu
                         server,
                         access.id,
                         &access.teams,
+                        snapshot.baseline,
                         None,
                     )
                     .await?,

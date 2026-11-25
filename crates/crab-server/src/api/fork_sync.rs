@@ -12,6 +12,7 @@ use crab_git::receive_plan::{ReceivePlanError, RefUpdate};
 use gix_hash::ObjectId;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::{
     app,
@@ -40,8 +41,9 @@ struct Preview {
 #[serde(deny_unknown_fields)]
 struct Update {
     branch: String,
-    fork_oid: String,
+    fork_oid: Option<String>,
     upstream_oid: String,
+    request_id: Option<Uuid>,
 }
 
 fn verify_branch(branch: &str) -> app::Result<()> {
@@ -61,21 +63,19 @@ async fn preview(
 ) -> app::Result<Json<Value>> {
     verify_branch(&input.branch)?;
     let fork = app::repository(&server, &principal, &key)?;
-    // A fork's current ACL is the upstream ACL. The principal's repository
-    // scope stays on the fork, even when reading the linked upstream branch.
     let source = fork.fork_source(&server).ok_or(app::Error::NotFound)?;
+    app::require_related_read(&server, &principal, &fork, &source).await?;
     let _permit =
         super::read_admission::acquire_bulk(&server).map_err(|_| app::Error::MergeBusy)?;
     let (fork_refs, upstream_refs) = tokio::try_join!(capture(&fork), capture(&source))?;
-    let fork_oid = fork_refs
-        .refs()
-        .get(&input.branch)
-        .ok_or(app::Error::NotFound)?;
+    let fork_oid = fork_refs.refs().get(&input.branch);
     let upstream_oid = upstream_refs.refs().get(&input.branch);
-    let state = match upstream_oid {
-        None => "upstream_missing",
-        Some(upstream_oid) if upstream_oid == fork_oid => "up_to_date",
-        Some(upstream_oid) => {
+    let state = match (fork_oid, upstream_oid) {
+        (None, None) => return Err(app::Error::NotFound),
+        (Some(_), None) => "upstream_missing",
+        (None, Some(_)) => "fork_missing",
+        (Some(fork_oid), Some(upstream_oid)) if upstream_oid == fork_oid => "up_to_date",
+        (Some(fork_oid), Some(upstream_oid)) => {
             if upstream_refs
                 .git_visibility_index()
                 .await
@@ -97,7 +97,7 @@ async fn preview(
             }
         }
     };
-    app::membership(&server, &principal, &fork).await?;
+    app::require_related_read(&server, &principal, &fork, &source).await?;
     Ok(Json(
         json!({"state":state,"branch":input.branch,"fork_oid":fork_oid,"upstream_oid":upstream_oid}),
     ))
@@ -140,14 +140,23 @@ async fn update(
             ))
     };
     let fork = app::repository(&server, &principal, &key)?;
-    let old = oid(&input.fork_oid)?;
+    let old = input.fork_oid.as_deref().map(oid).transpose()?;
     let new = oid(&input.upstream_oid)?;
+    let request_id = match (old, input.request_id) {
+        (None, Some(id)) if !id.is_nil() => Some(id),
+        (Some(_), None) => None,
+        _ => {
+            return Err(app::Error::Invalid(
+                "A branch copy requires a request ID and no fork tip",
+            ));
+        }
+    };
     let update = RefUpdate {
         name: input.branch.clone(),
-        old: Some(old),
+        old,
         new: Some(new),
     };
-    let result = synchronize_fork(server, principal, fork, update).await;
+    let result = synchronize_fork(server, principal, fork, update, request_id).await;
     Ok(match result {
         Ok(()) => Json(json!({"branch":input.branch,"commit":new.to_string()})).into_response(),
         Err(error) => sync_error(error),
@@ -180,6 +189,12 @@ fn sync_error(error: ReceiveError) -> Response {
             StatusCode::CONFLICT,
             "fork_diverged",
             "This branch has its own commits. Merge upstream changes in Git",
+        ),
+        ReceiveError::Graph(ReceivePlanError::Namespace(_))
+        | ReceiveError::Write(crab_write::WriteError::Namespace(_)) => (
+            StatusCode::CONFLICT,
+            "branch_name_conflict",
+            "The upstream branch name conflicts with a branch in this fork",
         ),
         ReceiveError::Busy
         | ReceiveError::Coordination(crab_coordination::CoordinationError::PushLockHeld {

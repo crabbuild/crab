@@ -1550,6 +1550,14 @@ async fn commit_authorized(
     if !current.principal.can_write(entry.id) {
         return Err(ReceiveError::Forbidden);
     }
+    let upstream = match mutation.publication {
+        Publication::ForkSync { source, .. } => Some(source.as_ref()),
+        Publication::BranchUpdate(branch) => branch.upstream.as_deref(),
+        _ => None,
+    };
+    if let Some(upstream) = upstream {
+        crate::app::require_related_read(server, &current.principal, entry, upstream).await?;
+    }
     let identity = principal.identity().ok_or(ReceiveError::Forbidden)?;
     if principal.import_grant().is_none()
         && crate::repository::settings::load_lifecycle(server, entry)
@@ -1628,8 +1636,14 @@ async fn commit_authorized(
                 "Review suggestions require a single branch update",
             ));
         };
-        crate::api::authorize_suggestion_publication(server, entry, suggestion, &update.name)
-            .await?;
+        crate::api::authorize_suggestion_publication(
+            server,
+            entry,
+            &current.principal,
+            suggestion,
+            &update.name,
+        )
+        .await?;
     }
     if let Publication::BranchUpdate(branch) = mutation.publication {
         let [update] = mutation.updates else {

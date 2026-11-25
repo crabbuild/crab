@@ -13,10 +13,13 @@ use super::{
 };
 use crate::{
     RepositoryAccess, RepositoryMember,
-    catalog::{CatalogRecord, CatalogStore, MembershipActor, RepositoryApplicationState},
+    catalog::{
+        CatalogRecord, CatalogStore, MembershipActor, RepositoryApplicationState,
+        RepositoryBaseline,
+    },
     repository::{
         MaintenanceTrigger, Repository,
-        settings::{RulesetScope, with_ruleset_lease},
+        settings::{RulesetScope, with_destination_ruleset_leases},
     },
     server::Server,
 };
@@ -226,11 +229,13 @@ async fn import_repository(
     let fork_source = match &fork {
         None => None,
         Some(fork) => {
+            account.check(server).await?;
             let (source, _) = fork.current(server).await?;
             let grant = context.register(InternalGit::Fetch(Arc::new(FetchGrant {
                 route: repository_route(&source),
                 writer: Arc::clone(job),
                 fork: Arc::clone(fork),
+                destination: organization,
             })));
             Some((
                 context.destination_url(&source.config.owner, &source.config.name),
@@ -244,10 +249,13 @@ async fn import_repository(
     };
     let key = key.as_ref().map(|value| value.as_str());
     let mut clone = Command::new("git");
-    clone
-        .args(["clone", "--mirror", "--quiet", "--"])
-        .arg(source)
-        .arg(&mirror);
+    clone.args(["clone", "--quiet"]);
+    if request.default_branch_only {
+        clone.args(["--bare", "--single-branch", "--no-tags"]);
+    } else {
+        clone.arg("--mirror");
+    }
+    clone.arg("--").arg(source).arg(&mirror);
     configure_git(&mut clone, request.token.as_deref(), key);
     run_git(clone, cancellation, key.or(request.token.as_deref())).await?;
     drop(fork_source);
@@ -276,6 +284,11 @@ async fn import_repository(
         )));
     }
     let branch = default_branch(&mirror, &refs, cancellation).await?;
+    if request.default_branch_only && refs.len() != 1 {
+        return Err(ImportError::Git(
+            "The default-branch clone contains extra refs".into(),
+        ));
+    }
     let snapshot = jobs::Snapshot::new(branch, &refs);
     job.pin(&snapshot).await?;
     job.update(jobs::State::Running, "Preparing Crab repository")
@@ -424,30 +437,29 @@ pub(super) async fn finish_destination(
         .await
         .map_err(ImportError::Setup)?;
     job.verify().await?;
-    let mark_ready = || async {
+    let mark_ready = |baseline| async move {
         catalog
-            .mark_cell_ready(id)
+            .publish_cell(id, baseline)
             .await
             .map(|_| ())
             .map_err(ImportError::Catalog)
     };
-    if let Some(authority) = organization
-        .map(|owner| owner.id)
-        .or(fork.map(|source| source.organization))
-    {
-        // The quarantine stays private until the catalog commit. Hold the
-        // policy lease through that commit so a default or ruleset edit
-        // cannot retarget the repository after the last policy check.
-        let published: crate::app::Result<_> = with_ruleset_lease(
+    let destination = organization.map(|owner| owner.id);
+    let source = fork.map(|source| source.organization);
+    if let Some(authority) = destination.or(source) {
+        // Hold both policy scopes through the final catalog commit so a
+        // source restriction or destination edit cannot bypass verification.
+        let published: crate::app::Result<_> = with_destination_ruleset_leases(
             server,
-            RulesetScope::Organization(authority),
+            RulesetScope::Organization(source.unwrap_or(authority)),
+            destination,
             &server.cancellation,
             |cancel| async move {
                 let outcome = async {
                     if cancel.is_cancelled() {
                         return Err(ImportError::Cancelled);
                     }
-                    let policy = validate_destination_policy(
+                    let (policy, baseline) = validate_destination_policy(
                         server,
                         catalog,
                         id,
@@ -462,10 +474,12 @@ pub(super) async fn finish_destination(
                             .authorize_publication(server, id, snapshot, policy)
                             .await?;
                     }
+                    // Publish the captured base permission while policy writers
+                    // still wait on this lease.
                     if cancel.is_cancelled() {
                         return Err(ImportError::Cancelled);
                     }
-                    mark_ready().await
+                    mark_ready(baseline).await
                 }
                 .await;
                 Ok(outcome)
@@ -474,7 +488,7 @@ pub(super) async fn finish_destination(
         .await;
         published.map_err(ImportError::organization)??;
     } else {
-        mark_ready().await?;
+        mark_ready(RepositoryBaseline::Organization).await?;
     }
     install_destination(server, catalog, id).await
 }
@@ -487,7 +501,7 @@ async fn validate_destination_policy(
     owner: Option<OrganizationOwner>,
     fork: Option<&ForkSource>,
     snapshot: &jobs::Snapshot,
-) -> Result<u64, ImportError> {
+) -> Result<(u64, RepositoryBaseline), ImportError> {
     use crate::cells::repository::rulesets::{ActiveRulesets, BypassActor, BypassContext};
     let (document, _) = catalog.load().await.map_err(ImportError::Catalog)?;
     let record = document
@@ -498,11 +512,19 @@ async fn validate_destination_policy(
     if record.forked_from != fork.map(|source| source.source) {
         return Err(ImportError::DestinationChanged);
     }
-    if let Some(source) = fork {
+    let baseline = if let Some(source) = fork {
         // This read shares the organization's policy lease with both settings
         // writers. A disabled fork stays quarantined even after its refs commit.
         source.current(server).await?;
-    }
+        let upstream = record
+            .access_record(document.repository_by_id(source.source))
+            .map_err(ImportError::Catalog)?;
+        let policy = source.policy_grant(server, false).await?;
+        RepositoryBaseline::capture(upstream.baseline().resolve(policy.baseline))
+            .map_err(ImportError::Catalog)?
+    } else {
+        RepositoryBaseline::Organization
+    };
     let repository = crate::repository::catalog::materialize_record(catalog, record)
         .await
         .map_err(ImportError::Setup)?;
@@ -553,7 +575,7 @@ async fn validate_destination_policy(
             return Err(ImportError::Ruleset);
         }
     }
-    Ok(inherited.version)
+    Ok((inherited.version, baseline))
 }
 
 async fn install_destination(

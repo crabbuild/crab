@@ -59,7 +59,15 @@ async fn access(
     {
         return Err(Error::NotFound);
     }
-    match management_access(server, record, actor, Management::Visibility).await? {
+    match management_access(
+        server,
+        record,
+        record.baseline(),
+        actor,
+        Management::Visibility,
+    )
+    .await?
+    {
         SourceAccess::None => Err(Error::NotFound),
         access => Ok(access),
     }

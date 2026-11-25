@@ -68,6 +68,11 @@ pub struct CatalogRecord {
     pub(crate) metadata_updated_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<Uuid>,
+    #[serde(
+        default,
+        skip_serializing_if = "RepositoryBaseline::inherits_organization"
+    )]
+    fork_baseline: RepositoryBaseline,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) fork_owner: Option<MembershipActor>,
     pub name: String,
@@ -201,11 +206,53 @@ pub struct MembershipSnapshot {
     pub(crate) forked_from: Option<Uuid>,
     #[serde(skip)]
     pub(crate) fork_owner: Option<MembershipActor>,
+    #[serde(skip)]
+    pub(crate) baseline: RepositoryBaseline,
     pub members: Vec<RepositoryMember>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<RepositoryGroup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) organization: Option<OrganizationAccess>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RepositoryBaseline {
+    #[default]
+    Organization,
+    None,
+    Read,
+    Write,
+    Admin,
+}
+
+impl RepositoryBaseline {
+    pub(crate) fn capture(access: Option<RepositoryAccess>) -> Result<Self, CatalogError> {
+        match access {
+            None => Ok(Self::None),
+            Some(RepositoryAccess::Read) => Ok(Self::Read),
+            Some(RepositoryAccess::Write) => Ok(Self::Write),
+            Some(RepositoryAccess::Admin) => Ok(Self::Admin),
+            _ => Err(CatalogError::Invalid("invalid base repository permission")),
+        }
+    }
+
+    fn inherits_organization(&self) -> bool {
+        *self == Self::Organization
+    }
+
+    pub(crate) fn resolve(
+        self,
+        organization: Option<RepositoryAccess>,
+    ) -> Option<RepositoryAccess> {
+        match self {
+            Self::Organization => organization,
+            Self::None => None,
+            Self::Read => Some(RepositoryAccess::Read),
+            Self::Write => Some(RepositoryAccess::Write),
+            Self::Admin => Some(RepositoryAccess::Admin),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -317,6 +364,7 @@ impl CatalogDocument {
                 || !record.timestamps_valid()
                 || record.ownership_epoch > record.name_version()
                 || !record.property_seed_valid()
+                || !record.fork_baseline_valid()
                 || (record.visibility.value.is_public()
                     && record.application != RepositoryApplicationState::CellReady)
                 || !names.insert((record.owner.to_lowercase(), record.name.to_lowercase()))
@@ -510,6 +558,21 @@ fn membership_digest(
 }
 
 impl CatalogRecord {
+    fn fork_baseline_valid(&self) -> bool {
+        self.fork_baseline.inherits_organization()
+            || (self.organization.is_some()
+                && self.application == RepositoryApplicationState::CellReady)
+    }
+
+    pub(crate) fn baseline(&self) -> RepositoryBaseline {
+        match self.fork_baseline {
+            RepositoryBaseline::Organization if self.forked_from.is_some() => {
+                RepositoryBaseline::None
+            }
+            baseline => baseline,
+        }
+    }
+
     fn property_seed_valid(&self) -> bool {
         self.property_seed.is_none_or(|seed| {
             !seed.is_nil() && self.ownership_epoch != 0 && self.organization_id().is_some()
@@ -566,6 +629,7 @@ impl CatalogRecord {
             visibility: self.visibility.value,
             forked_from: self.forked_from,
             fork_owner: self.fork_owner.clone(),
+            baseline: self.baseline(),
             organization: source.organization.clone(),
             members: source.members.clone(),
             groups: source.groups.clone(),
@@ -693,6 +757,7 @@ impl CatalogStore {
             metadata_updated_at_ms: None,
             organization: None,
             forked_from: None,
+            fork_baseline: RepositoryBaseline::Organization,
             fork_owner: None,
             name,
             prefix,
@@ -744,6 +809,7 @@ impl CatalogStore {
                 metadata_updated_at_ms: None,
                 organization,
                 forked_from: None,
+                fork_baseline: RepositoryBaseline::Organization,
                 fork_owner: None,
                 name: input.name,
                 prefix: format!("browser-repositories/{id}"),
@@ -805,6 +871,7 @@ impl CatalogStore {
                 metadata_updated_at_ms: None,
                 organization,
                 forked_from,
+                fork_baseline: RepositoryBaseline::Organization,
                 fork_owner,
                 name,
                 prefix: format!("git-imports/{id}"),
@@ -869,6 +936,7 @@ impl CatalogStore {
             metadata_updated_at_ms: None,
             organization: None,
             forked_from: None,
+            fork_baseline: RepositoryBaseline::Organization,
             fork_owner: None,
             name,
             prefix,
@@ -1217,6 +1285,15 @@ impl CatalogStore {
         &self,
         repository: Uuid,
     ) -> Result<CatalogRecord, CatalogError> {
+        self.publish_cell(repository, RepositoryBaseline::Organization)
+            .await
+    }
+
+    pub(crate) async fn publish_cell(
+        &self,
+        repository: Uuid,
+        baseline: RepositoryBaseline,
+    ) -> Result<CatalogRecord, CatalogError> {
         for _ in 0..MAX_CAS_ATTEMPTS {
             let (mut document, etag) = self.load_for_mutation().await?;
             let record = document
@@ -1227,6 +1304,12 @@ impl CatalogStore {
             if record.application == RepositoryApplicationState::CellReady {
                 return Ok(record.clone());
             }
+            if record.forked_from.is_some() == baseline.inherits_organization() {
+                return Err(CatalogError::Invalid(
+                    "repository publication must match its fork lineage",
+                ));
+            }
+            record.fork_baseline = baseline;
             if record.fork_owner.is_some()
                 && record
                     .organization_id()

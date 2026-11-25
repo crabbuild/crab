@@ -3,6 +3,7 @@ use std::{io::BufReader, sync::Arc};
 use crab_git::receive_plan::{ReceivePlanError, RefUpdate};
 use crab_read::{UploadPackRequest, plan_upload_pack, upload_pack_repository_options};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use super::{MAX_BODY, REQUEST_BUDGET, ReceiveError, Result, publish};
 use crate::{
@@ -17,22 +18,27 @@ pub(crate) async fn synchronize_fork(
     principal: Principal,
     fork: Arc<Repository>,
     update: RefUpdate,
+    request_id: Option<Uuid>,
 ) -> Result<()> {
     let source = fork.fork_source(&server).ok_or(ReceiveError::NotFound)?;
-    let (Some(old), Some(new)) = (update.old, update.new) else {
-        return Err(ReceiveError::Request("Fork sync requires both branch tips"));
-    };
+    let new = update.new.ok_or(ReceiveError::Request(
+        "Fork sync requires an upstream branch tip",
+    ))?;
     let actor = principal.identity().ok_or(ReceiveError::Forbidden)?;
-    let binding = serde_json::to_vec(&(
+    let mut binding = serde_json::to_vec(&(
         fork.id,
         source.id,
         &update.name,
-        old.to_string(),
+        update.old.map(|old| old.to_string()),
         new.to_string(),
         actor.issuer,
         actor.subject,
     ))
     .map_err(std::io::Error::other)?;
+    if let Some(id) = request_id {
+        // An explicit later copy can recreate a branch that was deleted.
+        binding.extend_from_slice(id.as_bytes());
+    }
     let plan_id = blake3::derive_key("crab fork synchronization v1", &binding);
     let plan_id = blake3::Hash::from(plan_id).to_hex().to_string();
     if !app::membership(&server, &principal, &fork)
@@ -42,6 +48,7 @@ pub(crate) async fn synchronize_fork(
     {
         return Err(ReceiveError::Forbidden);
     }
+    app::require_related_read(&server, &principal, &fork, &source).await?;
     if publish::committed_plan(&fork, std::slice::from_ref(&update), &plan_id).await? {
         return Ok(());
     }
@@ -94,16 +101,17 @@ async fn sync_locked(
     plan_id: String,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    let (Some(old), Some(new)) = (update.old, update.new) else {
-        return Err(ReceiveError::Request("Fork sync requires both branch tips"));
-    };
+    let new = update.new.ok_or(ReceiveError::Request(
+        "Fork sync requires an upstream branch tip",
+    ))?;
+    app::require_related_read(server, principal, fork, source).await?;
     if publish::committed_plan(fork, std::slice::from_ref(&update), &plan_id).await? {
         return Ok(());
     }
-    if fork.ref_oid(&update.name).await?.as_deref() != Some(old.to_string().as_str()) {
+    if fork.ref_oid(&update.name).await? != update.old.map(|old| old.to_string()) {
         return Err(ReceiveError::BranchChanged);
     }
-    if old == new {
+    if update.old == Some(new) {
         return if source.ref_oid(&update.name).await?.as_deref() == Some(new.to_string().as_str()) {
             Ok(())
         } else {
@@ -111,7 +119,7 @@ async fn sync_locked(
         };
     }
     let (directory, reader) =
-        stage_fast_forward(server, source, &update.name, old, new, cancel).await?;
+        stage_branch_pack(server, source, &update.name, update.old, new, cancel).await?;
     publish::publish_pack(
         server,
         principal,
@@ -131,11 +139,11 @@ async fn sync_locked(
     .await
 }
 
-async fn stage_fast_forward(
+async fn stage_branch_pack(
     server: &Server,
     source: &Repository,
     branch: &str,
-    old: gix_hash::ObjectId,
+    old: Option<gix_hash::ObjectId>,
     new: gix_hash::ObjectId,
     cancel: &CancellationToken,
 ) -> Result<(
@@ -149,7 +157,9 @@ async fn stage_fast_forward(
         return Err(ReceiveError::BranchChanged);
     }
     let visibility = view.git_visibility_index().await?;
-    if !visibility.contains_hex_in_ref(branch, &old.to_string()) {
+    if let Some(old) = old
+        && !visibility.contains_hex_in_ref(branch, &old.to_string())
+    {
         return Err(ReceivePlanError::NonFastForward {
             name: branch.into(),
         }
@@ -157,7 +167,7 @@ async fn stage_fast_forward(
     }
     let request = UploadPackRequest {
         wants: vec![new],
-        haves: vec![old],
+        haves: old.into_iter().collect(),
         ..Default::default()
     };
     let plan = plan_upload_pack(&git, &visibility, &[branch.to_owned()], &request, cancel).await?;
@@ -186,9 +196,15 @@ pub(crate) async fn merge_fork_head(
     let permit = server.acquire_transfer(&cancel).await?;
     let result = async {
         let old = update.old.ok_or(ReceiveError::BranchChanged)?;
-        let (directory, reader) =
-            stage_fast_forward(server, &source, &pull.head_ref, old, pull.head_oid, &cancel)
-                .await?;
+        let (directory, reader) = stage_branch_pack(
+            server,
+            &source,
+            &pull.head_ref,
+            Some(old),
+            pull.head_oid,
+            &cancel,
+        )
+        .await?;
         publish::publish_pack(
             server,
             principal,

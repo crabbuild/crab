@@ -780,12 +780,16 @@ organization creation path.
 Organization owners can read and update `/api/organizations/{id}/repository-policy`
 and configure it in **Settings → Member privileges**. Updates carry the saved
 `version`, `member_creation`, `member_transfer`, `member_deletion`, `private_forks`, `baseline`
-(`null`, `read`, or `write`), and `default_branch` (a short Git branch name).
+(`null`, `read`, `write`, or `admin`), and `default_branch` (a short Git branch name).
 By default only owners can create, transfer, or delete repositories, and
-members have no base access.
-The highest applicable
-organization, repository, and group role applies subject to credential limits.
-The People repository access inspector shows the baseline separately.
+members have no base access. Owners review changes to base repository permissions
+before saving them in the browser. Current organization members receive those
+permissions in existing and new repositories. Private forks and detached
+organization forks retain the base permission captured when they were
+published. Outside collaborators keep their repository grants. The highest
+applicable organization, repository, and group role applies subject to
+credential limits. The People repository
+access inspector shows the baseline separately.
 
 New organization repositories start with the branch name configured in Member
 privileges, initially `main`. Once repository creation is authorized, retries
@@ -829,7 +833,9 @@ already downloaded remain available to their recipients.
 
 Publishing a repository detaches its existing private forks in the same
 catalog update. They keep their private visibility and current repository
-grants. Pending fork jobs must settle before the repository can become public.
+grants. A detached organization fork keeps its captured base permission until
+it changes ownership. A detached personal fork belongs to its individual
+owner. Pending fork jobs must settle before the repository can become public.
 
 `GET /api/repositories/{id}/visibility` returns the current setting and
 eligibility. Send `version`, `value` (`public` or `private`), and the exact
@@ -1093,22 +1099,36 @@ governs future forks. Existing forks retain their current access.
 
 When both policies allow forking, a signed-in reader can choose **Fork
 repository** in the source's Code view and select **Personal**. Organization
-owners can also choose the source organization as the destination. Crab copies
-the advertised Git refs and history through the native Git service and keeps
-the source repository UUID as the fork's lineage. Before publishing refs, Crab
-copies and verifies reachable Git LFS payloads. For native Crab Xet files, it
-verifies the shared shard and xorb data and writes the selected file bindings
-into the fork's own catalog. If content is missing or corrupt, repair it in the
-source and resume the fork job. The ready fork's Code view links back to the
-source. You can clone the fork and push independent changes with its own
-repository-scoped Git token.
+owners can also choose the source organization as the destination. Enter an
+optional description and choose whether to copy only the default branch. The
+browser selects **Copy only the default branch** initially. Clearing it copies
+all advertised refs. A fork writer can bring in additional branches later on
+the fork’s **Branches** page with **Copy from upstream**. Crab copies the
+selected history through the native Git service and keeps the source repository
+UUID as the fork's lineage. Before
+publishing refs, Crab copies and verifies reachable Git LFS payloads. For native
+Crab Xet files, it verifies the shared shard and xorb data and writes the
+selected file bindings into the fork's own catalog. If content is missing or
+corrupt, repair it in the source and resume the fork job. The ready fork's
+Code view links back to the source when you can read it. The repository detail
+sets `fork: true` for an attached fork and includes `forked_from` only when the
+viewer can read the source. You can clone the fork and push independent
+changes with its own repository-scoped Git token.
 
 Organization forks inherit current source members, OIDC groups, and organization
 team grants. Personal forks are listed under the account's personal repositories.
-They inherit source organization and group access. The fork owner can write
-while they have source access. Direct grants to other individual collaborators
-apply to the source repository. The upstream organization's rulesets govern
-private forks, including initial Git publication.
+They inherit source organization and group access. The fork owner has at least
+Write access while they have a qualifying fork grant. Direct grants to other
+individual collaborators apply to the source repository. The upstream
+organization's rulesets govern private forks, including initial Git publication.
+
+Both private fork destinations capture the source repository's effective base
+permission when the fork becomes available. The captured permission applies to
+current organization members. Forks published before this field existed have
+no captured base permission. Current team and individually applicable grants
+continue to be evaluated on each request. Sync, comparison, and pull request
+actions that read upstream data also require current read access to the
+upstream repository.
 
 Removing a member retires their personal private forks of that organization's
 repositories. An accepted **Restore previous access** invitation brings back
@@ -1118,13 +1138,23 @@ those archived forks. Shared organization forks stay available through current
 source grants. Making an upstream repository public detaches its existing
 personal forks as private repositories owned by their individual accounts.
 
-`POST /api/repos/{owner}/{name}/forks` accepts `{request_id, name, destination}`
-and requires the source repository ID header and browser CSRF token.
+`POST /api/repos/{owner}/{name}/forks` accepts `{request_id, name, destination,
+description?, default_branch_only?}` and requires the source repository ID
+header and browser CSRF token. Set `default_branch_only` to `true` to copy the
+default branch and its history. Omitting it copies all advertised refs. A
+retry or resume uses the original description and branch selection.
 `destination` is `personal` or `organization` and defaults to `organization`.
 Personal forks use the caller's `/api/imports/git/{id}` status and resume routes.
 Organization forks use the organization import routes and require a current
 owner. Jobs verify the pinned refs and current source access and policies
 before making the fork visible.
+**View forks** on the upstream repository or a fork opens the upstream
+repository's **Forks** page. It lists readable direct forks, newest first, with
+search, archive filters, and sorting. `GET /api/repos/{owner}/{name}/forks`
+uses repository catalog search parameters `q`, `limit`, and `after` and returns
+`{repositories, next}`. The viewer needs current access to both the upstream
+repository and each result. Retired forks stay out of the list.
+
 Repository admins can update the source policy with `PUT /api/repositories/{id}/forking`
 and `{version, allowed}`. The exact repository lookup returns the current
 setting and the organization policy to repository admins. Deploy the updated
@@ -1138,10 +1168,13 @@ update uses the fork's branch protections and rulesets, and transfers the new
 commits and their required LFS and Xet content.
 
 `GET /api/repos/{owner}/{name}/fork-sync?branch=refs/heads/main` returns the
-branch relationship and both commit IDs. `POST` accepts `{branch, fork_oid,
-upstream_oid}` from that comparison. Both tips must still match before
-publication. Repeating a committed comparison can recover the recorded outcome
-after a lost reply, including after subsequent branch changes.
+branch relationship and both commit IDs. When the branch only exists upstream,
+it returns `fork_missing` and a `null` fork tip. `POST` accepts `{branch,
+fork_oid, upstream_oid}` for a fast-forward. To copy a missing branch, send
+`fork_oid: null` and a new `request_id` UUID. The upstream tip and the fork’s
+expected state must still match before publication. Reuse the same request ID
+and tip to recover a lost copy response. A later deliberate copy has its own
+request ID.
 
 Choose **Compare with upstream** on the fork's **Code** view to compare any
 fork branch with an upstream branch. The file list and diffs show changes

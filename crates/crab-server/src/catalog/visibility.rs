@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use super::{
     CatalogDocument, CatalogError, CatalogStore, MembershipActor, MembershipAuditEvent,
-    RepositoryApplicationState, audit,
+    RepositoryApplicationState, RepositoryBaseline, audit,
 };
 use crate::app::MAX_NUMBER;
 
@@ -84,6 +84,7 @@ impl CatalogStore {
                         "Wait for pending forks before making this repository public",
                     ));
                 }
+                fork.fork_baseline = fork.baseline();
                 fork.forked_from = None;
                 fork.record_metadata_update(now_ms);
                 if let Some(owner) = fork.fork_owner.take() {
@@ -94,6 +95,7 @@ impl CatalogStore {
                     }];
                     fork.groups.clear();
                     fork.organization = None;
+                    fork.fork_baseline = RepositoryBaseline::Organization;
                 } else {
                     fork.members = root.members.clone();
                     fork.groups = root.groups.clone();

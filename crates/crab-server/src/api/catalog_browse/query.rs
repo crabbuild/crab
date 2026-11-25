@@ -260,6 +260,10 @@ impl Query {
                 digest.update(b"personal\0");
                 hash_field(&mut digest, owner.as_bytes());
             }
+            Scope::Forks(upstream) => {
+                digest.update(b"forks\0");
+                digest.update(upstream.as_bytes());
+            }
             Scope::Team { team, .. } => {
                 digest.update(b"team\0");
                 digest.update(team.as_bytes());

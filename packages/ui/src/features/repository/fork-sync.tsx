@@ -22,12 +22,13 @@ const statusText = {
   diverged:
     "Both branches have new commits. Merge the upstream changes in Git to keep your work.",
   upstream_missing: "There is no matching branch upstream.",
+  fork_missing: "You can copy this upstream branch from the Branches page.",
 };
 
 interface Comparison {
   state: keyof typeof statusText;
   branch: string;
-  fork_oid: string;
+  fork_oid: string | null;
   upstream_oid: string | null;
 }
 
@@ -51,7 +52,12 @@ export function ForkSync({
 
   async function update() {
     const preview = comparison.data;
-    if (!preview?.upstream_oid || preview.state !== "behind" || updating)
+    if (
+      !preview?.fork_oid ||
+      !preview.upstream_oid ||
+      preview.state !== "behind" ||
+      updating
+    )
       return;
     setUpdating(true);
     setError(undefined);
@@ -113,7 +119,7 @@ export function ForkSync({
             {comparison.data.state === "behind" && (
               <>
                 <p className="text-xs text-muted-foreground">
-                  {comparison.data.fork_oid.slice(0, 7)} →{" "}
+                  {comparison.data.fork_oid?.slice(0, 7)} →{" "}
                   {comparison.data.upstream_oid?.slice(0, 7)}
                 </p>
                 <Button

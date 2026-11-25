@@ -275,7 +275,46 @@ async fn repository_policy_controls_creation_and_current_baseline_access() {
         Method::PUT,
         &policy,
         &alice,
-        json!({"version":1,"member_creation":false,"baseline":null}),
+        json!({"version":1,"member_creation":false,"baseline":"admin"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        h.json(&format!("/api/repos?owner={owner}&name=shared"), &bob)
+            .await["repositories"][0]["can_admin"],
+        true
+    );
+    let name = format!("/api/repositories/{}/name", repo["id"].as_str().unwrap());
+    assert_eq!(h.json(&name, &bob).await["name"], "shared");
+    assert_eq!(
+        h.write(
+            Method::PUT,
+            &policy,
+            &bob,
+            json!({"version":2,"member_creation":true,"baseline":"admin"}),
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    *h.provider.mode.lock().await = "outsider".into();
+    let outsider = h.login().await;
+    assert_eq!(h.json(&listing, &outsider).await["repositories"], json!([]));
+    let access = h
+        .json(
+            &format!("{root}/members/{bob_actor}/repository-access"),
+            &alice,
+        )
+        .await;
+    assert!(access["items"].as_array().unwrap().iter().any(|item| {
+        item["name"] == "shared" && item["baseline"] == "admin" && item["direct"].is_null()
+    }));
+    h.write(
+        Method::PUT,
+        &policy,
+        &alice,
+        json!({"version":2,"member_creation":false,"baseline":null}),
     )
     .await
     .error_for_status()
@@ -324,7 +363,7 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
         .mark_cell_ready(h.server.repositories.values()[0].id)
         .await
         .unwrap();
-    let (organization, owner_actor, _) =
+    let (organization, owner_actor, bob_actor) =
         crate::test_support::http::organizations::bootstrap(&h).await;
     let alice = h.login().await;
     *h.provider.mode.lock().await = "member".into();
@@ -735,6 +774,62 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
         .await
         .unwrap();
     assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+    h.write(
+        Method::PUT,
+        &format!("{org}/invitations/{bob_actor}"),
+        &alice,
+        json!({"version":0,"role":"member"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.write(
+        Method::POST,
+        &format!("{org}/invitation"),
+        &bob,
+        json!({"version":1,"accept":true}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let policy = format!("{org}/repository-policy");
+    let mut input = h.json(&policy, &alice).await;
+    input["baseline"] = json!("admin");
+    h.write(Method::PUT, &policy, &alice, input)
+        .await
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        h.json(&detail, &bob).await["repositories"][0]["can_admin"],
+        true
+    );
+    assert_eq!(
+        h.json(&format!("{listed}&q=fork:only"), &bob).await["repositories"],
+        json!([])
+    );
+    let inspected = h
+        .json(
+            &format!("{org}/members/{bob_actor}/repository-access"),
+            &alice,
+        )
+        .await;
+    let inspected = inspected["items"].as_array().unwrap();
+    assert!(
+        inspected
+            .iter()
+            .any(|repo| repo["id"] == json!(id) && repo["baseline"] == "admin")
+    );
+    assert!(inspected.iter().any(|repo| repo["id"] == json!(fork_id)
+        && repo["baseline"].is_null()
+        && repo["access"].is_null()));
+    let fork_deleted = h
+        .http
+        .get(format!("{}/api/repositories/{fork_id}/deletion", h.origin))
+        .header(header::COOKIE, &bob)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fork_deleted.status(), StatusCode::NOT_FOUND);
     let deletion = format!("/api/repositories/{id}/deletion");
     let deleted = format!("{org}/deleted-repositories");
     let request = Uuid::now_v7();
@@ -798,7 +893,10 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
         .await;
     assert_eq!(detached["repositories"][0]["visibility"], "private");
     assert_eq!(detached["repositories"][0]["id"], json!(fork_id));
+    assert_eq!(detached["repositories"][0]["fork"], false);
     assert!(detached["repositories"][0].get("forked_from").is_none());
+    assert_eq!(detached["repositories"][0]["access"], "read");
+    assert_eq!(detached["repositories"][0]["can_admin"], false);
     let denied = h
         .http
         .get(format!("{}{fork}/refs", h.origin))

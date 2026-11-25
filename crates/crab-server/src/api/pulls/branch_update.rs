@@ -114,6 +114,9 @@ impl Destination {
         if !grant.principal.can_write(self.head.id) {
             return Err(Error::BranchUpdatePermission);
         }
+        if let Some(upstream) = &self.upstream {
+            app::require_related_read(server, &grant.principal, &self.head, upstream).await?;
+        }
         Ok(grant)
     }
 

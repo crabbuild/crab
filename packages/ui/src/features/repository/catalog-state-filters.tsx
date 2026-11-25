@@ -72,11 +72,13 @@ function selected(
 export function RepositoryStateFilters({
   query,
   showVisibility,
+  showFork = true,
   draft,
   apply,
 }: {
   query: string;
   showVisibility: boolean;
+  showFork?: boolean;
   draft: () => string;
   apply: (query: string) => boolean;
 }) {
@@ -85,7 +87,10 @@ export function RepositoryStateFilters({
   return (
     <div className="flex flex-wrap items-center gap-2">
       {filters
-        .filter(({ key }) => key !== "is" || showVisibility)
+        .filter(
+          ({ key }) =>
+            (key !== "is" || showVisibility) && (key !== "fork" || showFork),
+        )
         .map(({ key, label, options }) => {
           const qualifier = new RegExp(`^-?${key}:`, "i");
           return (

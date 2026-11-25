@@ -31,6 +31,7 @@ pub(super) enum Scope {
     Public,
     Personal(String),
     Organization(Uuid),
+    Forks(Uuid),
     Team {
         organization: Uuid,
         team: Uuid,
@@ -55,6 +56,7 @@ impl Scope {
             Self::Personal(owner) => {
                 repo.owning_organization().is_none() && repo.config.owner == *owner
             }
+            Self::Forks(upstream) => repo.forked_from == Some(*upstream),
             Self::Organization(id)
             | Self::Team {
                 organization: id, ..
@@ -207,7 +209,15 @@ pub(super) async fn list(
         )
     };
     let updated = |repo: &Repository| updates.get(&repo.id).copied().or(repo.created_at_ms);
-    match query.order {
+    let order = if matches!(scope, Scope::Forks(_))
+        && words.is_empty()
+        && query.order == Order::Relevance
+    {
+        Order::CreatedDesc
+    } else {
+        query.order
+    };
+    match order {
         Order::Relevance => ranked.sort_by(|(rank_a, a), (rank_b, b)| {
             (rank_a, &a.config.owner, &a.config.name).cmp(&(
                 rank_b,
