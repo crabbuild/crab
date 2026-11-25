@@ -1337,6 +1337,14 @@ Changing the default branch records a new symbolic HEAD through the ref journal.
 
 Branch protection uses exact short branch names. A configuration can seed version zero; after the first administrative save, the stored object is authoritative across restarts and server instances. Set `require_conversation_resolution` to require resolved review threads.
 
+**Allow deletions** (`allow_deletions`) permits repository writers to delete an
+exact protected branch through Git or the browser. It also permits eligible PR
+head cleanup when the repository enables automatic deletion. The default branch,
+applicable rulesets, archive state, and dependent PR checks still govern deletion.
+The branch continues to require pull requests for direct updates. The setting is
+off by default, and changes to deletion permission share the affected ref lease
+with publication.
+
 **Require approval of the most recent reviewable push** is available in exact
 branch protection and in repository and organization branch rulesets. A
 currently eligible writer other than the authenticated pusher must approve

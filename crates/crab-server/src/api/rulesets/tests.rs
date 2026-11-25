@@ -60,6 +60,93 @@ async fn seed(h: &Harness, alice: &str) -> (tempfile::TempDir, Url, String) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn classic_protection_can_allow_deletion_without_allowing_pushes_or_overriding_rulesets() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let (work, remote, base) = seed(&h, &alice).await;
+    let path = work.path();
+    for reference in ["refs/heads/manual", "refs/heads/native"] {
+        git::success(
+            path,
+            &["push", remote.as_str(), &format!("HEAD:{reference}")],
+        )
+        .await;
+    }
+    let protections = async |version: u64, allowed: bool| {
+        let rules = ["main", "manual", "native"]
+            .map(|branch| json!({"branch":branch,"required_checks":[],"allow_deletions":allowed}));
+        h.write(
+            Method::PUT,
+            &format!("{REPO}/settings/branch-protections"),
+            &alice,
+            json!({"expected_version":version,"rules":rules}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    };
+    let browser_delete = async |name: &str| {
+        h.write(
+            Method::DELETE,
+            &format!("{REPO}/branches"),
+            &alice,
+            json!({"name":name,"expected_oid":base}),
+        )
+        .await
+    };
+    protections(0, false).await;
+    let protected = browser_delete("manual").await;
+    assert_eq!(protected.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        protected.json::<Value>().await.unwrap()["error"]["code"],
+        "protected_branch"
+    );
+
+    protections(1, true).await;
+    assert!(!browser_delete("main").await.status().is_success());
+    git::success(
+        path,
+        &["commit", "--allow-empty", "-m", "Attempt protected update"],
+    )
+    .await;
+    let push = git::git(path, &["push", remote.as_str(), "HEAD:refs/heads/manual"]).await;
+    assert!(!push.status.success());
+    assert!(
+        String::from_utf8_lossy(&push.stderr).contains("protected branch requires a pull request")
+    );
+
+    let mut overlay = rule("Keep native branch", "branch", "native");
+    overlay["restrict_deletions"] = json!(true);
+    h.write(
+        Method::PUT,
+        RULESETS,
+        &alice,
+        json!({"expected_version":0,"rulesets":[overlay]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let push = git::git(path, &["push", remote.as_str(), "--delete", "native"]).await;
+    assert!(!push.status.success());
+    assert!(String::from_utf8_lossy(&push.stderr).contains("ref deletion"));
+    h.write(
+        Method::PUT,
+        RULESETS,
+        &alice,
+        json!({"expected_version":1,"rulesets":[]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    assert_eq!(browser_delete("manual").await.status(), StatusCode::OK);
+    git::success(path, &["push", remote.as_str(), "--delete", "native"]).await;
+    let refs = git::success(path, &["ls-remote", remote.as_str(), "refs/heads/*"]).await;
+    assert_eq!(refs, format!("{base}\trefs/heads/main"));
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn branch_and_tag_rulesets_guard_http_and_native_publication() {
     let h = Harness::new(false).await;
     let alice = h.login().await;

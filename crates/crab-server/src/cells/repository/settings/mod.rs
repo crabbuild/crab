@@ -33,6 +33,8 @@ pub(crate) struct BranchProtectionRecord {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_merge_queue: bool,
     pub require_linear_history: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_deletions: bool,
     pub required_checks: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_integrations: Vec<uuid::Uuid>,
@@ -282,6 +284,7 @@ pub(in crate::cells::repository) fn validate_protections(
             require_up_to_date: rule.require_up_to_date,
             require_merge_queue: rule.require_merge_queue,
             require_linear_history: rule.require_linear_history,
+            allow_deletions: rule.allow_deletions,
             required_checks: rule.required_checks.clone(),
             required_integrations: rule.required_integrations.clone(),
         })

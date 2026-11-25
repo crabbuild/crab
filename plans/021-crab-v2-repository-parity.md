@@ -23,6 +23,9 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   matching branches. Git publication checks current rules, exact predecessor
   refs, and locked paths. A repeated wire request uses current ref
   transactions if a branch returns to its former tip.
+- Exact branch protection can allow deletion by writers, including eligible
+  automatic PR head cleanup. Git and browser deletion share publication leases
+  with protection changes and continue to check the default ref and rulesets.
 - Merged pull requests retain access to check runs and commit statuses for
   the exact reviewed head and, when published, the tested candidate. The
   Checks tab separates these commits after squash or rebase and branch

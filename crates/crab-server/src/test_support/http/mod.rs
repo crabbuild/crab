@@ -432,6 +432,7 @@ impl Harness {
             require_up_to_date: false,
             require_merge_queue: false,
             require_linear_history: false,
+            allow_deletions: false,
             required_checks: vec!["ci/test".into()],
             required_integrations: vec![],
         }];

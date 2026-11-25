@@ -44,6 +44,7 @@ export function BranchProtectionSettings({
   const [requireUpToDate, setRequireUpToDate] = useState(false);
   const [requireQueue, setRequireQueue] = useState(false);
   const [requireLinearHistory, setRequireLinearHistory] = useState(false);
+  const [allowDeletions, setAllowDeletions] = useState(false);
   const [checks, setChecks] = useState("");
   const [integrations, setIntegrations] = useState<string[]>([]);
   const [chooseIntegrations, setChooseIntegrations] = useState(false);
@@ -80,6 +81,7 @@ export function BranchProtectionSettings({
     setRequireUpToDate(Boolean(rule?.require_up_to_date));
     setRequireQueue(Boolean(rule?.require_merge_queue));
     setRequireLinearHistory(Boolean(rule?.require_linear_history));
+    setAllowDeletions(Boolean(rule?.allow_deletions));
     setChecks(rule?.required_checks.join("\n") ?? "");
     setIntegrations(rule?.required_integrations ?? []);
     setChooseIntegrations(!!rule?.required_integrations?.length);
@@ -152,6 +154,7 @@ export function BranchProtectionSettings({
       ...(requireUpToDate ? { require_up_to_date: true } : {}),
       ...(requireQueue ? { require_merge_queue: true } : {}),
       ...(requireLinearHistory ? { require_linear_history: true } : {}),
+      ...(allowDeletions ? { allow_deletions: true } : {}),
       required_checks: requiredChecks,
       ...(integrations.length ? { required_integrations: integrations } : {}),
     };
@@ -225,6 +228,7 @@ export function BranchProtectionSettings({
                     <p>Conversation resolution required</p>
                   )}
                   {rule.require_merge_queue && <p>Merge queue required</p>}
+                  {rule.allow_deletions && <p>Deletions allowed</p>}
                   {rule.require_linear_history && (
                     <p>Linear history required</p>
                   )}
@@ -414,6 +418,19 @@ export function BranchProtectionSettings({
               />
               Require linear history
             </label>
+            <label className="flex items-center gap-2">
+              <Checkbox
+                checked={allowDeletions}
+                onCheckedChange={(checked) =>
+                  setAllowDeletions(checked === true)
+                }
+              />
+              Allow deletions
+            </label>
+            <p className="settings-help-inline">
+              Writers can delete the branch when the default branch and ruleset
+              settings permit it.
+            </p>
             <label htmlFor="protection-checks">Required status checks</label>
             <Textarea
               id="protection-checks"

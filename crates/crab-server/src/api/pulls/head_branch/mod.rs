@@ -172,7 +172,7 @@ async fn may_delete(
 ) -> Result<bool> {
     let policy = settings::load_ref_policy(server, source).await?;
     let default = source.default_ref().await?;
-    if reference == default || policy.protections.protection(reference).is_some() {
+    if reference == default || policy.protections.blocks_deletion(reference) {
         return Ok(false);
     }
     let teams = policy.organization_teams(server, grant).await?;
