@@ -1,7 +1,7 @@
 CREATE TABLE organization_identity (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     id BLOB NOT NULL CHECK (length(id) = 16),
-    format INTEGER NOT NULL CHECK (format = 1),
+    format INTEGER NOT NULL CHECK (format = 2),
     app_revision INTEGER NOT NULL DEFAULT 0 CHECK (app_revision BETWEEN 0 AND 9007199254740991)
 ) STRICT;
 CREATE TABLE organization_details (
@@ -21,14 +21,18 @@ CREATE INDEX organization_active_members ON organization_members(active, actor);
 CREATE INDEX organization_owners ON organization_members(role, active, actor);
 CREATE TABLE organization_invitations (
     recipient BLOB PRIMARY KEY CHECK (length(recipient) = 16),
+    invited_by BLOB NOT NULL REFERENCES organization_members(actor),
     role TEXT NOT NULL CHECK (role IN ('member', 'owner')),
     version INTEGER NOT NULL CHECK (version BETWEEN 1 AND 9007199254740991),
     member_version INTEGER NOT NULL CHECK (member_version BETWEEN 0 AND 9007199254740991),
     state TEXT NOT NULL CHECK (state IN ('pending', 'accepted', 'declined', 'cancelled')),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-    expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms > created_at_ms)
+    expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms > created_at_ms),
+    reinstates INTEGER NOT NULL CHECK (reinstates IN (0, 1))
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX organization_pending_invitations ON organization_invitations(state, recipient);
+CREATE INDEX organization_invitations_by_sender
+    ON organization_invitations(invited_by, expires_at_ms) WHERE state = 'pending';
 CREATE TABLE organization_bootstrap (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     actor BLOB NOT NULL CHECK (length(actor) = 16),

@@ -6,6 +6,7 @@ use crate::{
 };
 
 mod fork_merges;
+mod personal_forks;
 mod sync;
 
 #[tokio::test(flavor = "multi_thread")]

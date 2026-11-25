@@ -25,6 +25,7 @@ export interface GitImportJob {
 export interface Repository {
   forked_from?: { id: string; owner: string; name: string };
   can_fork?: boolean;
+  can_fork_to_organization?: boolean;
   visibility?: "private" | "public";
   public_read_only?: boolean;
   can_configure_visibility?: boolean;
@@ -335,7 +336,11 @@ export function startGitImport(
 
 export function startRepositoryFork(
   source: Pick<Repository, "id" | "owner" | "name">,
-  input: { request_id: string; name: string },
+  input: {
+    request_id: string;
+    name: string;
+    destination: "personal" | "organization";
+  },
   csrf: string,
 ): Promise<GitImportJob> {
   return postGitImport(endpoint(source, "forks"), input, csrf, source.id);

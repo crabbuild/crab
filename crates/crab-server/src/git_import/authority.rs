@@ -3,7 +3,7 @@ use uuid::Uuid;
 use crate::{
     app,
     auth::{Identity, Principal},
-    catalog::{BrowserNamespace, CatalogDocument, CatalogStore},
+    catalog::{BrowserNamespace, CatalogStore, MembershipActor},
     cells::{
         Address,
         organization::{
@@ -11,7 +11,10 @@ use crate::{
             repositories::{AuthorizeImportPublication, Authorized, ImportPublication},
         },
     },
-    repository::access::{actor_id, organization_grant, organization_role},
+    repository::{
+        Repository,
+        access::{actor_id, organization_grants, organization_role},
+    },
     server::Server,
     storage_root::StorageRoot,
 };
@@ -20,6 +23,7 @@ use super::{
     ImportError,
     jobs::{Jobs, Snapshot},
 };
+use std::sync::Arc;
 
 pub(super) struct ImportAccount {
     pub(super) identity: Identity,
@@ -93,21 +97,119 @@ impl ImportAccount {
         Ok(())
     }
 
-    pub(super) async fn check_fork(
+    pub(super) async fn fork_source(
         &self,
         server: &Server,
         catalog: &CatalogStore,
         source: Option<Uuid>,
-    ) -> Result<(), ImportError> {
-        if let Some(source) = source {
-            let owner = self.organization.ok_or(ImportError::NotFound)?;
-            let (document, _) = catalog
-                .load_snapshot()
-                .await
-                .map_err(ImportError::Catalog)?;
-            owner.require_fork(server, &document, source).await?;
+    ) -> Result<Option<Arc<ForkSource>>, ImportError> {
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        let (document, _) = catalog
+            .load_snapshot()
+            .await
+            .map_err(ImportError::Catalog)?;
+        let organization = document
+            .repository_by_id(source)
+            .and_then(|record| record.organization_id())
+            .ok_or(ImportError::NotFound)?;
+        if self
+            .organization
+            .is_some_and(|owner| owner.id != organization)
+        {
+            return Err(ImportError::NotFound);
         }
-        Ok(())
+        let access = Arc::new(ForkSource {
+            source,
+            organization,
+            owner: self.organization,
+            principal: self.principal.clone(),
+        });
+        access.current(server).await?;
+        Ok(Some(access))
+    }
+
+    pub(super) fn destination(
+        &self,
+        owner: &str,
+        source: Option<&ForkSource>,
+    ) -> Result<BrowserNamespace, ImportError> {
+        let namespace = self.namespace(owner)?;
+        let Some(source) = source.filter(|_| self.organization.is_none()) else {
+            return Ok(namespace);
+        };
+        let identity = MembershipActor {
+            issuer: self.identity.issuer.clone(),
+            subject: self.identity.subject.clone(),
+        };
+        if owner != crate::catalog::personal_namespace(&identity.issuer, &identity.subject) {
+            return Err(ImportError::DestinationChanged);
+        }
+        Ok(BrowserNamespace::PersonalFork {
+            organization: source.organization,
+            owner: identity,
+        })
+    }
+}
+
+pub(super) struct ForkSource {
+    pub(super) source: Uuid,
+    pub(super) organization: Uuid,
+    owner: Option<OrganizationOwner>,
+    principal: Principal,
+}
+
+impl ForkSource {
+    pub(super) async fn current(
+        &self,
+        server: &Server,
+    ) -> Result<(Arc<Repository>, Principal), ImportError> {
+        app::account(&self.principal).map_err(|_| ImportError::NotFound)?;
+        if let Some(owner) = self.owner {
+            owner.check(server).await?;
+        }
+        let catalog = server.catalog().ok_or(ImportError::Unavailable)?;
+        let (document, _) = catalog
+            .load_snapshot()
+            .await
+            .map_err(ImportError::Catalog)?;
+        let record = document
+            .repository_by_id(self.source)
+            .filter(|record| {
+                record.organization_id() == Some(self.organization) && record.forked_from.is_none()
+            })
+            .ok_or(ImportError::NotFound)?;
+        let repository = server
+            .repositories
+            .by_id(record.id)
+            .ok_or(ImportError::NotFound)?;
+        // The fork grant rechecks the source account against the catalog.
+        // The import credential being verified only authorizes the destination.
+        let membership = app::catalog_membership(server, &self.principal, &repository)
+            .await
+            .map_err(ImportError::organization)?;
+        let allowed = self.policy_grant(server, false).await?.private_forks;
+        if !allowed || !record.forking.allowed || record.visibility.value.is_public() {
+            return Err(ImportError::ForkingDisabled);
+        }
+        Ok((repository, membership.principal))
+    }
+
+    pub(super) async fn policy_grant(
+        &self,
+        server: &Server,
+        include_teams: bool,
+    ) -> Result<crate::cells::organization::teams::repository_access::ActorTeams, ImportError> {
+        Ok(organization_grants(
+            server,
+            &self.principal,
+            [(self.organization, include_teams)].into(),
+        )
+        .await
+        .map_err(ImportError::organization)?
+        .remove(&self.organization)
+        .unwrap_or_default())
     }
 }
 
@@ -126,31 +228,6 @@ impl OrganizationOwner {
             Some(Role::Owner) => Ok(()),
             _ => Err(ImportError::NotFound),
         }
-    }
-
-    pub(super) async fn require_fork(
-        self,
-        server: &Server,
-        document: &CatalogDocument,
-        source: Uuid,
-    ) -> Result<(), ImportError> {
-        let source = document
-            .repository_by_id(source)
-            .filter(|record| {
-                record.organization_id() == Some(self.id) && record.forked_from.is_none()
-            })
-            .ok_or(ImportError::NotFound)?;
-        let cells = server.cells().ok_or(ImportError::Unavailable)?;
-        let grant = organization_grant(&cells, self.id, self.actor, false)
-            .await
-            .map_err(ImportError::organization)?;
-        if !grant.owner {
-            return Err(ImportError::NotFound);
-        }
-        if !grant.private_forks || !source.forking.allowed || source.visibility.value.is_public() {
-            return Err(ImportError::ForkingDisabled);
-        }
-        Ok(())
     }
 
     pub(super) async fn policy_grant(

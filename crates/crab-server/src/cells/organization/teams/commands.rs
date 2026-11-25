@@ -204,16 +204,6 @@ impl Mutation for Change {
 fn taken(context: &Transaction<'_>, name: &str, except: Uuid) -> Result<bool> {
     Ok(!context.query("SELECT 1 FROM organization_teams WHERE name_key=? AND deleted_at_ms IS NULL AND id<>? LIMIT 1",&[SqlValue::Text(name.to_lowercase()),blob(except)])?.rows.is_empty())
 }
-fn epoch(context: &Transaction<'_>, person: Uuid) -> Result<u64> {
-    let rows = context.query(
-        "SELECT epoch FROM organization_membership_epochs WHERE actor=?",
-        &[blob(person)],
-    )?;
-    let Some([epoch]) = rows.rows.first().map(Vec::as_slice) else {
-        return Err(Error::Invalid("organization membership epoch is missing"));
-    };
-    uint(epoch)
-}
 fn create(
     context: &Transaction<'_>,
     input: &Request,
@@ -234,7 +224,7 @@ fn create(
     if taken(context, name, input.request_id)? {
         return Ok(Outcome::NameTaken);
     }
-    let epoch = epoch(context, input.actor)?;
+    let epoch = membership_epoch(context, input.actor)?;
     context.query("INSERT INTO organization_teams(id,name,name_key,description,visibility,version,created_at_ms,updated_at_ms) VALUES (?,?,?,?,?,1,?,?)",&[blob(input.request_id),SqlValue::Text(name.into()),SqlValue::Text(name.to_lowercase()),SqlValue::Text(description.into()),SqlValue::Text(visibility.name().into()),SqlValue::Integer(context.now_ms()),SqlValue::Integer(context.now_ms())])?;
     context.query("INSERT INTO organization_team_members(team,actor,membership_epoch,role,version) VALUES (?,?,?,'maintainer',1)",&[blob(input.request_id),blob(input.actor),integer(epoch)?])?;
     advance(
@@ -311,7 +301,7 @@ fn change_member(
     if old.role == role {
         return Ok(Outcome::Applied { id });
     }
-    let epoch = epoch(context, person)?;
+    let epoch = membership_epoch(context, person)?;
     context.query("INSERT INTO organization_team_members(team,actor,membership_epoch,role,version) VALUES (?,?,?,?,?) ON CONFLICT(team,actor) DO UPDATE SET membership_epoch=excluded.membership_epoch,role=excluded.role,version=excluded.version",&[blob(id),blob(person),integer(epoch)?,role.map_or(SqlValue::Null,|role|SqlValue::Text(role.name().into())),integer(next(version)?)?])?;
     context.query(
         "UPDATE organization_teams SET version=?,updated_at_ms=MAX(updated_at_ms,?) WHERE id=?",

@@ -132,28 +132,36 @@ impl Mutation for ChangeMember {
     }
 }
 
-pub(crate) const MAX_CONVERSION_MEMBERS: usize = 50;
+pub(crate) const MAX_DEPARTURE_MEMBERS: usize = 50;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ConversionMember {
+pub(crate) struct DepartureMember {
     pub(crate) actor: Uuid,
     pub(crate) version: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Conversion {
+pub(crate) struct Departure {
     pub(crate) owner: Uuid,
-    pub(crate) members: Vec<ConversionMember>,
+    pub(crate) members: Vec<DepartureMember>,
+    pub(crate) mode: DepartureMode,
 }
 
-impl Conversion {
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DepartureMode {
+    Remove,
+    Convert,
+}
+
+impl Departure {
     pub(crate) fn valid(&self) -> bool {
         let distinct: std::collections::BTreeSet<_> =
             self.members.iter().map(|member| member.actor).collect();
         !self.owner.is_nil()
-            && (1..=MAX_CONVERSION_MEMBERS).contains(&self.members.len())
+            && (1..=MAX_DEPARTURE_MEMBERS).contains(&self.members.len())
             && distinct.len() == self.members.len()
             && !distinct.contains(&Uuid::nil())
             && self
@@ -165,7 +173,7 @@ impl Conversion {
 
 fn selected_members(
     context: &Transaction<'_>,
-    input: &Conversion,
+    input: &Departure,
 ) -> Result<ChangeOutcome<Vec<Member>>> {
     if !input.valid() {
         return Err(Error::Invalid(
@@ -183,9 +191,9 @@ fn selected_members(
     Ok(ChangeOutcome::Applied(selected))
 }
 
-fn check_conversion(
+fn check_departure(
     context: &Transaction<'_>,
-    input: &Conversion,
+    input: &Departure,
     selected: &[Member],
 ) -> Result<ChangeOutcome<()>> {
     if !member(context, input.owner)?.is_some_and(|entry| entry.active && entry.role == Role::Owner)
@@ -206,7 +214,7 @@ fn check_conversion(
     // enough information to find a survivor even in a larger organization.
     let owners = context.query(
         "SELECT actor FROM organization_members WHERE role = 'owner' AND active = 1 ORDER BY actor LIMIT ?",
-        &[SqlValue::Integer((MAX_CONVERSION_MEMBERS + 1) as i64)],
+        &[SqlValue::Integer((MAX_DEPARTURE_MEMBERS + 1) as i64)],
     )?;
     for row in &owners.rows {
         let [owner] = row.as_slice() else {
@@ -220,27 +228,27 @@ fn check_conversion(
     Ok(ChangeOutcome::LastOwner)
 }
 
-pub(crate) struct CheckConversion;
-impl Read for CheckConversion {
+pub(crate) struct CheckDeparture;
+impl Read for CheckDeparture {
     const CLASS: &'static str = CLASS;
     const ID: u32 = 97;
-    type Input = Conversion;
+    type Input = Departure;
     type Output = ChangeOutcome<()>;
 
     fn execute(context: &mut Transaction<'_>, input: Self::Input) -> Result<Self::Output> {
         match selected_members(context, &input)? {
-            ChangeOutcome::Applied(selected) => check_conversion(context, &input, &selected),
+            ChangeOutcome::Applied(selected) => check_departure(context, &input, &selected),
             _ => Ok(ChangeOutcome::NotFound),
         }
     }
 }
 
-pub(crate) struct FinalizeConversion;
-impl Mutation for FinalizeConversion {
+pub(crate) struct FinalizeDeparture;
+impl Mutation for FinalizeDeparture {
     const CLASS: &'static str = CLASS;
     const ID: u32 = 97;
-    type Input = Conversion;
-    type Output = ChangeOutcome<()>;
+    type Input = Departure;
+    type Output = ChangeOutcome<Vec<Member>>;
 
     fn execute(
         context: &mut Transaction<'_>,
@@ -258,19 +266,36 @@ impl Mutation for FinalizeConversion {
                 !saved.active && saved.version.checked_sub(1) == Some(expected.version)
             })
         {
-            return Ok(MutationResult::Success(ChangeOutcome::Applied(())));
+            return Ok(MutationResult::Success(ChangeOutcome::Applied(selected)));
         }
-        let guard = check_conversion(context, &input, &selected)?;
-        if guard != ChangeOutcome::Applied(()) {
-            return Ok(MutationResult::Rejected(guard));
+        match check_departure(context, &input, &selected)? {
+            ChangeOutcome::Applied(()) => {}
+            ChangeOutcome::Conflict => {
+                return Ok(MutationResult::Rejected(ChangeOutcome::Conflict));
+            }
+            ChangeOutcome::NotFound => {
+                return Ok(MutationResult::Rejected(ChangeOutcome::NotFound));
+            }
+            ChangeOutcome::LastOwner => {
+                return Ok(MutationResult::Rejected(ChangeOutcome::LastOwner));
+            }
         }
 
         // Apply only after validating every member and the surviving owners.
         // A Cell transaction commits the entire membership and audit batch.
-        for member in selected {
-            apply_member(context, input.owner, member, None, true)?;
-        }
-        Ok(MutationResult::Success(ChangeOutcome::Applied(())))
+        let members = selected
+            .into_iter()
+            .map(|member| {
+                apply_member(
+                    context,
+                    input.owner,
+                    member,
+                    None,
+                    input.mode == DepartureMode::Convert,
+                )
+            })
+            .collect::<Result<_>>()?;
+        Ok(MutationResult::Success(ChangeOutcome::Applied(members)))
     }
 }
 
@@ -319,6 +344,12 @@ fn apply_member(
         ))?;
     // Removal retains the version that invitation acceptance must advance.
     // An edit captured before removal cannot replace the later grant.
+    let cancelled_invitations = if active {
+        0
+    } else {
+        invitations::remember_removal(context, old.actor, version)?;
+        invitations::cancel_issued(context, old.actor)?
+    };
     context.query(
         "UPDATE organization_members SET role = ?, active = ?, version = ? WHERE actor = ?",
         &[
@@ -345,12 +376,14 @@ fn apply_member(
             Action::MemberConverted {
                 member: old.actor,
                 version,
+                cancelled_invitations,
             }
         } else {
             Action::Membership {
                 member: old.actor,
                 role: next_role,
                 version,
+                cancelled_invitations,
             }
         },
     )?;

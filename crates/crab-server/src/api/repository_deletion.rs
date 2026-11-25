@@ -269,7 +269,8 @@ async fn list(
     let mut rows = Vec::new();
     let mut children = std::collections::HashMap::<Uuid, usize>::new();
     for row in &document.deleted_repositories {
-        if row.repository.organization_id() != Some(organization)
+        if row.retired_for_removal
+            || row.repository.organization_id() != Some(organization)
             || row.deleted_at_ms.saturating_add(RESTORE_WINDOW_MS) <= now
         {
             continue;

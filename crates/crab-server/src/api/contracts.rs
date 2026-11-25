@@ -43,6 +43,7 @@ fn typescript() -> String {
         organization::Organization::decl(&config),
         organization::InvitationState::decl(&config),
         organization::Invitation::decl(&config),
+        organization::Reinstatement::decl(&config),
         organization::InvitationView::decl(&config),
         organizations::OrganizationView::decl(&config),
         organizations::OrganizationPage::<String>::decl(&config),

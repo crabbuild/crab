@@ -80,9 +80,19 @@ impl CatalogStore {
                     ));
                 }
                 fork.forked_from = None;
-                fork.members = root.members.clone();
-                fork.groups = root.groups.clone();
-                fork.organization = root.organization.clone();
+                if let Some(owner) = fork.fork_owner.take() {
+                    fork.members = vec![crate::RepositoryMember {
+                        subject: owner.subject,
+                        name: "Fork owner".into(),
+                        access: crate::RepositoryAccess::Admin,
+                    }];
+                    fork.groups.clear();
+                    fork.organization = None;
+                } else {
+                    fork.members = root.members.clone();
+                    fork.groups = root.groups.clone();
+                    fork.organization = root.organization.clone();
+                }
             }
         }
         let record = document

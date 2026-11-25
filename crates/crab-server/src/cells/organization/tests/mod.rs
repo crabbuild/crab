@@ -56,6 +56,7 @@ async fn join(
             recipient: person,
             version: invitation_version,
             role,
+            reinstate_version: None,
         },
     )
     .await

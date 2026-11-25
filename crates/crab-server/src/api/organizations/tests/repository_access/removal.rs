@@ -5,10 +5,10 @@ use super::*;
 async fn native_browser_confirms_outside_collaborator_removal() {
     let f = AccessFixture::new().await;
     f.h.write(
-        Method::DELETE,
-        &format!("{}/members/{}", f.org, f.member),
+        Method::POST,
+        &format!("{}/members/conversion", f.org),
         &f.alice,
-        json!({"version":1}),
+        json!({"members":[{"actor":f.member,"version":1}]}),
     )
     .await
     .error_for_status()
@@ -118,10 +118,10 @@ async fn bulk_outside_removal_is_current_atomic_and_recoverable() {
     let removal_path = format!("{listing}/removals");
     let invite = format!("{}/invitations/{}", f.org, f.member);
     f.h.write(
-        Method::DELETE,
-        &format!("{}/members/{}", f.org, f.member),
+        Method::POST,
+        &format!("{}/members/conversion", f.org),
         &f.alice,
-        json!({"version":1}),
+        json!({"members":[{"actor":f.member,"version":1}]}),
     )
     .await
     .error_for_status()
@@ -223,10 +223,10 @@ async fn bulk_outside_removal_is_current_atomic_and_recoverable() {
     );
 
     f.h.write(
-        Method::DELETE,
-        &format!("{}/members/{}", f.org, f.member),
+        Method::POST,
+        &format!("{}/members/conversion", f.org),
         &f.alice,
-        json!({"version":3}),
+        json!({"members":[{"actor":f.member,"version":3}]}),
     )
     .await
     .error_for_status()

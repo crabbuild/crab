@@ -1,8 +1,7 @@
 use super::*;
 use crate::cells::directory::{AccountsExist, CompleteHandles, validate_handle_prefix};
 use organization::{
-    CancelInvitation, DecideInvitation, Decision, FindInvitations, GetInvitation, InvitationKey,
-    Invite, InviteInput,
+    CancelInvitation, Decision, FindInvitations, GetInvitation, InvitationKey, Invite, InviteInput,
 };
 
 #[derive(Serialize)]
@@ -65,11 +64,18 @@ async fn read(
     app::account(principal)?;
     Ok(Json(view))
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InviteRequest {
+    version: u64,
+    role: Role,
+    reinstate_version: Option<u64>,
+}
 async fn invite(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path((id, recipient)): Path<(Uuid, Uuid)>,
-    Json(input): Json<MemberRequest>,
+    Json(input): Json<InviteRequest>,
 ) -> Result<Json<organization::Invitation>> {
     let actor = actor(&server, &principal).await?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
@@ -106,6 +112,7 @@ async fn invite(
                     recipient,
                     version: input.version,
                     role: input.role,
+                    reinstate_version: input.reinstate_version,
                 },
             )
             .await,
@@ -148,26 +155,23 @@ async fn decide(
     Json(input): Json<Answer>,
 ) -> Result<Json<organization::Invitation>> {
     let actor = actor(&server, &principal).await?;
-    let cells = server.cells().ok_or(Error::CellUnavailable)?;
-    let address = target(id)?;
-    let result = super::membership_change(&server, id, move |_| async move {
-        app::account(&principal)?;
-        app::command_output(
-            cells
-                .command::<DecideInvitation>(
-                    address,
-                    app::mutation_identity()?,
-                    Decision {
-                        actor,
-                        version: input.version,
-                        accept: input.accept,
-                    },
-                )
-                .await,
+    let worker = Arc::clone(&server);
+    let result = super::membership_change(&server, id, move |cancel| async move {
+        super::membership_changes::decide_locked(
+            &worker,
+            id,
+            &principal,
+            Decision {
+                actor,
+                version: input.version,
+                accept: input.accept,
+            },
+            &cancel,
         )
+        .await
     })
     .await?;
-    Ok(Json(applied(result)?))
+    Ok(Json(result))
 }
 async fn list(
     State(server): State<Arc<Server>>,

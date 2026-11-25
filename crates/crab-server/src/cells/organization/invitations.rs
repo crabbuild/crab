@@ -1,6 +1,44 @@
 use super::*;
 
 const LIFETIME_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+const REINSTATEMENT_MS: i64 = 90 * 24 * 60 * 60 * 1000;
+
+#[derive(Deserialize, Serialize)]
+struct FormerMembership {
+    version: u64,
+    team_epoch: u64,
+    eligible_until_ms: i64,
+}
+
+fn former_key(recipient: Uuid) -> String {
+    format!("organization/v1/former-members/{recipient}")
+}
+
+pub(super) fn remember_removal(
+    context: &Transaction<'_>,
+    recipient: Uuid,
+    version: u64,
+) -> Result<()> {
+    context.put_document(
+        &former_key(recipient),
+        &FormerMembership {
+            version,
+            team_epoch: teams::membership_epoch(context, recipient)?,
+            eligible_until_ms: context.now_ms().saturating_add(REINSTATEMENT_MS),
+        },
+    )
+}
+
+fn eligible(context: &Transaction<'_>, member: &Member) -> Result<bool> {
+    if member.active {
+        return Ok(false);
+    }
+    Ok(context
+        .document::<FormerMembership>(&former_key(member.actor))?
+        .is_some_and(|former| {
+            former.version == member.version && context.now_ms() < former.eligible_until_ms
+        }))
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -23,6 +61,9 @@ pub(crate) struct Invitation {
     pub state: InvitationState,
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub reinstates: Option<bool>,
 }
 impl Invitation {
     fn pending_at(&self, now: i64) -> bool {
@@ -40,6 +81,7 @@ impl Invitation {
             role: self.role,
             version: self.version,
             state: self.state,
+            reinstates: self.reinstates == Some(true),
         }
     }
 }
@@ -52,6 +94,7 @@ fn row(row: &[SqlValue]) -> Result<Invitation> {
         state,
         created,
         expires,
+        reinstates,
     ] = row
     else {
         return Err(Error::Invalid("organization invitation record is invalid"));
@@ -71,10 +114,11 @@ fn row(row: &[SqlValue]) -> Result<Invitation> {
         state,
         created_at_ms: uint(created)?,
         expires_at_ms: uint(expires)?,
+        reinstates: (uint(reinstates)? == 1).then_some(true),
     })
 }
 const COLUMNS: &str =
-    "recipient, role, version, member_version, state, created_at_ms, expires_at_ms";
+    "recipient, role, version, member_version, state, created_at_ms, expires_at_ms, reinstates";
 fn invitation(context: &Transaction<'_>, recipient: Uuid) -> Result<Option<Invitation>> {
     actor(recipient)?;
     context
@@ -86,6 +130,16 @@ fn invitation(context: &Transaction<'_>, recipient: Uuid) -> Result<Option<Invit
         .first()
         .map(|values| row(values))
         .transpose()
+}
+pub(super) fn cancel_issued(context: &Transaction<'_>, sender: Uuid) -> Result<u64> {
+    // Keep the version change with removal so a surviving owner cannot issue
+    // a replacement using a version they read before the sender left.
+    let cancelled = context.query(
+        "UPDATE organization_invitations SET state = 'cancelled', version = version + 1
+         WHERE invited_by = ? AND state = 'pending' AND expires_at_ms > ?",
+        &[blob(sender), SqlValue::Integer(context.now_ms())],
+    )?;
+    Ok(cancelled.rows_affected)
 }
 fn next_version(version: u64) -> Result<u64> {
     version
@@ -102,6 +156,8 @@ pub(crate) struct InviteInput {
     pub recipient: Uuid,
     pub version: u64,
     pub role: Role,
+    #[serde(default)]
+    pub reinstate_version: Option<u64>,
 }
 pub(crate) struct Invite;
 impl Mutation for Invite {
@@ -123,13 +179,31 @@ impl Mutation for Invite {
         }
         let now = context.now_ms();
         let pending = old.filter(|value| value.pending_at(now));
+        let reinstates = input.reinstate_version.map(|_| true);
         if let Some(old) = &pending
             && old.role == input.role
+            && old.reinstates == reinstates
+            && input
+                .reinstate_version
+                .is_none_or(|version| version == old.member_version)
         {
             return Ok(MutationResult::Success(ChangeOutcome::Applied(old.clone())));
         }
+        if let Some(version) = input.reinstate_version
+            && match &member {
+                Some(member) => {
+                    member.version != version
+                        || member.role != input.role
+                        || !eligible(context, member)?
+                }
+                None => true,
+            }
+        {
+            return Ok(MutationResult::Rejected(ChangeOutcome::Conflict));
+        }
         // Editing a pending offer keeps its original deadline. Retrying an expired
-        // or closed offer creates a new version; old acceptance links cannot grant.
+        // or closed offer creates a new offer from the current owner. Keep the
+        // initial sender through pending edits so offboarding still revokes it.
         let created = pending
             .as_ref()
             .map_or(now, |value| value.created_at_ms as i64);
@@ -149,10 +223,32 @@ impl Mutation for Invite {
                 .map_err(|_| Error::Invalid("organization clock is negative"))?,
             expires_at_ms: u64::try_from(expires)
                 .map_err(|_| Error::Invalid("organization clock is negative"))?,
+            reinstates,
         };
-        context.query("INSERT INTO organization_invitations(recipient, role, version, member_version, state, created_at_ms, expires_at_ms) VALUES (?, ?, ?, ?, 'pending', ?, ?) ON CONFLICT(recipient) DO UPDATE SET role = excluded.role, version = excluded.version, member_version = excluded.member_version, state = excluded.state, created_at_ms = excluded.created_at_ms, expires_at_ms = excluded.expires_at_ms", &[
-            blob(value.recipient), SqlValue::Text(value.role.name().into()), integer(value.version)?, integer(value.member_version)?, integer(value.created_at_ms)?, integer(value.expires_at_ms)?
-        ])?;
+        context.query(
+            "INSERT INTO organization_invitations(
+                 recipient, invited_by, role, version, member_version, state,
+                 created_at_ms, expires_at_ms, reinstates
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, ?8)
+             ON CONFLICT(recipient) DO UPDATE SET
+                 invited_by = CASE WHEN ?9 THEN organization_invitations.invited_by
+                                   ELSE excluded.invited_by END,
+                 role = excluded.role, version = excluded.version,
+                 member_version = excluded.member_version, state = excluded.state,
+                 created_at_ms = excluded.created_at_ms, expires_at_ms = excluded.expires_at_ms,
+                 reinstates = excluded.reinstates",
+            &[
+                blob(value.recipient),
+                blob(input.actor),
+                SqlValue::Text(value.role.name().into()),
+                integer(value.version)?,
+                integer(value.member_version)?,
+                integer(value.created_at_ms)?,
+                integer(value.expires_at_ms)?,
+                SqlValue::Integer(i64::from(reinstates == Some(true))),
+                SqlValue::Integer(i64::from(pending.is_some())),
+            ],
+        )?;
         advance(context, input.actor, value.action())?;
         Ok(MutationResult::Success(ChangeOutcome::Applied(value)))
     }
@@ -219,8 +315,22 @@ impl Mutation for DecideInvitation {
                 return Ok(MutationResult::Rejected(ChangeOutcome::Conflict));
             }
             let version = next_version(value.member_version)?;
-            // The offer is an organization-owned capability until cancelled or
-            // expired. Acceptance and the exact membership version commit together.
+            let former_key = former_key(input.actor);
+            let restore = if value.reinstates == Some(true) {
+                let Some(former) = context.document::<FormerMembership>(&former_key)? else {
+                    return Ok(MutationResult::Rejected(ChangeOutcome::Conflict));
+                };
+                if former.version != value.member_version {
+                    return Ok(MutationResult::Rejected(ChangeOutcome::Conflict));
+                }
+                // The eligibility window fences offer creation. Once issued, the
+                // recipient has the normal invitation lifetime to decide.
+                Some(former.team_epoch)
+            } else {
+                None
+            };
+            // Offboarding cancels outstanding offers in this same Cell.
+            // Acceptance and the exact membership version commit together.
             context.query("INSERT INTO organization_members(actor, role, active, version) VALUES (?, ?, 1, ?) ON CONFLICT(actor) DO UPDATE SET role = excluded.role, active = 1, version = excluded.version", &[blob(input.actor), SqlValue::Text(value.role.name().into()), integer(version)?])?;
             teams::membership_changed(
                 context,
@@ -232,6 +342,10 @@ impl Mutation for DecideInvitation {
                 },
                 Some(false),
             )?;
+            if let Some(epoch) = restore {
+                teams::restore_memberships(context, input.actor, epoch, version)?;
+            }
+            context.delete_document(&former_key)?;
         }
         value.version = next_version(value.version)?;
         value.state = if input.accept {
@@ -258,6 +372,16 @@ impl Mutation for DecideInvitation {
 pub(crate) struct InvitationView {
     pub organization: Option<Organization>,
     pub invitation: Option<Invitation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub reinstatement: Option<Reinstatement>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(crate) struct Reinstatement {
+    pub version: u64,
+    pub role: Role,
 }
 pub(crate) struct GetInvitation;
 impl Read for GetInvitation {
@@ -283,9 +407,23 @@ impl Read for GetInvitation {
         } else {
             None
         };
+        // The read authorizer requires owner access for another account's
+        // invitation. Recipients and directory lookups only see the offer.
+        let reinstatement = if input.actor != input.member
+            && let Some(member) = member(context, input.member)?
+            && eligible(context, &member)?
+        {
+            Some(Reinstatement {
+                version: member.version,
+                role: member.role,
+            })
+        } else {
+            None
+        };
         Ok(Some(InvitationView {
             organization,
             invitation: invitation.map(|value| value.visible(context.now_ms())),
+            reinstatement,
         }))
     }
 }
@@ -380,6 +518,7 @@ mod tests {
             state: InvitationState::Pending,
             created_at_ms: 1000,
             expires_at_ms: 1000 + LIFETIME_MS as u64,
+            reinstates: None,
         };
         for (offset, expected) in [
             (-1, InvitationState::Pending),

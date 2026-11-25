@@ -126,10 +126,22 @@ against both revisions. `catalog/outside_removal.rs` commits revocations across
 live and deleted repositories and their audit receipt in one CAS. Membership
 changes, invitation decisions, and ref publication share the organization
 policy lease with this write.
-`catalog/conversion.rs` commits retained team grants and the recovery record
-together. `api/organizations/conversions.rs` finalizes the matching member
-incarnation under the same lease. Team commands and identity provider group
-projection use that lease so the conversion captures current team roles.
+`catalog/membership_changes.rs` commits departure grant edits and their recovery
+record together. `api/organizations/membership_changes.rs` finalizes the exact
+member incarnation under the organization policy lease. Rejoining consumes the
+archived grants after exact invitation consent. Compare repository ownership
+epochs and preserve newer direct grants. Team commands and provider projection
+share the lease so conversion captures current team roles.
+Personal private forks keep their account address and inherit the source
+organization's authority. Fork publication verifies source access under the
+organization lease. Member removal moves their personal forks into catalog
+tombstones. Reinstatement checks source ownership and restores the same UUID.
+`cells/organization/invitations.rs` owns the reinstatement window and binds a
+restore offer to the exact removal version. Only recipient acceptance may
+reactivate eligible manual team edges. Removing or converting a member also
+cancels their pending invitations in that membership transaction. Identity
+provider sync owns managed rosters and clears dormant edges before unlinking a
+team.
 `cells/repository/integrations.rs` owns GitHub Actions connections, delivery
 receipts, bounded accepted-delivery history, and workflow attempt ordering. It
 reads active providers and their exact-commit results from one snapshot for merge

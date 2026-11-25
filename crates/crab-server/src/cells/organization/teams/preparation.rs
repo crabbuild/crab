@@ -30,6 +30,68 @@ pub(in crate::cells::organization) fn initialize(context: &Transaction<'_>) -> R
     context.install_schema(include_str!("schema.sql"))?;
     context.put_document(STATE, &OrganizationTeamState::Ready)
 }
+pub(in crate::cells::organization) fn membership_epoch(
+    context: &Transaction<'_>,
+    person: Uuid,
+) -> Result<u64> {
+    let rows = context.query(
+        "SELECT epoch FROM organization_membership_epochs WHERE actor=?",
+        &[blob(person)],
+    )?;
+    let Some([epoch]) = rows.rows.first().map(Vec::as_slice) else {
+        return Err(Error::Invalid("organization membership epoch is missing"));
+    };
+    uint(epoch)
+}
+
+pub(in crate::cells::organization) fn restore_memberships(
+    context: &Transaction<'_>,
+    person: Uuid,
+    former_epoch: u64,
+    next_epoch: u64,
+) -> Result<()> {
+    let args = [blob(person), integer(former_epoch)?];
+    let rows = context.query(
+        "SELECT m.team FROM organization_team_members m
+         JOIN organization_teams t ON t.id=m.team
+         WHERE m.actor=? AND m.membership_epoch=? AND m.role IS NOT NULL
+           AND t.deleted_at_ms IS NULL",
+        &args,
+    )?;
+    let mut restored = Vec::new();
+    for row in rows.rows {
+        let [id] = row.as_slice() else {
+            return Err(Error::Invalid("former team membership is invalid"));
+        };
+        let id = uuid(id)?;
+        if sync::binding(context, id)?.is_none() {
+            restored.push(id.simple().to_string());
+        }
+    }
+    if restored.is_empty() {
+        return Ok(());
+    }
+    let selected = SqlValue::Text(serde_json::to_string(&restored)?);
+    // Rebind only the surviving manual edges to the new incarnation and
+    // invalidate versions captured before the restored roster was visible.
+    context.query(
+        "UPDATE organization_team_members SET membership_epoch=?1,version=version+1
+         WHERE actor=?2 AND membership_epoch=?3
+         AND lower(hex(team)) IN (SELECT value FROM json_each(?4))",
+        &[
+            integer(next_epoch)?,
+            args[0].clone(),
+            args[1].clone(),
+            selected.clone(),
+        ],
+    )?;
+    context.query(
+        "UPDATE organization_teams SET version=version+1,updated_at_ms=MAX(updated_at_ms,?1)
+         WHERE lower(hex(id)) IN (SELECT value FROM json_each(?2))",
+        &[SqlValue::Integer(context.now_ms()), selected],
+    )?;
+    Ok(())
+}
 pub(in crate::cells::organization) fn membership_changed(
     context: &Transaction<'_>,
     member: &super::super::Member,
@@ -40,7 +102,7 @@ pub(in crate::cells::organization) fn membership_changed(
         return Ok(());
     }
     // Role edits retain membership. Leaving/rejoining advances its incarnation,
-    // so old team edges cannot become grants again when an invitation is accepted.
+    // so only edges explicitly restored by a reinstatement can grant again.
     context.query("INSERT INTO organization_membership_epochs(actor,epoch) VALUES (?,?) ON CONFLICT(actor) DO UPDATE SET epoch=excluded.epoch",&[blob(member.actor),integer(member.version)?])?;
     Ok(())
 }

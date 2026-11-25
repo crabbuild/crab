@@ -311,7 +311,7 @@ impl Principal {
         issuer: &str,
         organization_access: Option<RepositoryAccess>,
     ) -> Self {
-        self.with_catalog_membership(repository, config, issuer, organization_access, false)
+        self.with_catalog_membership(repository, config, issuer, organization_access, false, None)
     }
 
     pub(crate) fn with_catalog_membership(
@@ -321,6 +321,7 @@ impl Principal {
         issuer: &str,
         organization_access: Option<RepositoryAccess>,
         renamed: bool,
+        fork_owner: Option<&crate::catalog::MembershipActor>,
     ) -> Self {
         let account = match &self.credential {
             // Deploy credentials are checked against the repository's Cell
@@ -355,17 +356,33 @@ impl Principal {
             if identity.issuer != issuer {
                 return None;
             }
-            let individual = RepositoryMember::access_for(&config.members, &identity.subject);
+            let owns_fork = fork_owner.is_some_and(|owner| {
+                owner.issuer == identity.issuer && owner.subject == identity.subject
+            });
+            let individual = if fork_owner.is_none() || owns_fork {
+                RepositoryMember::access_for(&config.members, &identity.subject)
+            } else {
+                None
+            };
             let group = group_access(groups, &config.groups);
             individual
                 .into_iter()
                 .chain(group)
                 .chain(organization_access)
                 .max()
-                .map(|role| Grant {
-                    repository,
-                    role,
-                    access: role.min(ceiling),
+                .map(|role| {
+                    // The fork owner needs upstream access before getting
+                    // write access to their own copy. Keep Git token ceilings.
+                    let role = if owns_fork {
+                        role.max(RepositoryAccess::Write)
+                    } else {
+                        role
+                    };
+                    Grant {
+                        repository,
+                        role,
+                        access: role.min(ceiling),
+                    }
                 })
         });
         Self {

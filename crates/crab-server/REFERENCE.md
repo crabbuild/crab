@@ -1053,9 +1053,9 @@ repository admin can disable them for an individual source in
 organization allows them, unless an admin opts out. Changing either setting
 governs future forks. Existing forks retain their current access.
 
-An organization owner can choose **Fork repository** in the source repository's
-Code view when both policies allow it. Choose a new repository name in the
-same organization. Crab copies
+When both policies allow forking, a signed-in reader can choose **Fork
+repository** in the source's Code view and select **Personal**. Organization
+owners can also choose the source organization as the destination. Crab copies
 the advertised Git refs and history through the native Git service and keeps
 the source repository UUID as the fork's lineage. Before publishing refs, Crab
 copies and verifies reachable Git LFS payloads. For native Crab Xet files, it
@@ -1065,17 +1065,28 @@ source and resume the fork job. The ready fork's Code view links back to the
 source. You can clone the fork and push independent changes with its own
 repository-scoped Git token.
 
-The fork inherits current source members, OIDC groups, and organization team
-grants. Manage access on the source. Removing access there also removes fork
-access, even when an account already holds a fork Git token. Organization
-rulesets still apply to the fork, including its initial Git publication.
+Organization forks inherit current source members, OIDC groups, and organization
+team grants. Personal forks are listed under the account's personal repositories.
+They inherit source organization and group access. The fork owner can write
+while they have source access. Direct grants to other individual collaborators
+apply to the source repository. The upstream organization's rulesets govern
+private forks, including initial Git publication.
 
-`POST /api/repos/{owner}/{name}/forks` accepts `{request_id, name}` and requires
-the source repository ID header and browser CSRF token. It returns an
-organization job with `fork_source`. Use the organization Git import status and
-resume routes with the same job ID. Resume with `{}` and a current organization
-owner session. A job verifies the pinned refs and checks both policies again
-before the fork becomes visible. Enable both policies to resume a blocked job.
+Removing a member retires their personal private forks of that organization's
+repositories. An accepted **Restore previous access** invitation brings back
+eligible forks under the same UUID and address when the source is still private
+and in the same ownership incarnation. **Start fresh** discards eligibility for
+those archived forks. Shared organization forks stay available through current
+source grants. Making an upstream repository public detaches its existing
+personal forks as private repositories owned by their individual accounts.
+
+`POST /api/repos/{owner}/{name}/forks` accepts `{request_id, name, destination}`
+and requires the source repository ID header and browser CSRF token.
+`destination` is `personal` or `organization` and defaults to `organization`.
+Personal forks use the caller's `/api/imports/git/{id}` status and resume routes.
+Organization forks use the organization import routes and require a current
+owner. Jobs verify the pinned refs and current source access and policies
+before making the fork visible.
 Repository admins can update the source policy with `PUT /api/repositories/{id}/forking`
 and `{version, allowed}`. The exact repository lookup returns the current
 setting and the organization policy to repository admins. Deploy the updated
@@ -5724,11 +5735,12 @@ The OIDC dependency includes `rsa` for public-key signature verification. [RUSTS
 
 ## Organization authority foundation
 
-The new `Organization` native class uses schema 1 under `cells/organization/` and
+The `Organization` native class uses schema 2 under `cells/organization/` and
 shares the Cellar transaction, receipt and output gate. Explicit private
 `cells bootstrap-organization --organization UUID --input-file JSON` resolves the
 first owner's exact `{issuer, subject}` through Directory without profile
 enrollment. It returns `/-/organizations/UUID`. Public HTTP has no bootstrap route.
+Use fresh Organization Cell UUIDs for schema 2.
 
 `/api/organizations/{id}` reads/edits metadata; `/members` lists bounded current
 members, and `/members/{actor}` changes/removes active grants with expected
@@ -5739,6 +5751,45 @@ membership versions. `/invitations` lists bounded pending/expired offers;
 unknown fields. Repository Git tokens cannot access these account features.
 Native authorization precedes receipt replay and mutations; last-owner guards,
 invitation decisions, membership tombstones and audit append are transactional.
+
+Removing a member or converting them to an outside collaborator also cancels
+any pending invitations they sent. A pending edit keeps the original sender.
+Cancelled invitations disappear from the recipient's invitation inbox and
+remain visible in invitation history. The membership audit event records how
+many invitations were cancelled.
+
+Removing a member also revokes their direct grants on the organization's live
+and deleted source repositories. Crab records those grants against the removal
+version and repository ownership epoch. Conversion to outside collaborator
+preserves repository access through direct grants.
+
+In **People → Members**, select members on the current page, open the selection
+menu, and choose **Remove from organization**. Review the members and the
+access changes before confirming. `POST /api/organizations/{id}/members/removal`
+accepts `{members: [{actor, version}]}` for 1–50 distinct current members and
+returns `{removed}`. Crab validates the whole selection and requires a surviving
+owner before committing any repository or membership changes.
+
+For 90 days after a member is removed or converted to an outside collaborator,
+an owner can invite them from **People → Invite member** and choose **Restore
+previous access** or **Start fresh**. Restoring access uses the former
+organization role and restores manual memberships in surviving teams on
+acceptance. The teams' current repository permissions apply. Eligible archived
+direct grants also return where the repository still has the same ownership
+epoch. Newer direct grants take precedence. **Start fresh** discards the
+archived grants when accepted. An offer issued within the eligibility window
+keeps the normal seven-day invitation deadline.
+
+The catalog records pending departure and rejoin operations so the refresh
+worker can complete interrupted changes. Grant edits and ownership transfers
+can conflict until that pending operation finishes.
+
+The owner-only invitation view includes `reinstatement` with the eligible
+membership `version` and former `role`. Send that version as
+`reinstate_version` alongside the role and invitation version to make a
+reinstatement offer. Ordinary offers omit `reinstate_version`. Reinstatement
+offers report `reinstates: true`. Stale membership versions conflict. Upgrade
+serving and Organization Cell peers together before issuing these offers.
 
 Current organization owners inherit Admin on their organization’s repositories.
 Other organization members can inherit roles through repository team grants.

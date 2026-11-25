@@ -34,7 +34,7 @@ import { Invitations, InviteDialog } from "./invitations";
 import { OrganizationSettings, isOrganizationSettings } from "./settings";
 import { OrganizationRepositories } from "./repositories";
 import { MemberAccess } from "./repository-access";
-import { ConvertMembers } from "./convert-members";
+import { MemberActions } from "./member-actions";
 import { OutsideCollaborators } from "./outside-collaborators";
 import { organizationHref } from "@/lib/organization-route";
 import { TeamPicker } from "@/features/settings/team-picker";
@@ -457,33 +457,29 @@ function People({
                         Select page
                       </Label>
                       {selected.length > 0 && (
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-sm text-muted-foreground">
-                            {selected.length} selected
-                          </span>
-                          <ConvertMembers
-                            endpoint={`${endpoint}/members/conversion`}
-                            csrf={csrf}
-                            members={selected}
-                            onReload={refresh}
-                            onConverted={() => {
-                              if (
-                                selected.some(
-                                  (member) => member.actor === actor,
-                                )
-                              ) {
-                                navigate("/");
-                              } else {
-                                onChanged(
-                                  selected.length === 1
-                                    ? "Converted 1 member to an outside collaborator."
-                                    : `Converted ${selected.length} members to outside collaborators.`,
-                                );
-                                refresh();
-                              }
-                            }}
-                          />
-                        </div>
+                        <MemberActions
+                          endpoint={endpoint}
+                          csrf={csrf}
+                          members={selected}
+                          onReload={refresh}
+                          onFinished={(action) => {
+                            if (
+                              selected.some((member) => member.actor === actor)
+                            ) {
+                              navigate("/");
+                              return;
+                            }
+                            const count = selected.length;
+                            onChanged(
+                              action === "removal"
+                                ? `Removed ${count} ${count === 1 ? "member" : "members"}.`
+                                : count === 1
+                                  ? "Converted 1 member to an outside collaborator."
+                                  : `Converted ${count} members to outside collaborators.`,
+                            );
+                            refresh();
+                          }}
+                        />
                       )}
                     </div>
                   )}
@@ -499,7 +495,11 @@ function People({
                           canManage={data.can_manage}
                           endpoint={endpoint}
                           csrf={csrf}
-                          onChanged={(message) => {
+                          onChanged={(message, removed) => {
+                            if (removed && member.actor === actor) {
+                              navigate("/");
+                              return;
+                            }
                             onChanged(message);
                             refresh();
                           }}
@@ -556,7 +556,7 @@ function MemberRow({
   canManage: boolean;
   endpoint: string;
   csrf: string;
-  onChanged: (message: string) => void;
+  onChanged: (message: string, removed: boolean) => void;
 }) {
   const mutation = useMutation(csrf, null);
   const [role, setRole] = useState<OrganizationRole>(member.role);
@@ -567,7 +567,8 @@ function MemberRow({
       remove ? "DELETE" : "PUT",
       remove ? { version: member.version } : { version: member.version, role },
     );
-    if (value) onChanged(remove ? "Member removed." : "Member role updated.");
+    if (value)
+      onChanged(remove ? "Member removed." : "Member role updated.", remove);
   }
   const name = member.profile?.name || "Member without a public profile";
   return (
@@ -634,6 +635,11 @@ function MemberRow({
         <Alert>
           <AlertDescription>
             <p>Remove {name} from this organization?</p>
+            <p>
+              They’ll lose their direct grants to organization repositories.
+              Their personal private forks of those repositories will be
+              retired, and pending invitations they sent will be cancelled.
+            </p>
             <div className="mt-3 flex gap-2">
               <Button
                 variant="destructive"

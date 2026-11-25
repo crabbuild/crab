@@ -38,6 +38,8 @@ pub(crate) enum Action {
     VisibilityChanged,
     OutsideCollaboratorsRemoved,
     CollaboratorGrantsRetained,
+    MemberGrantsRevoked,
+    MemberGrantsRestored,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -69,19 +71,12 @@ impl Scope {
         })
     }
 
-    pub(super) fn outside_removal(organization: Uuid) -> Self {
+    pub(super) fn membership_change(organization: Uuid, action: Action) -> Self {
         Self {
             organization,
-            action: Action::OutsideCollaboratorsRemoved,
+            action,
             name: None,
             previous: None,
-        }
-    }
-
-    pub(super) fn conversion(organization: Uuid) -> Self {
-        Self {
-            action: Action::CollaboratorGrantsRetained,
-            ..Self::outside_removal(organization)
         }
     }
 }
@@ -103,6 +98,8 @@ impl MembershipAuditEvent {
                             scope.action,
                             Action::OutsideCollaboratorsRemoved
                                 | Action::CollaboratorGrantsRetained
+                                | Action::MemberGrantsRevoked
+                                | Action::MemberGrantsRestored
                         ) && scope
                             .name
                             .as_deref()
@@ -123,14 +120,25 @@ impl MembershipAuditEvent {
                 }
                 [
                     Scope {
-                        action: Action::CollaboratorGrantsRetained,
+                        action: Action::CollaboratorGrantsRetained | Action::MemberGrantsRevoked,
                         name: None,
                         ..
                     },
                 ] => {
-                    (1..=crate::cells::organization::MAX_CONVERSION_MEMBERS)
+                    (1..=crate::cells::organization::MAX_DEPARTURE_MEMBERS)
                         .contains(&change.collaborators)
                         && change.grants >= change.repositories
+                }
+                [
+                    Scope {
+                        action: Action::MemberGrantsRestored,
+                        name: None,
+                        ..
+                    },
+                ] => {
+                    change.collaborators == 1
+                        && change.repositories > 0
+                        && change.grants == change.repositories
                 }
                 _ => false,
             },
