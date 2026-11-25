@@ -22,10 +22,11 @@ mod telemetry;
 
 pub use crab_types::storage::CdnPublicationFile;
 pub(crate) use placement::NativeAuthority;
-pub use placement::{AzureManagementAuthorization, NativeCdnOrigin};
+pub use placement::{AzureManagementAuthorization, NativeCdnOrigin, r2_origin_bucket};
 pub(crate) use policy::ReadLimits;
 pub use policy::{
-    CdnConsumer, CdnPolicy, CdnProfile, CdnReadFamily, CdnVisibility, release_policy_sha256,
+    CdnConsumer, CdnEdge, CdnPolicy, CdnProfile, CdnReadFamily, CdnVisibility,
+    release_policy_sha256,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use publication::write_publication_fixture;
@@ -35,7 +36,7 @@ pub use telemetry::{
 pub(crate) use telemetry::{PublicTransitionObservation, observe_origin_only_read};
 
 use crate::{
-    Result, StorageError, StorageProviderKind, Store,
+    Result, StorageError, Store,
     layout::StoreLayout,
     map_object_store_error,
     transport_read_admission::{self, TransportReadReceipt},
@@ -64,7 +65,7 @@ pub trait CapsuleControlCache: Send + Sync {
 /// A CDN route for one selected storage target and physical repository view.
 pub struct CdnRoute {
     pub(crate) target: [u8; 32],
-    pub(crate) provider: StorageProviderKind,
+    pub(crate) edge: CdnEdge,
     pub(crate) layout: StoreLayout<()>,
     pub(crate) allow_global: bool,
     pub(crate) access: CdnAccess,
@@ -88,7 +89,7 @@ impl CdnRoute {
     ) -> Self {
         Self {
             target,
-            provider: StorageProviderKind::Local,
+            edge: CdnEdge::Local,
             allow_global: global_prefix.is_some(),
             layout: StoreLayout::with_global_prefix(
                 (),
@@ -141,7 +142,7 @@ impl CdnRoute {
             .ok_or_else(|| StorageError::Forbidden {
                 path: "CDN publication receipt does not match the selected native origin".into(),
             })?;
-        self.provider = origin.bucket_identity().cloud;
+        self.edge = authority.edge(origin.bucket_identity().cloud);
         self.publication_origin = None;
         if !self.transport.is_loopback() && self.policy().is_some_and(CdnPolicy::enabled) {
             authority
@@ -183,7 +184,7 @@ impl CdnRoute {
     pub(crate) fn policy(&self) -> Option<CdnPolicy> {
         let (consumer, profile) = self.context?;
         Some(CdnPolicy {
-            provider: self.provider,
+            edge: self.edge,
             visibility: match self.access {
                 CdnAccess::Public => CdnVisibility::Public,
                 CdnAccess::Private(_) => CdnVisibility::Private,
@@ -308,7 +309,7 @@ pub enum CdnViewer<'a> {
     Public,
     /// CloudFront or Cloud CDN signed cookie.
     Cookie(&'a str),
-    /// Azure private delivery gateway token.
+    /// Private delivery gateway token.
     Bearer(&'a str),
 }
 

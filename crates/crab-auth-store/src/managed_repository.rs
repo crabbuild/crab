@@ -305,7 +305,7 @@ impl ManagedRepositoryResolver {
                         CdnProvider::FrontDoor => StorageProviderKind::Azure,
                     };
                     CdnPolicy {
-                        provider,
+                        edge: provider.into(),
                         consumer,
                         visibility: CdnVisibility::Private,
                         profile: CdnProfile::Managed,

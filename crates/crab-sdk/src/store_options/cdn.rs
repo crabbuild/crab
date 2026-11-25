@@ -173,7 +173,7 @@ impl DirectCdnOptions {
         }
         self.deployment.storage_provider().is_some_and(|provider| {
             CdnPolicy {
-                provider,
+                edge: provider.into(),
                 consumer,
                 profile: CdnProfile::Direct,
                 visibility: match self.access {

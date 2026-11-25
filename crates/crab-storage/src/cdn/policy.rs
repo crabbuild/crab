@@ -166,10 +166,31 @@ impl CdnReadFamily {
     }
 }
 
+/// CDN network selected by the bound native origin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CdnEdge {
+    CloudFront,
+    CloudCdn,
+    FrontDoor,
+    Cloudflare,
+    Local,
+}
+
+impl From<StorageProviderKind> for CdnEdge {
+    fn from(provider: StorageProviderKind) -> Self {
+        match provider {
+            StorageProviderKind::S3 => Self::CloudFront,
+            StorageProviderKind::Gcs => Self::CloudCdn,
+            StorageProviderKind::Azure => Self::FrontDoor,
+            StorageProviderKind::Local => Self::Local,
+        }
+    }
+}
+
 /// The shared dimensions of a candidate CDN release row.
 #[derive(Clone, Copy)]
 pub struct CdnPolicy {
-    pub provider: StorageProviderKind,
+    pub edge: CdnEdge,
     pub visibility: CdnVisibility,
     pub consumer: CdnConsumer,
     pub profile: CdnProfile,
@@ -187,11 +208,18 @@ impl CdnPolicy {
     }
 
     fn select_limits(self, scopes: &str, fixture_build: bool) -> Vec<(CdnReadFamily, ReadLimits)> {
-        let edge = match self.provider {
-            StorageProviderKind::S3 => "cloudfront",
-            StorageProviderKind::Gcs => "cloud-cdn",
-            StorageProviderKind::Azure => "front-door",
-            StorageProviderKind::Local => return Vec::new(),
+        let edge = match self.edge {
+            CdnEdge::CloudFront => "cloudfront",
+            CdnEdge::CloudCdn => "cloud-cdn",
+            CdnEdge::FrontDoor => "front-door",
+            CdnEdge::Cloudflare
+                if self.visibility == CdnVisibility::Private
+                    && self.profile == CdnProfile::Direct
+                    && self.consumer == CdnConsumer::Cli =>
+            {
+                "cloudflare"
+            }
+            CdnEdge::Cloudflare | CdnEdge::Local => return Vec::new(),
         };
         if self.visibility == CdnVisibility::Public && self.profile == CdnProfile::Managed {
             return Vec::new();
@@ -215,6 +243,12 @@ impl CdnPolicy {
                 });
                 let limits = match rows.next() {
                     Some(row) if rows.next().is_none() => ReadLimits::parse(row)?,
+                    None if fixture_build && self.edge == CdnEdge::Cloudflare => ReadLimits {
+                        full_bytes: 8 * 1024 * 1024,
+                        ranged_object_bytes: u64::MAX,
+                        range_bytes: 8 * 1024 * 1024,
+                        timeout: Duration::from_secs(5),
+                    },
                     None if fixture_build => ReadLimits::FIXTURE,
                     _ => return None,
                 };
@@ -229,9 +263,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cloudflare_qualification_is_bounded_and_independent_of_cloudfront() {
+        let policy = CdnPolicy {
+            edge: CdnEdge::Cloudflare,
+            visibility: CdnVisibility::Private,
+            consumer: CdnConsumer::Cli,
+            profile: CdnProfile::Direct,
+        };
+        let cloudfront = "cloudfront/private/cli/git/direct 8 64 8 100";
+        assert!(policy.select_limits(cloudfront, false).is_empty());
+        let limits = policy.select_limits(cloudfront, true);
+        assert_eq!(limits.len(), CdnReadFamily::ALL.len());
+        for (_, limit) in limits {
+            assert!(limit.admits(16 * 1024 * 1024, Some(8 * 1024 * 1024)));
+            assert!(!limit.admits(16 * 1024 * 1024, None));
+        }
+        assert!(
+            CdnPolicy {
+                visibility: CdnVisibility::Public,
+                ..policy
+            }
+            .select_limits("", true)
+            .is_empty()
+        );
+    }
+
+    #[test]
     fn release_row_is_exact_in_every_dimension() {
         let approved = CdnPolicy {
-            provider: StorageProviderKind::S3,
+            edge: StorageProviderKind::S3.into(),
             visibility: CdnVisibility::Private,
             consumer: CdnConsumer::Cli,
             profile: CdnProfile::Direct,
@@ -249,7 +309,7 @@ mod tests {
         assert_eq!(limits.timeout, Duration::from_millis(100));
         for unrelated in [
             CdnPolicy {
-                provider: StorageProviderKind::Gcs,
+                edge: StorageProviderKind::Gcs.into(),
                 ..approved
             },
             CdnPolicy {
@@ -272,7 +332,7 @@ mod tests {
     #[test]
     fn fixture_build_preserves_public_scope_limits() {
         let public = CdnPolicy {
-            provider: StorageProviderKind::Azure,
+            edge: StorageProviderKind::Azure.into(),
             visibility: CdnVisibility::Public,
             consumer: CdnConsumer::Desktop,
             profile: CdnProfile::Direct,
@@ -298,7 +358,7 @@ mod tests {
     #[test]
     fn malformed_or_duplicate_release_rows_are_disabled() {
         let policy = CdnPolicy {
-            provider: StorageProviderKind::S3,
+            edge: StorageProviderKind::S3.into(),
             visibility: CdnVisibility::Private,
             consumer: CdnConsumer::Cli,
             profile: CdnProfile::Direct,

@@ -8511,7 +8511,7 @@ impl<'a> StoreResolver<'a> {
                     };
                     let mut store = selection.store.into_storage();
                     if direct {
-                        store = crate::core::cdn::CdnBinding::attach_public(
+                        store = crate::core::cdn::CdnBinding::attach_direct(
                             &self.config.cdn,
                             store,
                             &repo_prefix,

@@ -186,7 +186,7 @@ async fn provider_https_route_requires_an_exact_policy_context() {
     assert!(unapproved.cdn_attempt(&key).is_none());
 
     let approved = CdnPolicy {
-        provider: StorageProviderKind::S3,
+        edge: StorageProviderKind::S3.into(),
         visibility: CdnVisibility::Public,
         consumer: CdnConsumer::Cli,
         profile: CdnProfile::Direct,
@@ -433,7 +433,7 @@ async fn public_s3_activation_rejects_the_selected_store_in_another_region() {
     )
     .for_consumer(CdnConsumer::Cli, CdnProfile::Direct);
     let enabled = CdnPolicy {
-        provider: StorageProviderKind::S3,
+        edge: StorageProviderKind::S3.into(),
         consumer: CdnConsumer::Cli,
         profile: CdnProfile::Direct,
         visibility: CdnVisibility::Public,
@@ -823,7 +823,7 @@ async fn gcs_viewer_log_qualification_tags_each_request_and_retains_only_its_has
                 .await;
         let context = (
             CdnPolicy {
-                provider: StorageProviderKind::Gcs,
+                edge: StorageProviderKind::Gcs.into(),
                 visibility: CdnVisibility::Public,
                 consumer: CdnConsumer::Cli,
                 profile: CdnProfile::Direct,

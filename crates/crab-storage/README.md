@@ -170,6 +170,11 @@ Public Azure CDN activation accepts management-plane authorization from its
 caller. Storage verifies the ARM resource documents against the sealed receipt
 and the selected data-plane endpoint before installing the route.
 
+An account-qualified Cloudflare R2 endpoint selects a distinct private CDN
+policy while preserving the S3-compatible storage identity. The direct CLI
+qualification build binds the Worker to the selected bucket and repository.
+See the [Cloudflare Worker setup](../../crab/deploy/cdn/cloudflare/README.md).
+
 ### Upload integrity and multipart transfer
 
 Official AWS S3 builders send an explicit SHA-256 upload checksum and expose

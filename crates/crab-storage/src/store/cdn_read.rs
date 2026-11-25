@@ -113,7 +113,11 @@ impl Store {
                 _ => {}
             }
         }
-        route.provider = self.bucket_identity().cloud;
+        let provider = self.bucket_identity().cloud;
+        route.edge = self
+            .native_cdn_origin
+            .as_ref()
+            .map_or_else(|| provider.into(), |origin| origin.edge(provider));
         if let Some(policy) = route.policy() {
             route.read_limits = policy.read_limits();
         }

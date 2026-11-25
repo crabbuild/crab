@@ -748,12 +748,16 @@ fn build_s3_object_store(
         .build()
         .map_err(|source| provider_config_error(StorageProviderKind::S3, bucket, source))?;
     let s3: Arc<AmazonS3> = Arc::new(s3);
-    let native_cdn_origin = native_cdn_origin.map(|address| NativeCdnOrigin {
-        address,
-        authority: NativeAuthority::S3 {
-            region,
-            credentials: s3.credentials().clone(),
-        },
+    let native_cdn_origin = native_cdn_origin.map(|address| {
+        let authority = if crate::cdn::r2_origin_bucket(&address).is_some() {
+            NativeAuthority::R2
+        } else {
+            NativeAuthority::S3 {
+                region,
+                credentials: s3.credentials().clone(),
+            }
+        };
+        NativeCdnOrigin { address, authority }
     });
     Ok(BuiltObjectStore {
         inner: Arc::new(crate::s3_upload::S3Store::new(

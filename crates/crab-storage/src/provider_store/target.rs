@@ -113,20 +113,27 @@ pub(super) fn azure(builder: &MicrosoftAzureBuilder, bucket: &str) -> Result<[u8
 }
 
 pub(super) fn s3_cdn_origin(builder: &AmazonS3Builder, bucket: &str) -> Result<Option<String>> {
-    let custom = builder
+    let endpoint = builder
         .get_config_value(&AmazonS3ConfigKey::S3Endpoint)
-        .is_some()
-        || builder
-            .get_config_value(&AmazonS3ConfigKey::Endpoint)
-            .is_some();
+        .or_else(|| builder.get_config_value(&AmazonS3ConfigKey::Endpoint));
     let express = flag(builder.get_config_value(&AmazonS3ConfigKey::S3Express))?;
     let region = builder.get_config_value(&AmazonS3ConfigKey::Region);
+    if let Some(endpoint) = endpoint {
+        let origin = format!("{}/{bucket}", endpoint.trim_end_matches('/'));
+        let virtual_hosted =
+            flag(builder.get_config_value(&AmazonS3ConfigKey::VirtualHostedStyleRequest))?;
+        return Ok((!express
+            && !virtual_hosted
+            && region.as_deref() == Some("auto")
+            && crate::cdn::r2_origin_bucket(&origin) == Some(bucket))
+        .then_some(origin));
+    }
     let commercial = region.as_deref().is_none_or(|region| {
         !["cn-", "us-gov-", "us-iso", "eu-iso", "eusc-"]
             .iter()
             .any(|prefix| region.starts_with(prefix))
     });
-    Ok((!custom && !express && commercial).then(|| format!("s3://{bucket}")))
+    Ok((!express && commercial).then(|| format!("s3://{bucket}")))
 }
 
 pub(super) fn gcs_cdn_origin(builder: &GoogleCloudStorageBuilder, bucket: &str) -> Option<String> {
@@ -170,6 +177,23 @@ mod tests {
             .with_token(credential)
             .with_endpoint(endpoint)
             .with_client_options(ClientOptions::new().with_allow_http(true))
+    }
+
+    #[test]
+    fn r2_cdn_origin_pins_account_jurisdiction_and_path_style() {
+        let endpoint = "https://0123456789abcdef0123456789abcdef.eu.r2.cloudflarestorage.com";
+        let builder = s3_builder(endpoint, "fixture").with_region("auto");
+        assert_eq!(
+            s3_cdn_origin(&builder, "same-bucket").unwrap(),
+            Some(format!("{endpoint}/same-bucket"))
+        );
+        for builder in [
+            builder.clone().with_virtual_hosted_style_request(true),
+            builder.clone().with_endpoint(format!("{endpoint}/proxy")),
+            builder.with_endpoint(format!("{endpoint}.example.com")),
+        ] {
+            assert!(s3_cdn_origin(&builder, "same-bucket").unwrap().is_none());
+        }
     }
 
     #[test]

@@ -126,11 +126,8 @@ impl CdnViewerDeployment {
 
     /// Validate a native deployment and derive its bucket or container identity.
     pub fn new(origin: &str, source_repo: &str, base_url: &str) -> Result<Self> {
-        use crate::cdn::{canonical_https_base, canonical_prefix};
-
-        let base_url = base_url.trim_end_matches('/');
-        let Some((_, bucket)) = native_cdn_identity(origin)
-            .filter(|_| canonical_prefix(source_repo) && canonical_https_base(base_url))
+        let Some(((_, bucket), base_url)) = native_cdn_identity(origin)
+            .zip(crate::cdn::canonical_viewer_base(source_repo, base_url))
         else {
             return Err(AuthError::InvalidCredentialResponse(
                 "invalid native origin, repository prefix or CDN HTTPS base".into(),
