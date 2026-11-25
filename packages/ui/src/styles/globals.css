@@ -7276,6 +7276,9 @@ main {
 .workspace-project-work {
   min-width: 0;
 }
+.workspace-project-work > .project-filter-bar {
+  margin-top: 0;
+}
 .workspace-project-work .project-board-column {
   flex-basis: 220px;
   min-width: 220px;
@@ -7811,10 +7814,11 @@ main {
   flex: 1;
 }
 .project-filter-bar > [data-slot="select-trigger"] {
-  max-width: 190px;
+  max-width: min(100%, 190px);
 }
 .project-item-summary {
   display: flex;
+  flex-wrap: wrap;
   gap: --spacing(4);
   color: var(--muted-foreground);
   font-size: var(--text-xs);
@@ -7830,12 +7834,12 @@ main {
 .project-table [data-slot="table-cell"] {
   padding: --spacing(3.5) --spacing(3);
 }
-.project-table [data-slot="table-cell"]:first-child {
+.project-table .project-table-title {
   min-width: 280px;
   width: 40%;
   white-space: normal;
 }
-.project-table tr[draggable="true"] > td:first-child {
+.project-table tr[draggable="true"] > .project-table-title {
   cursor: grab;
 }
 .project-group-heading {

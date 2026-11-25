@@ -394,25 +394,33 @@ async function fixture(page: Page, movedIssue = false) {
     if (path === `${root}/${project.id}/items`) {
       const repository = url.searchParams.get("repository");
       const status = url.searchParams.get("status");
-      const repositoryMatches = (row: (typeof items)[number]) =>
-        !repository ||
-        (row.item.id === movedItem ? repositories[1].id : row.repository) ===
-          repository;
-      const matching = items.filter(
+      const priority = url.searchParams.get("priority");
+      const after = url.searchParams.get("after");
+      const scoped = items.filter(
         (row) =>
-          repositoryMatches(row) &&
+          (!repository ||
+            (row.item.id === movedItem
+              ? repositories[1].id
+              : row.repository) === repository) &&
+          (priority === null || row.item.priority === Number(priority)) &&
           (!url.searchParams.has("item") ||
-            row.item.id === url.searchParams.get("item")) &&
-          (!status || row.item.status === status),
+            row.item.id === url.searchParams.get("item")),
       );
+      const matching = scoped.filter(
+        (row) => !status || row.item.status === status,
+      );
+      const begin = after
+        ? matching.findIndex((row) => row.item.id === after) + 1
+        : 0;
+      const rows = matching.slice(begin, begin + 50);
       const counts: Record<string, number> = {};
-      for (const row of items.filter(repositoryMatches))
+      for (const row of scoped)
         counts[row.item.status] = (counts[row.item.status] ?? 0) + 1;
       return route.fulfill({
         json: {
           page: {
             project,
-            items: matching.map((row) => {
+            items: rows.map((row) => {
               const moved = row.item.id === movedItem;
               const current = row.repository ? work(row.repository) : null;
               return {
@@ -436,7 +444,7 @@ async function fixture(page: Page, movedIssue = false) {
             }),
             counts,
             total: matching.length,
-            next: null,
+            next: matching.length > begin + 50 ? rows.at(-1)!.item.id : null,
             revision: project.version,
           },
           can_manage: true,
@@ -1113,6 +1121,65 @@ test("stale project filters can be reset without losing the workspace", async ({
   await expect(
     page.getByRole("combobox", { name: "Filter by status", exact: true }),
   ).toHaveText("All statuses");
+});
+
+test("priority triage can recover a stale page without losing the filter on mobile", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  for (let index = 0; index < 51; index++) {
+    state.addDraft(`Urgent delivery ${index + 1}`);
+    state.items.at(-1)!.item.priority = 1;
+  }
+  state.addDraft("Defer until next release");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route(
+    (url) => url.pathname.endsWith("/items") && url.searchParams.has("after"),
+    (route) =>
+      route.fulfill({
+        status: 409,
+        json: {
+          error: { message: "The project changed. Reload the first page." },
+        },
+      }),
+  );
+  await page.goto(`${home}/${projectId}?pv=${views[1].id}`);
+  const priority = page.getByRole("combobox", { name: "Filter by priority" });
+  await priority.focus();
+  await page.keyboard.press("Enter");
+  await expect(
+    page.getByRole("option", { name: "All priorities" }),
+  ).toBeFocused();
+  await page.keyboard.press("u");
+  await expect(page.getByRole("option", { name: "Urgent" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(
+    page.getByText("51 matching items", { exact: true }),
+  ).toBeVisible();
+  const pagination = page.getByRole("navigation", {
+    name: "Project items pagination",
+  });
+  await pagination.getByRole("link", { name: "Next page" }).click();
+  await expect(page.getByRole("alert")).toContainText("Reload the first page");
+  await expect(priority).toHaveText("Urgent");
+  await pagination.getByRole("link", { name: "First page" }).click();
+  await expect(
+    page.getByText("51 matching items", { exact: true }),
+  ).toBeVisible();
+  await expect(priority).toHaveText("Urgent");
+  expect(new URL(page.url()).searchParams.has("after")).toBe(false);
+  await chooseSelectOption(priority, { label: "Low" });
+  await expect(page.getByText("No work matches this view")).toBeVisible();
+  await page.getByRole("button", { name: "Reset filters" }).click();
+  await expect(
+    page.getByText("52 matching items", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Urgent delivery 1", { exact: true }),
+  ).toBeInViewport();
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(390);
 });
 
 test("a lost submission survives reload and stays bound to its original account", async ({

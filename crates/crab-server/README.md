@@ -710,6 +710,10 @@ updates as children close or reopen.
 Creating/converting a project draft into an issue and assigning a parent are
 atomic. Workflow status does not close issues or merge PRs automatically.
 
+Both project scopes can filter item pages by priority. In the UI, **Settings**
+→ **Views** saves a default priority for a table, board or roadmap view.
+Matching item totals include the entire filtered result before pagination.
+
 For an existing repository, update peers and explicitly run:
 
 ```sh

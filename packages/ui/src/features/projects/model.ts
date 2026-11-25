@@ -41,6 +41,7 @@ export interface View {
   layout: Layout;
   query: string;
   status: string | null;
+  priority?: number | null;
   hide_closed: boolean;
   show_issue_type?: boolean;
   issue_type_filter?: string | null;

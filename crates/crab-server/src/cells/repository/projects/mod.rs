@@ -28,6 +28,8 @@ pub(crate) use reads::{
 };
 pub(crate) use templates::templates;
 
+pub(crate) const MAX_PRIORITY: u8 = 4;
+
 fn revision(context: &Transaction<'_>) -> Result<u64> {
     let rows = context.query(
         "SELECT app_revision FROM repository_identity WHERE singleton=1",
@@ -51,6 +53,8 @@ pub(crate) struct View {
     pub layout: Layout,
     pub query: String,
     pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
     pub hide_closed: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub show_issue_type: bool,
@@ -193,6 +197,7 @@ impl Definition {
                     && text_valid(&v.name, 60, true)
                     && text_valid(&v.query, 256, false)
                     && v.status.as_ref().is_none_or(|s| self.statuses.contains(s))
+                    && v.priority.is_none_or(|priority| priority <= MAX_PRIORITY)
                     && v.issue_type_filter.as_deref().is_none_or(|value| {
                         super::issues::issue_type::search::Filter::parse(value).is_ok()
                     })
@@ -219,7 +224,7 @@ impl Item {
         serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= 24 * 1024)
             && !self.id.is_nil()
             && definition.statuses.contains(&self.status)
-            && self.priority <= 4
+            && self.priority <= MAX_PRIORITY
             && self.start.as_deref().is_none_or(date_valid)
             && self.end.as_deref().is_none_or(date_valid)
             && match (&self.start, &self.end) {

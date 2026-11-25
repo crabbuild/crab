@@ -255,6 +255,8 @@ pub(crate) struct ItemsQuery {
     pub after: Option<Uuid>,
     pub version: Option<u64>,
     pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
     pub item: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched: Option<MatchedItems>,
@@ -275,6 +277,8 @@ pub(crate) struct SourcesQuery {
     pub project: Uuid,
     pub item: Option<Uuid>,
     pub include_pulls: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -307,15 +311,19 @@ impl Read for Sources {
         // The work cap bounds the cross-Cell join. Read UUIDs and discussion
         // numbers alone so attachment, title and draft data stay on their cells.
         let item = input.item.map(blob).unwrap_or(SqlValue::Null);
+        let priority = priority_filter(input.priority)?;
         let rows = context.query(
             "SELECT repository,id,kind,number,status FROM organization_project_items
              WHERE project=? AND kind IN (0,?) AND (? IS NULL OR id=?)
+             AND (? IS NULL OR json_extract(data,'$.item.priority')=?)
              ORDER BY repository,kind,number LIMIT ?",
             &[
                 blob(input.project),
                 SqlValue::Integer(i64::from(input.include_pulls)),
                 item.clone(),
                 item,
+                priority.clone(),
+                priority,
                 integer(MAX_ITEMS + 1)?,
             ],
         )?;
@@ -349,6 +357,14 @@ impl Read for Sources {
         }))
     }
 }
+
+fn priority_filter(priority: Option<u8>) -> Result<SqlValue> {
+    if priority.is_some_and(|priority| priority > planning::MAX_PRIORITY) {
+        return Err(Error::Invalid("invalid project priority filter"));
+    }
+    Ok(priority.map_or(SqlValue::Null, |value| SqlValue::Integer(i64::from(value))))
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Entry {
     pub record: Item,
@@ -414,9 +430,18 @@ impl Read for Items {
             .map(SqlValue::Text)
             .unwrap_or(SqlValue::Null);
         let selected = input.item.map(blob).unwrap_or(SqlValue::Null);
+        let priority = priority_filter(input.priority)?;
         let mut predicate =
-            "FROM organization_project_items p WHERE project=? AND (? IS NULL OR id=?)".to_owned();
-        let mut bindings = vec![blob(input.project), selected.clone(), selected];
+            "FROM organization_project_items p WHERE project=? AND (? IS NULL OR id=?)
+             AND (? IS NULL OR json_extract(p.data,'$.item.priority')=?)"
+                .to_owned();
+        let mut bindings = vec![
+            blob(input.project),
+            selected.clone(),
+            selected,
+            priority.clone(),
+            priority,
+        ];
         if let Some(items) = input.matched.and_then(|matched| matched.items) {
             let ids = items
                 .iter()

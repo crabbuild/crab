@@ -6,9 +6,7 @@ import {
   Settings2Icon,
   RefreshCwIcon,
   ArrowLeftIcon,
-  ListIcon,
-  Columns3Icon,
-  CalendarRangeIcon,
+  SearchIcon,
 } from "lucide-react";
 import { endpoint, navigate, useRequest, type Repository } from "@/lib/api";
 import { Result } from "@/components/request/result";
@@ -34,6 +32,12 @@ import { CreateProject } from "./create";
 import { ItemEditor } from "./item";
 import { ProjectSettings } from "./settings";
 import { ProjectTypeFilter } from "./issue-type";
+import {
+  ProjectItemPagination,
+  ProjectItemSummary,
+  ProjectPriorityFilter,
+  ProjectStatusFilter,
+} from "./project-items";
 import {
   applyProjectGroup,
   ProjectGrouping,
@@ -275,6 +279,8 @@ function ProjectWorkspace({
     project.definition.views[0];
   const query = url.searchParams.get("q") ?? selected.query;
   const status = url.searchParams.get("status") ?? selected.status ?? "";
+  const priority =
+    url.searchParams.get("priority") ?? selected.priority?.toString() ?? "";
   const groupBy = selectedGrouping(
     selected.layout,
     project.definition.fields,
@@ -294,6 +300,7 @@ function ProjectWorkspace({
     endpoint(repo, `projects/${project.id}/items`, {
       q: query,
       status: status || undefined,
+      priority: priority || undefined,
       hide_closed: String(hidden),
       issue_type: issueType || undefined,
       group_by: groupBy,
@@ -318,6 +325,17 @@ function ProjectWorkspace({
     next.searchParams.delete("revision");
     next.searchParams.delete("type_cursor");
     navigate(next.pathname + next.search);
+  }
+  const filtered = !!(query || status || priority || hidden || issueType);
+  function resetFilters() {
+    setSearch("");
+    filters({
+      q: "",
+      status: "",
+      priority: "",
+      hide_closed: "false",
+      issue_type: "",
+    });
   }
   useEffect(() => {
     if (seen.current !== commands.generation) {
@@ -378,6 +396,7 @@ function ProjectWorkspace({
       initialIssueType: typeId,
     });
   const createInGroup = editable && groupBy !== undefined;
+  const showEmptyView = selected.layout === "board" || createInGroup;
   const newItem =
     typeof editing === "object" && "initialItem" in editing
       ? editing
@@ -389,12 +408,6 @@ function ProjectWorkspace({
     typeof editing === "object" && "draft" in editing
       ? editing.draft
       : undefined;
-  const Icon =
-    selected.layout === "table"
-      ? ListIcon
-      : selected.layout === "board"
-        ? Columns3Icon
-        : CalendarRangeIcon;
   return (
     <section className="projects-page project-workspace">
       <Link href={projectHref(repo)} className="project-back">
@@ -444,6 +457,7 @@ function ProjectWorkspace({
             pv,
             q: undefined,
             status: undefined,
+            priority: undefined,
             hide_closed: undefined,
             issue_type: undefined,
             group_by: undefined,
@@ -472,6 +486,7 @@ function ProjectWorkspace({
         </TabsContent>
         <TabsContent value={selected.id}>
           <form
+            aria-label="Project item filters"
             className="project-filter-bar"
             onSubmit={(e) => {
               e.preventDefault();
@@ -480,7 +495,7 @@ function ProjectWorkspace({
           >
             <InputGroup>
               <InputGroupAddon>
-                <Icon />
+                <SearchIcon />
               </InputGroupAddon>
               <InputGroupInput
                 aria-label="Filter project items"
@@ -490,27 +505,20 @@ function ProjectWorkspace({
                 onChange={(e) => setSearch(e.target.value)}
               />
             </InputGroup>
-            <FieldSelect
-              label="Filter project status"
-              value={status ? `status:${status}` : "all"}
-              onValueChange={(value) =>
-                filters({ status: value === "all" ? "" : value.slice(7) })
-              }
-              options={{
-                all: "All statuses",
-                ...Object.fromEntries(
-                  project.definition.statuses.map((status) => [
-                    `status:${status}`,
-                    status,
-                  ]),
-                ),
-              }}
+            <ProjectStatusFilter
+              statuses={project.definition.statuses}
+              value={status}
+              onChange={(value) => filters({ status: value })}
             />
             <FieldSelect
               label="Filter work state"
               value={String(hidden)}
               onValueChange={(value) => filters({ hide_closed: value })}
               options={{ false: "All work", true: "Open work" }}
+            />
+            <ProjectPriorityFilter
+              value={priority}
+              onChange={(value) => filters({ priority: value })}
             />
             {repo.organization_id && (
               <ProjectTypeFilter
@@ -529,6 +537,11 @@ function ProjectWorkspace({
             <Button variant="outline" type="submit">
               Apply
             </Button>
+            {(filtered || search) && (
+              <Button variant="ghost" type="button" onClick={resetFilters}>
+                Reset filters
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="icon"
@@ -542,25 +555,14 @@ function ProjectWorkspace({
               <RefreshCwIcon />
             </Button>
           </form>
-          {resource.error && after && (
-            <Button variant="outline" onClick={() => filters({})}>
-              First page
-            </Button>
-          )}
           <Result state={resource} timingLabel="Project items">
             {({ page, can_manage }) => (
               <>
-                <div className="project-item-summary">
-                  <span>
-                    {page.total} matching {page.total === 1 ? "item" : "items"}
-                  </span>
-                  {page.total > page.items.length && (
-                    <span>Showing {page.items.length} on this page</span>
-                  )}
-                </div>
-                {selected.layout === "board" ||
-                page.items.length ||
-                createInGroup ? (
+                <ProjectItemSummary
+                  page={page}
+                  showNoMatches={filtered && showEmptyView}
+                />
+                {page.items.length || showEmptyView ? (
                   selected.layout === "board" ? (
                     <ProjectBoard
                       repo={repo}
@@ -610,17 +612,21 @@ function ProjectWorkspace({
                         <FolderKanbanIcon />
                       </EmptyMedia>
                       <EmptyTitle>
-                        {query || status || hidden || issueType
-                          ? "No work matches this view"
-                          : "Your project starts here"}
+                        {page.total
+                          ? "No items on this page"
+                          : filtered
+                            ? "No work matches this view"
+                            : "Your project starts here"}
                       </EmptyTitle>
                       <EmptyDescription>
-                        {query || status || hidden || issueType
-                          ? "Change the filters to see more work."
-                          : "Add an issue or pull request, create an issue, or capture a draft note."}
+                        {page.total
+                          ? "Return to the first page to see matching work."
+                          : filtered
+                            ? "Change the filters to see more work."
+                            : "Add an issue or pull request, create an issue, or capture a draft note."}
                       </EmptyDescription>
                     </EmptyHeader>
-                    {editable && (
+                    {editable && !filtered && !page.total && (
                       <Button
                         variant="outline"
                         onClick={() => setEditing("new")}
@@ -631,42 +637,16 @@ function ProjectWorkspace({
                     )}
                   </Empty>
                 )}
-                {(page.next || after) && (
-                  <nav
-                    className="project-pagination"
-                    aria-label="Project items"
-                  >
-                    {after && (
-                      <Button variant="outline" onClick={() => filters({})}>
-                        First page
-                      </Button>
-                    )}
-                    {page.next && (
-                      <Button
-                        variant="outline"
-                        onClick={() => {
-                          const next = new URL(url);
-                          next.searchParams.set("after", page.next!);
-                          next.searchParams.set(
-                            "revision",
-                            String(page.revision),
-                          );
-                          if (page.type_cursor)
-                            next.searchParams.set(
-                              "type_cursor",
-                              page.type_cursor,
-                            );
-                          navigate(next.pathname + next.search);
-                        }}
-                      >
-                        Next 50 items
-                      </Button>
-                    )}
-                  </nav>
-                )}
               </>
             )}
           </Result>
+          {!resource.loading && (
+            <ProjectItemPagination
+              url={url}
+              page={resource.data?.page}
+              revisionKey="revision"
+            />
+          )}
           {project.definition.readme && (
             <Disclosure
               className="project-readme"

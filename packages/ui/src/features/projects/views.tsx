@@ -220,7 +220,7 @@ export function ProjectTable({
       {...draggable(row)}
     >
       {bulkTarget && (
-        <TableCell>
+        <TableCell className="w-px">
           {!row.restricted && (
             <Checkbox
               aria-label={`Select ${row.work?.title ?? row.item.title}`}
@@ -233,7 +233,7 @@ export function ProjectTable({
           )}
         </TableCell>
       )}
-      <TableCell>
+      <TableCell className="project-table-title">
         <ItemTitle repo={repo} row={row} />
       </TableCell>
       {showType && (
@@ -318,7 +318,7 @@ export function ProjectTable({
         <TableHeader>
           <TableRow>
             {bulkTarget && (
-              <TableHead>
+              <TableHead className="w-px">
                 <Checkbox
                   aria-label="Select all Project items on this page"
                   checked={selection.all}

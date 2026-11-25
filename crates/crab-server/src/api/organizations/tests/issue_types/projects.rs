@@ -268,6 +268,64 @@ async fn native_browser_edits_project_issue_type_field() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires agent-browser and built embedded UI; uses real OIDC/native Cells"]
+async fn native_browser_saves_and_clears_project_priority_filters() {
+    let (h, alice, org, repo, key) = fixture().await;
+    let local = project_with_issue(
+        &h,
+        &alice,
+        &format!("/api/repos/{key}/projects"),
+        repo,
+        false,
+        false,
+    )
+    .await;
+    let shared =
+        project_with_issue(&h, &alice, &format!("{org}/projects"), repo, true, false).await;
+    let organization = org.rsplit('/').next().unwrap();
+    let browser = Browser::new("project-priority");
+    let click = async |role: &str, name: &str| {
+        browser
+            .run(&["find", "role", role, "click", "--name", name, "--exact"])
+            .await;
+    };
+    for path in [
+        format!("/{key}/projects/{local}"),
+        format!("/-/organizations/{organization}/projects/{shared}"),
+    ] {
+        let url = format!("{}{path}", h.origin);
+        browser.run(&["open", &url]).await;
+        if path.starts_with(&format!("/{key}/")) {
+            browser.sign_in().await;
+        }
+        let filter = "[aria-label='Filter by priority']";
+        browser.run(&["wait", "--text", "1 matching item"]).await;
+        click("button", "Settings").await;
+        click("tab", "Views").await;
+        browser
+            .choose_select("[aria-label='Priority filter for Table']", "1")
+            .await;
+        click("button", "Save project settings").await;
+        browser
+            .run(&["wait", "--text", "No work matches this view"])
+            .await;
+        browser.run(&["open", &url]).await;
+        browser
+            .run(&["wait", "--text", "No work matches this view"])
+            .await;
+        let value = browser.run(&["get", "text", filter]).await;
+        assert_eq!(value.trim(), "Urgent");
+        browser.choose_select(filter, "0").await;
+        browser.run(&["wait", "--text", "1 matching item"]).await;
+        click("button", "Reset filters").await;
+        let value = browser.run(&["get", "text", filter]).await;
+        assert_eq!(value.trim(), "All priorities");
+    }
+    drop(browser);
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn project_type_filter_counts_matching_rows_across_repositories_and_pages() {
     let (h, alice, org, first, key) = fixture().await;
     let first_root = format!("/api/repos/{key}");
@@ -325,7 +383,7 @@ async fn project_type_filter_counts_matching_rows_across_repositories_and_pages(
                     &h, Method::POST, &format!("{repository_projects}/commands"), &alice, repo,
                     json!({"request_id":Uuid::now_v7(),"command":{
                         "kind":"item","project":local,"version":0,"item":{"id":Uuid::now_v7(),"subject":{"kind":"issue","number":number},
-                        "title":"","body":"","status":"Todo","priority":0,"start":null,"end":null,"values":{}}
+                        "title":"","body":"","status":"Todo","priority":2,"start":null,"end":null,"values":{}}
                     }}),
                 ).await.error_for_status().unwrap().json().await.unwrap();
                 assert_eq!(result["outcome"], "applied");
@@ -345,7 +403,7 @@ async fn project_type_filter_counts_matching_rows_across_repositories_and_pages(
             if repo != first || number != 1 {
                 submit(json!({"kind":"item","project":shared,"version":0,"repository":repo,"item":{
                     "id":Uuid::now_v7(),"subject":{"kind":"issue","number":number},"title":"","body":"",
-                    "status":if repo==second_id {"Done"} else {"Todo"},"priority":0,"start":null,"end":null,"values":{}
+                    "status":if repo==second_id {"Done"} else {"Todo"},"priority":if repo==second_id {2} else {0},"start":null,"end":null,"values":{}
                 }})).await;
             }
         }
@@ -372,6 +430,18 @@ async fn project_type_filter_counts_matching_rows_across_repositories_and_pages(
         .await;
     assert_eq!(done["page"]["group_counts"][bug], 1);
     assert_eq!(done["page"]["total"], 1);
+    let high = h
+        .json(
+            &format!("{filtered}&priority=2&group_by=issue_type"),
+            &alice,
+        )
+        .await;
+    assert_eq!(high["page"]["total"], 1);
+    assert_eq!(high["page"]["group_counts"], json!({(bug): 1}));
+    assert_eq!(
+        high["page"]["items"][0]["repository"]["id"],
+        json!(second_id)
+    );
     let continuation = format!(
         "{filtered}&after={}&version={}&type_cursor={}",
         page["next"].as_str().unwrap(),
@@ -379,6 +449,16 @@ async fn project_type_filter_counts_matching_rows_across_repositories_and_pages(
         page["type_cursor"].as_str().unwrap()
     );
     let second_page = h.json(&continuation, &alice).await;
+    assert_eq!(
+        h.http
+            .get(format!("{}{continuation}&priority=2", h.origin))
+            .header(header::COOKIE, &alice)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
     assert_eq!(second_page["page"]["items"].as_array().unwrap().len(), 2);
     assert_eq!(
         second_page["page"]["items"][1]["repository"]["id"],
@@ -395,6 +475,18 @@ async fn project_type_filter_counts_matching_rows_across_repositories_and_pages(
         )
         .await["page"]["total"],
         1
+    );
+    let local_high = h
+        .json(
+            &format!("{repository_projects}/{local}/items?priority=2&group_by=status"),
+            &alice,
+        )
+        .await;
+    assert_eq!(local_high["page"]["total"], 1);
+    assert_eq!(local_high["page"]["group_counts"], json!({"Todo": 1}));
+    assert_eq!(
+        local_high["page"]["items"][0]["work"]["subject"]["number"],
+        2
     );
     for path in [
         &shared_items,

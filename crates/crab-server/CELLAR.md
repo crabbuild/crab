@@ -1501,7 +1501,12 @@ creation/conversion; no implicit migration or ownership inference occurs.
 
 Public `/api/organizations/{id}/projects` reads bounded project pages. `/{project}`
 returns metadata and accessible repository links; `/{project}/items` returns
-planning rows/counts with status/repository filters and version-checked paging.
+planning rows/counts with status, priority and repository filters and
+version-checked paging.
+Both project item routes accept an optional `priority` from `0` (No priority)
+through `4` (Low). The filter uses the stored planning priority before counts
+and pagination. Saved views can include a default priority. Filtering uses the
+existing item records and needs no schema preparation beyond project setup.
 Linked repository metadata includes `can_create_issue` for current Write grants
 in the organization. The command revalidates this grant before publishing.
 `/{project}/candidates?repository=UUID&q=QUERY` searches authorized linked source
@@ -1568,7 +1573,7 @@ authorization. Failed domain changes roll back before a terminal decision commit
 An organization holds at most 200 projects; a project links 20 repositories and
 holds 5,000 items. Lists seek 30 UUIDs and item pages seek 50, with exact planning
 counts. Definitions reuse validated repository project fields/workflows. Shared
-saved views support layouts and planning-status filters; source title/state
+saved views support layouts, planning-status and priority filters; source title/state
 predicates, custom templates and draft-to-source conversion remain local to
 repository projects. Workflow automation and personal/cross-organization project
 discovery are separate features.

@@ -306,6 +306,7 @@ async fn items(
                 after: None,
                 version: None,
                 status: None,
+                priority: None,
                 item: None,
                 matched: None,
                 group_by: None,
