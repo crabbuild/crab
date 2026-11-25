@@ -96,7 +96,7 @@ impl Definition {
                 .is_none_or(|value| self.accepts(value))
     }
 
-    fn accepts(&self, value: &PropertyValue) -> bool {
+    pub(crate) fn accepts(&self, value: &PropertyValue) -> bool {
         match (self.kind, value) {
             (Kind::Boolean, PropertyValue::Boolean(_)) => true,
             (Kind::Text, PropertyValue::Text(value)) => valid_text(value),
@@ -133,6 +133,30 @@ impl Schema {
             .iter()
             .find(|definition| definition.id == id)
     }
+}
+
+pub(super) fn creation_fields(context: &Transaction<'_>, role: Role) -> Result<Vec<Definition>> {
+    Ok(schema(context)?
+        .definitions
+        .into_iter()
+        .filter(|field| {
+            role == Role::Owner || field.values_editable_by == EditAuthority::Repository
+        })
+        .collect())
+}
+
+pub(super) fn validate_creation_values(
+    context: &Transaction<'_>,
+    role: Role,
+    values: &BTreeMap<Uuid, PropertyValue>,
+) -> Result<bool> {
+    let fields = creation_fields(context, role)?;
+    Ok(values.iter().all(|(id, value)| {
+        fields
+            .iter()
+            .find(|field| field.id == *id)
+            .is_some_and(|field| field.accepts(value))
+    }))
 }
 
 pub(super) fn schema(context: &Transaction<'_>) -> Result<Schema> {
@@ -470,6 +494,58 @@ fn save_values(
             version: values.version,
         },
     )
+}
+
+pub(super) fn initialize_values(
+    context: &Transaction<'_>,
+    actor: Uuid,
+    repository: Repository,
+    overrides: BTreeMap<Uuid, PropertyValue>,
+) -> Result<()> {
+    let key = repository.key()?;
+    // A retry can cross a schema edit. Retired IDs stay retired, and an
+    // already applied initialization must never overwrite later edits.
+    if context.document::<Values>(&key)?.is_some() {
+        return Ok(());
+    }
+    let schema = schema(context)?;
+    let mut values = Values {
+        version: 0,
+        overrides,
+    };
+    values
+        .overrides
+        .retain(|id, _| schema.definition(*id).is_some());
+    if !values.overrides.is_empty() {
+        save_values(context, actor, repository, &mut values)?;
+        search::advance_revision(context)?;
+    }
+    Ok(())
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ImportValues {
+    pub actor: Uuid,
+    pub repository: Uuid,
+    pub overrides: BTreeMap<Uuid, PropertyValue>,
+}
+
+pub(crate) struct InitializeImportValues;
+impl Mutation for InitializeImportValues {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 99;
+    type Input = ImportValues;
+    type Output = ();
+
+    fn execute(context: &mut Transaction<'_>, input: ImportValues) -> Result<MutationResult<()>> {
+        let repository = Repository {
+            id: input.repository,
+            ownership_epoch: 0,
+        };
+        initialize_values(context, input.actor, repository, input.overrides)?;
+        Ok(MutationResult::Success(()))
+    }
 }
 
 fn valid_selection(ids: impl ExactSizeIterator<Item = Uuid>) -> bool {

@@ -17,13 +17,17 @@ use crate::{
     auth::Principal,
     catalog::{
         BrowserCreation, BrowserNamespace, CatalogError, CatalogRecord, MembershipActor,
-        RepositoryApplicationState, organization_namespace, visibility::Visibility,
+        RepositoryApplicationState, visibility::Visibility,
     },
     cells::{
         Address,
         organization::{
+            Caller,
             discovery::Landing,
-            repositories::{AuthorizeCreation, Creation, CreationOutcome, valid_creation},
+            repositories::{
+                AuthorizeCreation, Authorized, Creation, CreationOptions, CreationOutcome,
+                GetCreationOptions, InitializeCreationProperties, valid_creation,
+            },
         },
     },
     server::Server,
@@ -392,13 +396,19 @@ pub(super) async fn visible_matching(
 
 pub(super) fn namespace_routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
-        .route("/api/repos/creation", get(creation).post(create))
+        .route(
+            "/api/repos/creation",
+            get(creation)
+                .post(create)
+                .layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
         .route("/api/repos/personal", get(personal))
         .route(
             "/api/organizations/{organization}/repositories/creation",
-            get(organization_creation).post(create_organization),
+            get(organization_creation)
+                .post(create_organization)
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
         )
-        .layer(axum::extract::DefaultBodyLimit::max(4096))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
 
@@ -455,28 +465,24 @@ async fn organization_creation(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(organization): Path<Uuid>,
-) -> app::Result<Json<serde_json::Value>> {
+) -> app::Result<Json<CreationOptions>> {
     let actor = super::organizations::actor(&server, &principal).await?;
-    let (default_branch, visibilities) = creation_options(&server, organization, actor).await?;
+    let options = server
+        .cells()
+        .ok_or(app::Error::CellUnavailable)?
+        .query::<GetCreationOptions>(Address::Organization(organization), None, Caller { actor })
+        .await
+        .map_err(super::organizations::read_error)?
+        .output;
     app::account(&principal)?;
-    Ok(Json(
-        json!({"owner":organization_namespace(organization),"default_branch":default_branch,
-            "visibilities":visibilities}),
-    ))
+    Ok(Json(options))
 }
 
-async fn creation_options(
-    server: &Server,
-    organization: Uuid,
-    actor: Uuid,
-) -> app::Result<(String, Vec<Visibility>)> {
+async fn ensure_can_create(server: &Server, organization: Uuid, actor: Uuid) -> app::Result<()> {
     match crate::repository::access::organization_landing(server, organization, actor).await? {
         Some(Landing::Member {
-            can_create: true,
-            creation_visibilities,
-            default_branch,
-            ..
-        }) => Ok((default_branch, creation_visibilities)),
+            can_create: true, ..
+        }) => Ok(()),
         _ => Err(app::Error::NotFound),
     }
 }
@@ -492,53 +498,76 @@ async fn create_organization(
     app::account(&principal)?;
     let worker = Arc::clone(&server);
     let account = principal.clone();
-    let (record, default_branch) = super::organizations::with_org_policy(
-        &server,
-        organization,
-        move |cancel| async move {
-                    let cells = worker.cells().ok_or(app::Error::CellUnavailable)?;
-                    let authorized = cells
-                        .command::<AuthorizeCreation>(
-                            Address::Organization(organization),
-                            app::mutation_identity()?,
-                            Creation {
-                                actor,
-                                request_id: input.request_id,
-                                name: input.name.clone(),
-                                description: input.description.clone(),
-                                visibility: input.visibility,
-                            },
-                        )
-                        .await
-                        .map_err(super::organizations::read_error)?
-                        .output;
-                    let (grant_creator, default_branch) = match authorized {
-                        CreationOutcome::Accepted { grant_creator, default_branch } => (grant_creator, default_branch),
-                        CreationOutcome::Conflict => return Err(app::Error::RepositoryNameUnavailable),
-                        CreationOutcome::VisibilityRestricted => return Err(app::Error::Invalid(
-                            "This organization does not allow you to create repositories with that visibility",
-                        )),
-                    };
-                    // Policy and membership writes share this lease. Bind the
-                    // decision to the durable reservation before allowing a change.
-                    app::account(&account)?;
-                    if cancel.is_cancelled() {
-                        return Err(app::Error::MergeBusy);
-                    }
-                    let record = reserve(
-                        &worker,
-                        &account,
-                        BrowserNamespace::Organization(organization),
-                        grant_creator,
-                        input,
-                    )
-                    .await?;
-                    Ok((record, default_branch))
-        },
-    )
-    .await?;
+    let prepare = move |cancel: tokio_util::sync::CancellationToken| async move {
+        let cells = worker.cells().ok_or(app::Error::CellUnavailable)?;
+        let address = Address::Organization(organization);
+        let intent = Creation {
+            actor,
+            request_id: input.request_id,
+            name: input.name.clone(),
+            description: input.description.clone(),
+            visibility: input.visibility,
+            properties: input.properties.clone(),
+        };
+        let authorized = cells
+            .command::<AuthorizeCreation>(address, app::mutation_identity()?, intent.clone())
+            .await
+            .map_err(super::organizations::read_error)?
+            .output;
+        let (grant_creator, default_branch) = match authorized {
+            CreationOutcome::Accepted {
+                grant_creator,
+                default_branch,
+            } => (grant_creator, default_branch),
+            CreationOutcome::Conflict => return Err(app::Error::RepositoryNameUnavailable),
+            CreationOutcome::VisibilityRestricted => {
+                return Err(app::Error::Invalid(
+                    "This organization does not allow you to create repositories with that visibility",
+                ));
+            }
+            CreationOutcome::InvalidProperties => {
+                return Err(app::Error::Invalid(
+                    "Choose valid values for properties you can set on this repository",
+                ));
+            }
+        };
+        // Policy and membership writes share this lease. Bind the
+        // decision to the durable reservation before allowing a change.
+        app::account(&account)?;
+        if cancel.is_cancelled() {
+            return Err(app::Error::MergeBusy);
+        }
+        let record = reserve(
+            &worker,
+            &account,
+            BrowserNamespace::Organization(organization),
+            grant_creator,
+            input,
+        )
+        .await?;
+        if record.application == RepositoryApplicationState::EmptyCellPending
+            && !intent.properties.is_empty()
+        {
+            // Only the exact reserved creation can seed its values.
+            // Publication and later edits always see the same ownership epoch.
+            if cancel.is_cancelled() {
+                return Err(app::Error::MergeBusy);
+            }
+            let initialized = cells
+                .command::<InitializeCreationProperties>(address, app::mutation_identity()?, intent)
+                .await
+                .map_err(super::organizations::read_error)?
+                .output;
+            if matches!(initialized, Authorized::Conflict) {
+                return Err(app::Error::RepositoryNameUnavailable);
+            }
+        }
+        Ok((record, default_branch))
+    };
+    let (record, default_branch) =
+        super::organizations::with_org_policy(&server, organization, prepare).await?;
     let response = publish(&server, &principal, record, default_branch).await?;
-    creation_options(&server, organization, actor).await?;
+    ensure_can_create(&server, organization, actor).await?;
     app::account(&principal)?;
     Ok(response)
 }
@@ -569,6 +598,11 @@ async fn create(
 ) -> app::Result<(StatusCode, Json<CreatedRepository>)> {
     let owner = namespace(&principal)?;
     input.validate()?;
+    if !input.properties.is_empty() {
+        return Err(app::Error::Invalid(
+            "Repository properties are available for organization repositories",
+        ));
+    }
     if !personal_visibilities(&principal).contains(&input.visibility) {
         return Err(app::Error::Invalid(
             "Choose a visibility available for this account",
@@ -714,6 +748,7 @@ mod tests {
                     name: "first-repo".into(),
                     description: "Start here".into(),
                     visibility: Visibility::Private,
+                    properties: Default::default(),
                 },
                 MembershipActor {
                     issuer: h.server.auth.as_ref().unwrap().issuer().into(),

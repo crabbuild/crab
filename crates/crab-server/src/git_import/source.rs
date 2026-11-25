@@ -1,7 +1,9 @@
 use super::ImportError;
-use crate::catalog::visibility::Visibility;
+use crate::{catalog::visibility::Visibility, cells::organization::properties::PropertyValue};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use url::{Host, Url};
+use uuid::Uuid;
 const MAX_TOKEN_BYTES: usize = 512;
 const MAX_DESCRIPTION_CHARS: usize = 1_000;
 
@@ -17,6 +19,8 @@ pub(super) struct GitImportRequest {
     #[serde(default)]
     visibility: Visibility,
     #[serde(default)]
+    properties: BTreeMap<Uuid, PropertyValue>,
+    #[serde(default)]
     token: Option<String>,
 }
 
@@ -28,6 +32,7 @@ pub(super) struct ValidatedImport {
     pub(super) name: String,
     pub(super) description: String,
     pub(super) visibility: Visibility,
+    pub(super) properties: BTreeMap<Uuid, PropertyValue>,
     pub(super) token: Option<String>,
 }
 
@@ -37,6 +42,11 @@ pub(super) fn validate_request(
     allowed_hosts: &[String],
 ) -> Result<ValidatedImport, ImportError> {
     let source = normalize_source(&request.source, allowed_hosts)?;
+    if organization.is_none() && !request.properties.is_empty() {
+        return Err(ImportError::Invalid(
+            "Repository properties are available for organization imports",
+        ));
+    }
     let owner = match (organization, request.owner) {
         (Some(id), None) => crate::catalog::organization_namespace(id),
         (Some(_), Some(_)) => {
@@ -77,6 +87,7 @@ pub(super) fn validate_request(
         name,
         description,
         visibility: request.visibility,
+        properties: request.properties,
         token,
     })
 }
@@ -98,6 +109,7 @@ pub(super) fn stored_request(
             name,
             description: Some(description),
             visibility,
+            properties: BTreeMap::new(),
             token,
         },
         None,

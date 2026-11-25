@@ -7,13 +7,17 @@ use crate::{
     cells::{
         Address,
         organization::{
-            Role,
-            repositories::{AuthorizeImportPublication, Authorized, ImportPublication},
+            Caller, Role,
+            properties::{ImportValues, InitializeImportValues, PropertyValue},
+            repositories::{
+                AuthorizeImportPublication, Authorized, GetCreationOptions, ImportPublication,
+            },
         },
     },
     repository::{
         Repository,
         access::{actor_id, organization_grants, organization_role},
+        settings::{RulesetScope, with_ruleset_lease},
     },
     server::Server,
     storage_root::StorageRoot,
@@ -21,9 +25,9 @@ use crate::{
 
 use super::{
     ImportError,
-    jobs::{Jobs, Snapshot},
+    jobs::{Jobs, Snapshot, Writer},
 };
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 pub(super) struct ImportAccount {
     pub(super) identity: Identity,
@@ -228,6 +232,81 @@ pub(super) struct OrganizationOwner {
 }
 
 impl OrganizationOwner {
+    pub(super) async fn validate_properties(
+        self,
+        server: &Server,
+        properties: &BTreeMap<Uuid, PropertyValue>,
+    ) -> Result<(), ImportError> {
+        let cells = server.cells().ok_or(ImportError::Unavailable)?;
+        let options = cells
+            .query::<GetCreationOptions>(
+                Address::Organization(self.id),
+                None,
+                Caller { actor: self.actor },
+            )
+            .await
+            .map_err(import_cell_error)?
+            .output;
+        if !properties.iter().all(|(id, value)| {
+            options
+                .properties
+                .iter()
+                .find(|field| field.id == *id)
+                .is_some_and(|field| field.accepts(value))
+        }) {
+            return Err(ImportError::Invalid(
+                "Choose valid values for this organization's repository properties",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) async fn initialize_properties(
+        self,
+        server: &Server,
+        job: &Writer,
+        repository: Uuid,
+        overrides: &BTreeMap<Uuid, PropertyValue>,
+    ) -> Result<(), ImportError> {
+        if overrides.is_empty() {
+            return Ok(());
+        }
+        // Ruleset evaluation during receive must see the saved job's values,
+        // including when a different owner resumes the same quarantine.
+        with_ruleset_lease(
+            server,
+            RulesetScope::Organization(self.id),
+            &server.cancellation,
+            |cancel| async move {
+                let outcome = async {
+                    job.verify().await?;
+                    if cancel.is_cancelled() {
+                        return Err(ImportError::Cancelled);
+                    }
+                    let cells = server.cells().ok_or(ImportError::Unavailable)?;
+                    let identity = app::mutation_identity().map_err(ImportError::organization)?;
+                    cells
+                        .command::<InitializeImportValues>(
+                            Address::Organization(self.id),
+                            identity,
+                            ImportValues {
+                                actor: self.actor,
+                                repository,
+                                overrides: overrides.clone(),
+                            },
+                        )
+                        .await
+                        .map_err(import_cell_error)?;
+                    Ok(())
+                }
+                .await;
+                Ok(outcome)
+            },
+        )
+        .await
+        .map_err(ImportError::organization)?
+    }
+
     pub(super) async fn check(self, server: &Server) -> Result<(), ImportError> {
         match organization_role(server, self.id, self.actor)
             .await
@@ -285,15 +364,19 @@ impl OrganizationOwner {
                 },
             )
             .await
-            .map_err(|error| match error {
-                crate::cells::Error::NotInitialized | crate::cells::Error::AccessDenied => {
-                    ImportError::NotFound
-                }
-                error => ImportError::organization(app::Error::Cell(error)),
-            })?;
+            .map_err(import_cell_error)?;
         match response.output {
             Authorized::Accepted => Ok(()),
             Authorized::Conflict => Err(ImportError::DestinationChanged),
         }
+    }
+}
+
+fn import_cell_error(error: crate::cells::Error) -> ImportError {
+    match error {
+        crate::cells::Error::NotInitialized | crate::cells::Error::AccessDenied => {
+            ImportError::NotFound
+        }
+        error => ImportError::organization(app::Error::Cell(error)),
     }
 }

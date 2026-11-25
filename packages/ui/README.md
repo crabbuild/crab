@@ -360,8 +360,9 @@ Owners can change repository visibility from **Settings → General → Danger Z
 The **New repository** dialog shows the visibility choices for its selected
 owner. Under **Settings → Member privileges**, organization owners can limit
 what visibility members can choose when they create repositories.
-**Import from Git** saves the destination visibility with the job and shows it
-when another organization owner opens a shared import link.
+**Import from Git** saves destination visibility and repository property
+choices with the job. Another organization owner can view those choices and
+resume from a shared import link.
 Signed-out visitors can find public repositories through **Browse public
 repositories** and open their code, issues, and pull requests. Public
 organization repositories also show their effective values in **Properties**.

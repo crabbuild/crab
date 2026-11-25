@@ -120,6 +120,12 @@ organization ruleset lease.
 `cells/organization/properties.rs` owns required defaults and repository
 overrides. `api/organizations/properties.rs` rechecks the repository grant and
 projects only effective values for public-only readers.
+`cells/organization/repositories.rs` binds initial property values to the
+creation ticket. Browser creation holds the organization policy lease through
+catalog reservation and value initialization. Publication follows.
+Organization Git imports bind property values to the saved job request.
+`git_import/authority.rs` initializes them under the policy lease before
+Git receive can evaluate property-targeted rulesets.
 `api/organizations/collaborators.rs` groups direct catalog grants for owners
 and checks them against current Organization Cell membership. It rechecks both
 snapshots before returning a page. Repository access edits still use the

@@ -1,4 +1,5 @@
 import type { BranchProtection } from "@/lib/contracts";
+import type { PropertyOverrides } from "@/features/organizations/property-fields";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
 export type RepositoryVisibility = "private" | "public";
@@ -10,6 +11,7 @@ export interface GitImportInput {
   name: string;
   description?: string;
   visibility: RepositoryVisibility;
+  properties?: PropertyOverrides;
   token?: string;
 }
 
@@ -20,6 +22,7 @@ export interface GitImportJob {
   owner: string;
   name: string;
   visibility: RepositoryVisibility;
+  properties?: PropertyOverrides;
   state: "queued" | "running" | "succeeded" | "failed" | "interrupted";
   message: string;
   resumable: boolean;

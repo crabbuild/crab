@@ -429,11 +429,16 @@ pub(in crate::cells) fn authorize(
             | rulesets::Replace::ID
             | properties::SetSchema::ID
             | properties::SetSelection::ID
+            | properties::InitializeImportValues::ID
             | issue_types::Replace::ID
             | automation::Change::ID,
             true,
         ) => true,
-        (repositories::AuthorizeCreation::ID, true) => {
+        (
+            repositories::AuthorizeCreation::ID | repositories::InitializeCreationProperties::ID,
+            true,
+        )
+        | (repositories::GetCreationOptions::ID, false) => {
             let caller: Caller = serde_json::from_value(input.clone())?;
             actor(caller.actor)?;
             let policy = repository_policy::load(context)?;
@@ -555,6 +560,9 @@ pub(in crate::cells) fn dispatch_read(
         }
         properties::search::Fields::ID => invoke_read::<properties::search::Fields>(context, input),
         properties::GetSelection::ID => invoke_read::<properties::GetSelection>(context, input),
+        repositories::GetCreationOptions::ID => {
+            invoke_read::<repositories::GetCreationOptions>(context, input)
+        }
         repositories::Owners::ID => invoke_read::<repositories::Owners>(context, input),
         repository_policy::Get::ID => invoke_read::<repository_policy::Get>(context, input),
         teams::MentionMembers::ID => invoke_read::<teams::MentionMembers>(context, input),
@@ -612,6 +620,9 @@ pub(in crate::cells) fn dispatch_mutation(
         repositories::AuthorizeCreation::ID => {
             invoke_mutation::<repositories::AuthorizeCreation>(context, input)
         }
+        repositories::InitializeCreationProperties::ID => {
+            invoke_mutation::<repositories::InitializeCreationProperties>(context, input)
+        }
         repositories::AuthorizeImportPublication::ID => {
             invoke_mutation::<repositories::AuthorizeImportPublication>(context, input)
         }
@@ -619,6 +630,9 @@ pub(in crate::cells) fn dispatch_mutation(
         properties::SetSchema::ID => invoke_mutation::<properties::SetSchema>(context, input),
         issue_types::Replace::ID => invoke_mutation::<issue_types::Replace>(context, input),
         properties::SetValues::ID => invoke_mutation::<properties::SetValues>(context, input),
+        properties::InitializeImportValues::ID => {
+            invoke_mutation::<properties::InitializeImportValues>(context, input)
+        }
         properties::SetSelection::ID => invoke_mutation::<properties::SetSelection>(context, input),
         automation::Change::ID => invoke_mutation::<automation::Change>(context, input),
         Edit::ID => invoke_mutation::<Edit>(context, input),
