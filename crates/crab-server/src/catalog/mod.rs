@@ -207,6 +207,8 @@ pub struct MembershipSnapshot {
     #[serde(skip)]
     pub(crate) fork_owner: Option<MembershipActor>,
     #[serde(skip)]
+    pub(crate) fork_destination: Option<Uuid>,
+    #[serde(skip)]
     pub(crate) baseline: RepositoryBaseline,
     pub members: Vec<RepositoryMember>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -596,6 +598,12 @@ impl CatalogRecord {
         self.organization.as_ref().map(|access| access.id)
     }
 
+    pub(crate) fn external_fork_destination(&self, source: &Self) -> Option<Uuid> {
+        self.organization_id().filter(|id| {
+            self.forked_from == Some(source.id) && Some(*id) != source.organization_id()
+        })
+    }
+
     pub(crate) fn access_record<'a>(
         &'a self,
         source: Option<&'a Self>,
@@ -603,15 +611,19 @@ impl CatalogRecord {
         let Some(upstream) = self.forked_from else {
             return Ok(self);
         };
-        // A fork stays under its source organization's authority. A reused
-        // route or another fork cannot become its source.
+        // The catalog binds lineage to an upstream UUID. Personal forks use
+        // that organization's authority. A separate organization owns its fork.
         source
             .filter(|source| {
                 source.id == upstream
                     && source.forked_from.is_none()
                     && !source.visibility.value.is_public()
                     && source.organization.is_some()
-                    && source.organization_id() == self.organization_id()
+                    && self.organization_id().is_some_and(|owner| {
+                        source.organization_id() == Some(owner)
+                            || (self.fork_owner.is_none()
+                                && self.owner == organization_namespace(owner))
+                    })
                     && source.application == RepositoryApplicationState::CellReady
             })
             .ok_or(CatalogError::Invalid(
@@ -620,6 +632,7 @@ impl CatalogRecord {
     }
 
     pub(crate) fn access_snapshot(&self, revision: u64, source: &Self) -> MembershipSnapshot {
+        let fork_destination = self.external_fork_destination(source);
         MembershipSnapshot {
             repository_id: self.id,
             revision,
@@ -629,10 +642,19 @@ impl CatalogRecord {
             visibility: self.visibility.value,
             forked_from: self.forked_from,
             fork_owner: self.fork_owner.clone(),
+            fork_destination,
             baseline: self.baseline(),
             organization: source.organization.clone(),
-            members: source.members.clone(),
-            groups: source.groups.clone(),
+            members: if fork_destination.is_some() {
+                Vec::new()
+            } else {
+                source.members.clone()
+            },
+            groups: if fork_destination.is_some() {
+                Vec::new()
+            } else {
+                source.groups.clone()
+            },
         }
     }
 

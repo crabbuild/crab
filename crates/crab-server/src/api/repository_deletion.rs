@@ -19,7 +19,7 @@ use crate::{
     app::{self, Error, Result},
     auth::Principal,
     catalog::{
-        CatalogDocument, CatalogError, CatalogRecord, MembershipActor,
+        CatalogDocument, CatalogError, CatalogRecord, MembershipActor, RepositoryBaseline,
         deletion::{Delete, RESTORE_WINDOW_MS, Restore},
     },
     repository::settings::{self, RulesetScope},
@@ -127,7 +127,12 @@ async fn access(
         .forked_from
         .and_then(|id| document.repository_by_id(id));
     let source = record.access_record(upstream).map_err(catalog_error)?;
-    match management_access(server, source, record.baseline(), actor, Management::Delete).await? {
+    let (authority, baseline) = if record.external_fork_destination(source).is_some() {
+        (record, RepositoryBaseline::None)
+    } else {
+        (source, record.baseline())
+    };
+    match management_access(server, authority, baseline, actor, Management::Delete).await? {
         SourceAccess::None => Err(Error::NotFound),
         access => Ok(access),
     }
@@ -208,7 +213,7 @@ async fn delete(
     let updated = settings::with_ownership_lease(service, &source, |cancel| async move {
         require_deletion(access(service, document, record, &actor).await?)?;
         // Block deletion while an issue publication still owns any destination
-        // in this fork network. All of these repositories share the org lease.
+        // in this fork network. Foreign fork writes also take the upstream lease.
         for record in &document.repositories {
             if record.id != repository && record.forked_from != Some(repository) {
                 continue;
@@ -269,14 +274,13 @@ async fn list(
     let mut rows = Vec::new();
     let mut children = std::collections::HashMap::<Uuid, usize>::new();
     for row in &document.deleted_repositories {
-        if row.retired_for_removal
-            || row.repository.organization_id() != Some(organization)
-            || row.deleted_at_ms.saturating_add(RESTORE_WINDOW_MS) <= now
-        {
+        if row.retired_for_removal || row.deleted_at_ms.saturating_add(RESTORE_WINDOW_MS) <= now {
             continue;
         }
         if row.root == row.repository.id {
-            if before.is_none_or(|cursor| (row.deleted_at_ms, row.root) < cursor) {
+            if row.repository.organization_id() == Some(organization)
+                && before.is_none_or(|cursor| (row.deleted_at_ms, row.root) < cursor)
+            {
                 rows.push(row);
             }
         } else {

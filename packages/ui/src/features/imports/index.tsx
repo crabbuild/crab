@@ -32,6 +32,7 @@ import {
 } from "@/lib/api";
 import { parseGitRepository } from "./source";
 import { Link } from "@/components/navigation/link";
+import { OrganizationChoices } from "@/features/organizations/choices";
 import {
   display,
   RepositoryPropertyFields,
@@ -61,13 +62,17 @@ export function GitImport({
   defaultOwner?: string;
   personal?: boolean;
   organization?: { id: string; name: string; requestedJob?: string };
-  fork?: Pick<Repository, "id" | "owner" | "name" | "can_fork_to_organization">;
+  fork?: Pick<
+    Repository,
+    | "id"
+    | "owner"
+    | "name"
+    | "can_fork_to_organization"
+    | "can_fork_to_other_organizations"
+  >;
   onImported: (repository: ImportedRepository) => void;
 }) {
   const organizationId = organization?.id;
-  const organizationPage = organizationId
-    ? `/-/organizations/${encodeURIComponent(organizationId)}?tab=repositories`
-    : undefined;
   const storageKey = fork
     ? `crab:fork:${account}:${fork.id}`
     : organizationId
@@ -83,22 +88,49 @@ export function GitImport({
       return "";
     }
   });
-  const [jobId, setJobId] = useState(savedJob.replace(/^personal:/, ""));
+  const [savedDestination, savedId] =
+    fork && savedJob.includes(":")
+      ? savedJob.split(":", 2)
+      : [organizationId, savedJob];
+  const [jobId, setJobId] = useState(savedId);
   const defaultForkDestination = fork?.can_fork_to_organization
-    ? "organization"
-    : "personal";
-  const [forkDestination, setForkDestination] = useState<
-    "personal" | "organization"
-  >(
-    savedJob.startsWith("personal:")
-      ? "personal"
-      : savedJob && fork
-        ? "organization"
-        : defaultForkDestination,
+    ? organizationId
+    : undefined;
+  const [forkDestination, setForkDestination] = useState(
+    (fork && savedId ? savedDestination : defaultForkDestination) ?? "personal",
   );
-  const jobOrganization =
-    fork && forkDestination === "personal" ? undefined : organizationId;
+  const jobOrganization = fork
+    ? forkDestination === "personal"
+      ? undefined
+      : forkDestination
+    : organizationId;
+  const organizationPage = jobOrganization
+    ? `/-/organizations/${encodeURIComponent(jobOrganization)}?tab=repositories`
+    : undefined;
+  const [choosingOrganization, setChoosingOrganization] = useState(false);
+  const [chosenOrganization, setChosenOrganization] = useState<{
+    id: string;
+    name: string;
+  }>();
+  const externalDestination =
+    fork && jobOrganization && jobOrganization !== organizationId
+      ? jobOrganization
+      : undefined;
   const [open, setOpen] = useState(!!jobId);
+  const externalOrganization = useRequest<{ organization: { name: string } }>(
+    open &&
+      externalDestination &&
+      chosenOrganization?.id !== externalDestination
+      ? `/api/organizations/${encodeURIComponent(externalDestination)}`
+      : null,
+  );
+  const externalName =
+    chosenOrganization?.id === externalDestination
+      ? chosenOrganization?.name
+      : externalOrganization.data?.organization.name;
+  const destinationName = externalDestination
+    ? externalName
+    : organization?.name;
   const personalDestination = useRequest<{
     owner: string;
     visibilities: RepositoryVisibility[];
@@ -114,9 +146,9 @@ export function GitImport({
   const [source, setSource] = useState("");
   const [owner, setOwner] = useState(defaultOwner);
   const defaultName = fork
-    ? forkDestination === "personal"
-      ? fork.name
-      : `${fork.name}-fork`
+    ? jobOrganization && jobOrganization === organizationId
+      ? `${fork.name}-fork`
+      : fork.name
     : "";
   const [name, setName] = useState(defaultName);
   const [description, setDescription] = useState("");
@@ -146,7 +178,7 @@ export function GitImport({
       if (id)
         sessionStorage.setItem(
           storageKey,
-          fork && forkDestination === "personal" ? `personal:${id}` : id,
+          fork ? `${forkDestination}:${id}` : id,
         );
       else sessionStorage.removeItem(storageKey);
     } catch {
@@ -282,7 +314,10 @@ export function GitImport({
         : {}),
     };
     const forkOptions = {
-      destination: forkDestination,
+      destination: jobOrganization
+        ? ("organization" as const)
+        : ("personal" as const),
+      ...(externalDestination ? { organization: externalDestination } : {}),
       default_branch_only: defaultBranchOnly,
     };
     const intent = JSON.stringify([fields, fork && forkOptions]);
@@ -359,7 +394,7 @@ export function GitImport({
           </h2>
           <p className="muted">
             {forkJob ? (
-              "The fork stays private and uses the source repository’s access and rules."
+              "The fork stays private and keeps a link to the source repository."
             ) : (
               <>
                 Crab copies Git history and refs from an allowed Git host into
@@ -393,21 +428,59 @@ export function GitImport({
                 disabled={fixedDestination || !!jobId}
                 options={{
                   personal: "Personal",
-                  ...(fork.can_fork_to_organization
-                    ? { organization: organization?.name ?? fork.owner }
+                  ...(organization &&
+                  (fork.can_fork_to_organization ||
+                    jobOrganization === organization.id)
+                    ? { [organization.id]: organization.name }
+                    : {}),
+                  ...(externalDestination
+                    ? {
+                        [externalDestination]:
+                          externalName ?? "Other organization",
+                      }
                     : {}),
                 }}
                 onValueChange={(value) => {
-                  const next =
-                    value === "organization" ? "organization" : "personal";
-                  setForkDestination(next);
+                  setForkDestination(value);
+                  setChoosingOrganization(false);
                   setProperties({});
                   if (!nameEdited)
                     setName(
-                      next === "personal" ? fork.name : `${fork.name}-fork`,
+                      value === organizationId
+                        ? `${fork.name}-fork`
+                        : fork.name,
                     );
                 }}
               />
+              {fork.can_fork_to_other_organizations &&
+                !fixedDestination &&
+                !jobId && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="self-start"
+                    aria-expanded={choosingOrganization}
+                    onClick={() => setChoosingOrganization((value) => !value)}
+                  >
+                    Choose another organization
+                  </Button>
+                )}
+              {choosingOrganization && !fixedDestination && !jobId && (
+                <OrganizationChoices
+                  eligible={(entry) =>
+                    entry.role === "owner" &&
+                    entry.organization.id !== organizationId
+                  }
+                  select={({ organization: selected }) => {
+                    setChosenOrganization(selected);
+                    setForkDestination(selected.id);
+                    setProperties({});
+                    if (!nameEdited) setName(fork.name);
+                    setChoosingOrganization(false);
+                  }}
+                />
+              )}
             </Field>
           )}
           {!forkJob && (
@@ -615,7 +688,7 @@ export function GitImport({
             )}
             <span>{job.message}</span>
             <code>
-              {jobOrganization ? (organization?.name ?? job.owner) : job.owner}/
+              {jobOrganization ? (destinationName ?? job.owner) : job.owner}/
               {job.name}
             </code>
             {jobOrganization && organizationPage && !importedHref && (

@@ -108,7 +108,7 @@ pub(super) async fn run_import(
                 ImportError::Ruleset => {
                     "Organization rules restrict the imported refs. Review the organization's rulesets before resuming."
                 }
-                ImportError::ForkingDisabled => {
+                ImportError::ForkingDisabled | ImportError::ExternalForkingDisabled => {
                     "The organization or source repository disabled private forks. Restore permission before resuming."
                 }
                 ImportError::Organization(_) => {

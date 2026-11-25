@@ -84,6 +84,7 @@ impl CatalogStore {
                         "Wait for pending forks before making this repository public",
                     ));
                 }
+                let external = fork.external_fork_destination(&root).is_some();
                 fork.fork_baseline = fork.baseline();
                 fork.forked_from = None;
                 fork.record_metadata_update(now_ms);
@@ -96,6 +97,10 @@ impl CatalogStore {
                     fork.groups.clear();
                     fork.organization = None;
                     fork.fork_baseline = RepositoryBaseline::Organization;
+                } else if external {
+                    // Source teams have no authority over an independent repo
+                    // in a different organization. Keep destination ownership.
+                    fork.fork_baseline = RepositoryBaseline::None;
                 } else {
                     fork.members = root.members.clone();
                     fork.groups = root.groups.clone();

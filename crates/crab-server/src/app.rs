@@ -1013,6 +1013,7 @@ pub(crate) struct Membership {
     pub groups: Vec<crate::RepositoryGroup>,
     pub principal: Principal,
     pub organization: Option<uuid::Uuid>,
+    pub(crate) fork_destination: Option<uuid::Uuid>,
     baseline: crate::catalog::RepositoryBaseline,
     pub(crate) teams: Vec<crate::catalog::TeamGrant>,
     pub(crate) review_teams: Vec<uuid::Uuid>,
@@ -1045,24 +1046,46 @@ impl Membership {
         server: &Server,
     ) -> Result<Vec<crate::RepositoryMember>> {
         let mut members = self.members.clone();
+        let source_owner_access = if self.fork_destination.is_some() {
+            crate::RepositoryAccess::Read
+        } else {
+            crate::RepositoryAccess::Admin
+        };
+        let mut inherited = Vec::new();
         if let Some(organization) = self.organization {
-            for inherited in crate::repository::access::organization_members(
-                server,
-                organization,
-                &self.teams,
-                self.baseline,
-                Some(&self.principal),
-            )
-            .await?
+            inherited.extend(
+                crate::repository::access::organization_members(
+                    server,
+                    organization,
+                    &self.teams,
+                    self.baseline,
+                    source_owner_access,
+                    Some(&self.principal),
+                )
+                .await?,
+            );
+        }
+        if let Some(destination) = self.fork_destination {
+            inherited.extend(
+                crate::repository::access::organization_members(
+                    server,
+                    destination,
+                    &[],
+                    crate::catalog::RepositoryBaseline::None,
+                    crate::RepositoryAccess::Admin,
+                    Some(&self.principal),
+                )
+                .await?,
+            );
+        }
+        for inherited in inherited {
+            if let Some(member) = members
+                .iter_mut()
+                .find(|member| member.subject == inherited.subject)
             {
-                if let Some(member) = members
-                    .iter_mut()
-                    .find(|member| member.subject == inherited.subject)
-                {
-                    member.access = member.access.max(inherited.access);
-                } else {
-                    members.push(inherited);
-                }
+                member.access = member.access.max(inherited.access);
+            } else {
+                members.push(inherited);
             }
         }
         Ok(members)
@@ -1183,6 +1206,7 @@ pub(crate) async fn membership(
             groups: Vec::new(),
             principal: principal.clone(),
             organization: repo.organization,
+            fork_destination: None,
             baseline: Default::default(),
             teams: Vec::new(),
             review_teams: Vec::new(),
@@ -1233,7 +1257,9 @@ pub(crate) async fn membership_snapshot(
     repo: &Repository,
     snapshot: crate::catalog::MembershipSnapshot,
 ) -> Result<Membership> {
-    let organization = snapshot.organization.as_ref().map(|access| access.id);
+    let organization = snapshot
+        .fork_destination
+        .or_else(|| snapshot.organization.as_ref().map(|access| access.id));
     if snapshot.repository_id != repo.id
         || organization != repo.organization
         || snapshot.ownership_epoch != repo.ownership_epoch
@@ -1271,6 +1297,7 @@ pub(crate) async fn membership_for_config(
             groups: snapshot.groups,
             principal: principal.clone(),
             organization: None,
+            fork_destination: None,
             baseline: snapshot.baseline,
             teams: Vec::new(),
             review_teams: Vec::new(),
@@ -1280,36 +1307,33 @@ pub(crate) async fn membership_for_config(
         });
     }
     let issuer = server.auth.as_ref().ok_or(Error::NotFound)?.issuer();
-    let teams = snapshot
-        .organization
-        .map_or_else(Vec::new, |access| access.teams);
-    let grant = if let Some(organization) = organization
-        && !principal.is_anonymous()
+    let mut organizations = std::collections::HashMap::new();
+    if !principal.is_anonymous()
         && !principal.is_deploy()
         && principal.automation_credential().is_none()
     {
-        crate::repository::access::organization_grants(
-            server,
-            principal,
-            [(organization, !teams.is_empty())].into(),
-        )
-        .await?
-        .remove(&organization)
-    } else {
-        None
-    };
+        if let Some(source) = &snapshot.organization {
+            organizations.insert(source.id, !source.teams.is_empty());
+        }
+        if let Some(destination) = snapshot.fork_destination {
+            organizations.insert(destination, true);
+        }
+    }
+    let mut grants =
+        crate::repository::access::organization_grants(server, principal, organizations).await?;
+    let inherited = crate::repository::access::snapshot_organization_access(&snapshot, &grants);
+    let teams = snapshot
+        .organization
+        .map_or_else(Vec::new, |access| access.teams);
     let mut config = config.clone();
     config.members = snapshot.members;
     config.groups = snapshot.groups;
-    let inherited = grant.as_ref().and_then(|grant| {
-        crate::repository::access::organization_access(grant, &teams, snapshot.baseline)
-    });
     let principal = if let Some(credential) = principal.automation_credential() {
         credential
             .authorize(
                 server,
                 principal,
-                organization,
+                snapshot.fork_destination.or(organization),
                 snapshot.repository_id,
                 snapshot.ownership_epoch,
             )
@@ -1326,7 +1350,14 @@ pub(crate) async fn membership_for_config(
             )
             .with_public_visibility(snapshot.repository_id, snapshot.visibility.is_public())
     };
-    let grant = grant.unwrap_or_default();
+    let grant = organization
+        .and_then(|id| grants.remove(&id))
+        .unwrap_or_default();
+    let destination_grant = snapshot.fork_destination.and_then(|id| grants.remove(&id));
+    let (organization_owner, organization_bypass_teams) = destination_grant
+        .map_or((grant.owner, grant.bypass_teams.clone()), |grant| {
+            (grant.owner, grant.bypass_teams)
+        });
     let mut review_teams = grant.teams;
     let mut bypass_teams = grant.bypass_teams.clone();
     // A bypass actor still needs a current repository grant and active,
@@ -1338,12 +1369,13 @@ pub(crate) async fn membership_for_config(
         groups: config.groups,
         principal,
         organization,
+        fork_destination: snapshot.fork_destination,
         baseline: snapshot.baseline,
         teams,
         review_teams,
-        organization_owner: grant.owner,
+        organization_owner,
         bypass_teams,
-        organization_bypass_teams: grant.bypass_teams,
+        organization_bypass_teams,
     })
 }
 

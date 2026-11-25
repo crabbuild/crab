@@ -105,7 +105,8 @@ impl CatalogDocument {
                 || deleted.get(&entry.root).is_none_or(|root| {
                     entry.operation != root.operation
                         || root.root != entry.root
-                        || record.organization_id() != root.repository.organization_id()
+                        || (record.fork_owner.is_some()
+                            && record.organization_id() != root.repository.organization_id())
                         || (record.id != entry.root && record.forked_from != Some(entry.root))
                 })
             {

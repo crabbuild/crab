@@ -134,6 +134,40 @@ where
     F: FnOnce(CancellationToken) -> Fut,
     Fut: std::future::Future<Output = std::result::Result<T, E>>,
 {
+    if let RulesetScope::Repository(repo) = &scope
+        && let Some(destination) = repo.owning_organization()
+        && repo.forked_from.is_some()
+    {
+        let upstream = repo
+            .fork_source(server)
+            .and_then(|source| source.organization)
+            .ok_or(Error::NotFound)?;
+        if upstream != destination {
+            // Source lifecycle writes must serialize with foreign fork publication.
+            return with_destination_ruleset_leases(
+                server,
+                RulesetScope::Organization(upstream),
+                Some(destination),
+                cancel,
+                work,
+            )
+            .await;
+        }
+    }
+    with_single_ruleset_lease(server, scope, cancel, work).await
+}
+
+async fn with_single_ruleset_lease<T, E, F, Fut>(
+    server: &Server,
+    scope: RulesetScope<'_>,
+    cancel: &CancellationToken,
+    work: F,
+) -> std::result::Result<T, E>
+where
+    E: From<Error> + From<crab_remote::publication::Error>,
+    F: FnOnce(CancellationToken) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, E>>,
+{
     let layout = match scope {
         RulesetScope::Repository(repo) if repo.organization.is_none() => repo.layout.clone(),
         scope => {
@@ -260,7 +294,7 @@ where
         RulesetScope::Repository(repo) => repo.organization,
     };
     let Some(destination) = destination.filter(|id| source_organization != Some(*id)) else {
-        return with_ruleset_lease(server, source, cancel, work).await;
+        return with_single_ruleset_lease(server, source, cancel, work).await;
     };
     let target = RulesetScope::Organization(destination);
     // Distinct organization scopes are acquired in UUID order even for
@@ -270,8 +304,8 @@ where
     } else {
         (target, source)
     };
-    with_ruleset_lease(server, first, cancel, |cancel| async move {
-        with_ruleset_lease(server, second, &cancel, work).await
+    with_single_ruleset_lease(server, first, cancel, |cancel| async move {
+        with_single_ruleset_lease(server, second, &cancel, work).await
     })
     .await
 }

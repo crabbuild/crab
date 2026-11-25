@@ -155,6 +155,10 @@ share the lease so conversion captures current team roles.
 Personal private forks keep their account address and inherit the source
 organization's authority. Fork publication verifies source access under the
 organization lease and captures the current base grant in the catalog commit.
+Foreign organization forks use the destination catalog owner and source UUID
+independently. Admission checks both authorities and final ref publication
+holds both organizations' policy leases in UUID order. This keeps upstream
+deletion and detachment serialized with fork writes.
 Later policy edits leave that grant intact while current membership and team
 grants still apply. `app::require_related_read` checks the upstream grant
 separately before fork actions read or publish upstream data. Member removal

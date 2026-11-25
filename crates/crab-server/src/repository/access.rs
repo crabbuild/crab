@@ -10,7 +10,7 @@ use crate::{
     RepositoryAccess, RepositoryMember,
     app::{self, Error, Result},
     auth::Principal,
-    catalog::{RepositoryApplicationState, RepositoryBaseline, TeamGrant},
+    catalog::{MembershipSnapshot, RepositoryApplicationState, RepositoryBaseline, TeamGrant},
     cells::{
         Address, CellClient,
         directory::{
@@ -90,8 +90,17 @@ pub(crate) fn organization_access(
     teams: &[TeamGrant],
     baseline: RepositoryBaseline,
 ) -> Option<RepositoryAccess> {
+    organization_access_with_owner(grant, teams, baseline, RepositoryAccess::Admin)
+}
+
+pub(crate) fn organization_access_with_owner(
+    grant: &ActorTeams,
+    teams: &[TeamGrant],
+    baseline: RepositoryBaseline,
+    owner_access: RepositoryAccess,
+) -> Option<RepositoryAccess> {
     if grant.owner {
-        return Some(RepositoryAccess::Admin);
+        return Some(owner_access);
     }
     let baseline = grant
         .member
@@ -103,6 +112,27 @@ pub(crate) fn organization_access(
         .map(|team| team.access)
         .chain(baseline)
         .max()
+}
+
+pub(crate) fn snapshot_organization_access(
+    snapshot: &MembershipSnapshot,
+    grants: &HashMap<Uuid, ActorTeams>,
+) -> Option<RepositoryAccess> {
+    if snapshot
+        .fork_destination
+        .and_then(|id| grants.get(&id))
+        .is_some_and(|grant| grant.owner)
+    {
+        return Some(RepositoryAccess::Admin);
+    }
+    let source = snapshot.organization.as_ref()?;
+    let grant = grants.get(&source.id)?;
+    let owner_access = if snapshot.fork_destination.is_some() {
+        RepositoryAccess::Read
+    } else {
+        RepositoryAccess::Admin
+    };
+    organization_access_with_owner(grant, &source.teams, snapshot.baseline, owner_access)
 }
 
 pub(crate) async fn organization_grants(
@@ -199,6 +229,7 @@ pub(crate) async fn organization_members(
     organization: Uuid,
     teams: &[TeamGrant],
     baseline: RepositoryBaseline,
+    owner_access: RepositoryAccess,
     principal: Option<&Principal>,
 ) -> Result<Vec<RepositoryMember>> {
     let issuer = server.auth.as_ref().ok_or(Error::NotFound)?.issuer();
@@ -233,7 +264,7 @@ pub(crate) async fn organization_members(
             .or_insert(access);
     }
     for owner in roster.owners {
-        grants.insert(owner, RepositoryAccess::Admin);
+        grants.insert(owner, owner_access);
     }
 
     let ids: Vec<_> = grants.keys().copied().collect();

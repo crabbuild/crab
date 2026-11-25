@@ -38,6 +38,7 @@ type Policy = {
   member_transfer: boolean;
   member_deletion: boolean;
   private_forks: boolean;
+  external_forks?: boolean;
   member_visibility: boolean;
   baseline: BasePermission | null;
   default_branch: string;
@@ -94,6 +95,9 @@ function PolicyForm({
   const [transfer, setTransfer] = useState(initial.member_transfer);
   const [deletion, setDeletion] = useState(initial.member_deletion);
   const [privateForks, setPrivateForks] = useState(initial.private_forks);
+  const [externalForks, setExternalForks] = useState(
+    initial.external_forks ?? false,
+  );
   const [memberVisibility, setMemberVisibility] = useState(
     initial.member_visibility,
   );
@@ -110,6 +114,7 @@ function PolicyForm({
     transfer !== saved.member_transfer ||
     deletion !== saved.member_deletion ||
     privateForks !== saved.private_forks ||
+    externalForks !== (saved.external_forks ?? false) ||
     memberVisibility !== saved.member_visibility ||
     basePermissionsChanged ||
     defaultBranch !== saved.default_branch;
@@ -121,6 +126,7 @@ function PolicyForm({
       member_transfer: transfer,
       member_deletion: deletion,
       private_forks: privateForks,
+      ...(externalForks ? { external_forks: true } : {}),
       member_visibility: memberVisibility,
       baseline,
       default_branch: defaultBranch,
@@ -318,6 +324,7 @@ function PolicyForm({
             disabled={mutation.pending}
             onCheckedChange={(value) => {
               setPrivateForks(value === true);
+              if (value !== true) setExternalForks(false);
               setNotice(false);
             }}
           />
@@ -331,6 +338,29 @@ function PolicyForm({
             </FieldDescription>
           </FieldContent>
         </Field>
+        {privateForks && (
+          <Field orientation="horizontal">
+            <Checkbox
+              id="organization-external-forks"
+              aria-describedby="organization-external-forks-help"
+              checked={externalForks}
+              disabled={mutation.pending}
+              onCheckedChange={(value) => {
+                setExternalForks(value === true);
+                setNotice(false);
+              }}
+            />
+            <FieldContent>
+              <FieldLabel htmlFor="organization-external-forks">
+                Allow private forks in other organizations
+              </FieldLabel>
+              <FieldDescription id="organization-external-forks-help">
+                Owners of a destination organization can access the private
+                forks it owns.
+              </FieldDescription>
+            </FieldContent>
+          </Field>
+        )}
         {notice && <p role="status">Repository policy saved.</p>}
         {mutation.error && (
           <p role="alert">

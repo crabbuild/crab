@@ -127,15 +127,12 @@ impl ImportAccount {
             .repository_by_id(source)
             .and_then(|record| record.organization_id())
             .ok_or(ImportError::NotFound)?;
-        if self
-            .organization
-            .is_some_and(|owner| owner.id != organization)
-        {
-            return Err(ImportError::NotFound);
-        }
         let access = Arc::new(ForkSource {
             source,
             organization,
+            external: self
+                .organization
+                .is_some_and(|owner| owner.id != organization),
             principal: self.principal.clone(),
         });
         access.current(server).await?;
@@ -169,6 +166,7 @@ impl ImportAccount {
 pub(super) struct ForkSource {
     pub(super) source: Uuid,
     pub(super) organization: Uuid,
+    external: bool,
     principal: Principal,
 }
 
@@ -198,9 +196,12 @@ impl ForkSource {
         let membership = app::catalog_membership(server, &self.principal, &repository)
             .await
             .map_err(ImportError::organization)?;
-        let allowed = self.policy_grant(server, false).await?.private_forks;
-        if !allowed || !record.forking.allowed || record.visibility.value.is_public() {
+        let policy = self.policy_grant(server, false).await?;
+        if !policy.private_forks || !record.forking.allowed || record.visibility.value.is_public() {
             return Err(ImportError::ForkingDisabled);
+        }
+        if self.external && !policy.external_forks {
+            return Err(ImportError::ExternalForkingDisabled);
         }
         Ok((repository, membership.principal))
     }

@@ -681,3 +681,162 @@ test("a personal fork keeps its job scope across reload and resume", async ({
     page.getByRole("button", { name: "Copy from upstream" }),
   ).toHaveCount(0);
 });
+
+test("a fork can choose another organization and resume in that destination", async ({
+  page,
+}) => {
+  const sourceId = "01900000-0000-7000-8000-000000000040";
+  const targetId = "01900000-0000-7000-8000-000000000041";
+  const sourceOrg = { id: sourceId, name: "Source engineering" };
+  const target = { id: targetId, name: "Release engineering" };
+  const owner = `org-${sourceId.replaceAll("-", "")}`;
+  const source = {
+    id: "01900000-0000-7000-8000-000000000042",
+    owner,
+    name: "library",
+    organization_id: sourceId,
+    access: "read",
+    visibility: "private",
+    can_fork: true,
+    can_fork_to_other_organizations: true,
+  };
+  const fork = {
+    ...source,
+    id: "01900000-0000-7000-8000-000000000043",
+    owner: `org-${targetId.replaceAll("-", "")}`,
+    organization_id: targetId,
+    can_fork: false,
+    fork: true,
+    forked_from: source,
+    access: "write",
+  };
+  const jobRoot = `/api/organizations/${targetId}/repositories/imports/git`;
+  let requestId: string | undefined;
+  const job = () => ({
+    id: requestId,
+    owner: fork.owner,
+    name: fork.name,
+    source: `${owner}/library`,
+    fork_source: source.id,
+    default_branch_only: true,
+    state: "interrupted",
+    message: "Fork interrupted",
+    resumable: true,
+  });
+  await page.route("**/api/**", (route) => {
+    const request = route.request();
+    const { pathname, searchParams } = new URL(request.url());
+    if (pathname === "/api/session")
+      return route.fulfill({
+        json: {
+          authenticated: true,
+          csrf: "csrf",
+          mode: "oidc",
+          user: { issuer: "fixture", subject: "alex", name: "Alex" },
+        },
+      });
+    if (pathname === "/api/repos")
+      return route.fulfill({
+        json: {
+          repositories: [
+            searchParams.get("owner") === fork.owner ? fork : source,
+          ],
+        },
+      });
+    if (pathname.endsWith("/refs"))
+      return route.fulfill({ json: { head: null, refs: [] } });
+    if (pathname === "/api/organizations")
+      return route.fulfill({
+        json: {
+          items: [
+            {
+              kind: "member",
+              organization: target,
+              role: "owner",
+              actor: source.id,
+              can_create: true,
+            },
+            {
+              kind: "member",
+              organization: { id: source.id, name: "Another team" },
+              role: "member",
+              actor: source.id,
+              can_create: true,
+            },
+          ],
+          next: null,
+        },
+      });
+    if (
+      pathname === `/api/organizations/${sourceId}` ||
+      pathname === `/api/organizations/${targetId}`
+    )
+      return route.fulfill({
+        json: {
+          organization: pathname.endsWith(targetId) ? target : sourceOrg,
+          role: "owner",
+          actor: source.id,
+        },
+      });
+    if (pathname === `/api/organizations/${targetId}/repositories/creation`)
+      return route.fulfill({ json: { owner: fork.owner, properties: [] } });
+    if (pathname === `/api/repos/${owner}/library/forks`) {
+      expect(request.headers()["x-crab-repository-id"]).toBe(source.id);
+      const input = request.postDataJSON();
+      expect(input).toMatchObject({
+        name: "library",
+        destination: "organization",
+        organization: targetId,
+        default_branch_only: true,
+      });
+      requestId = input.request_id;
+      return route.fulfill({ status: 202, json: job() });
+    }
+    if (requestId && pathname === `${jobRoot}/${requestId}`)
+      return route.fulfill({ json: job() });
+    if (requestId && pathname === `${jobRoot}/${requestId}/resume`)
+      return route.fulfill({
+        status: 202,
+        json: {
+          ...job(),
+          state: "succeeded",
+          repository: fork,
+          resumable: false,
+        },
+      });
+    return route.fulfill({
+      status: 404,
+      json: { error: { message: "Fixture route unavailable" } },
+    });
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/${owner}/library`);
+  await page
+    .getByRole("button", { name: "Fork repository", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Choose another organization" })
+    .click();
+  await expect(page.getByRole("button", { name: "Another team" })).toHaveCount(
+    0,
+  );
+  await page.getByRole("button", { name: target.name }).click();
+  const destination = page.getByRole("combobox", { name: "Fork owner" });
+  await expect(destination).toHaveText(target.name);
+  await expect(page.getByLabel("Repository name")).toHaveValue("library");
+  await page.getByRole("button", { name: "Create fork", exact: true }).click();
+  await expect(
+    page.getByText("Fork interrupted", { exact: true }),
+  ).toBeVisible();
+  await page.reload();
+  await expect(destination).toHaveText(target.name);
+  await expect(destination).toBeDisabled();
+  const statusLink = page.getByRole("link", { name: "Fork status link" });
+  await expect(statusLink).toHaveAttribute(
+    "href",
+    `/-/organizations/${targetId}?tab=repositories&import=${requestId}`,
+  );
+  await statusLink.click();
+  await page.getByRole("button", { name: "Resume fork", exact: true }).click();
+  await expect(page).toHaveURL(`/${fork.owner}/library`);
+});
