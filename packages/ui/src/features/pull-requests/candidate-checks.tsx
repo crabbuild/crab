@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { endpoint, navigate, useRequest, type Repository } from "@/lib/api";
 import { short } from "@/lib/format";
 import { repoHref } from "@/lib/repository-route";
-import { RequiredChecks } from "./required-checks";
+import { RequiredChecks, waitingForChecks } from "./required-checks";
 import { CheckRuns } from "./checks";
 import { mergeMethod } from "./merge-methods";
 import type { MergeMethod, PullRequest } from "./model";
@@ -89,10 +89,33 @@ function ActiveChecks({
   onMerged,
 }: PullChecksProps) {
   const url = endpoint(repo, `pulls/${pull.number}/merge-candidate`);
+  const live = pull.state === "open" && !repo.archived;
   const status = useRequest<{
     preview: Preview | null;
     candidate: Candidate | null;
-  }>(url);
+  }>(
+    url,
+    repo.id,
+    undefined,
+    live
+      ? {
+          revision: `${pull.version}:${pull.base_oid}:${pull.head_oid}:${pull.merge_queued}`,
+          interval: ({ candidate }) =>
+            pull.merge_queued ||
+            (candidate?.current &&
+              (candidate.promotion === "checks_pending" ||
+                candidate.promotion === "pull_blocked" ||
+                waitingForChecks(candidate.required_checks ?? []) ||
+                candidate.dispatches?.some(
+                  (run) => run.state !== "failed" && !run.url,
+                )))
+              ? 5_000
+              : showCandidate
+                ? 15_000
+                : null,
+        }
+      : undefined,
+  );
   const mutation = useMutation(csrf, repo);
   const promotion = useMutation(csrf, repo);
   const submission = useSubmission();
@@ -202,7 +225,7 @@ function ActiveChecks({
               ) : queueRequired ? (
                 <p>
                   The merge queue prepares the candidate when this pull request
-                  reaches the front.
+                  reaches a build slot.
                 </p>
               ) : (
                 <p>
@@ -419,6 +442,15 @@ function ActiveChecks({
           candidate
         />
       )}
+      {!showCandidate && (
+        <RequiredChecks
+          repo={repo}
+          pull={pull.number}
+          oid={pull.head_oid}
+          checks={pull.merge_requirements.checks}
+          source={pull.head_repository}
+        />
+      )}
       {(!showCandidate || focused) && (
         <CheckRuns
           key={`${focused?.commit ?? pull.head_oid}:${checksRevision}`}
@@ -429,6 +461,7 @@ function ActiveChecks({
           before={before}
           scopeToPull={!showCandidate && Boolean(pull.head_repository)}
           candidate={showCandidate}
+          live={live && (!showCandidate || !!focused?.current)}
           githubActionsRef={
             focused
               ? focused.current

@@ -23,6 +23,9 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   Commit links open individual diffs within the recorded PR range. The active
   v2 inventory preserves the original objects through pack replacement and
   recovery-history pruning.
+- Open pull requests refresh required head checks and candidate progress while
+  their browser view is visible. Checks stay attached to the exact head or
+  candidate, and the selected run log refreshes with its recorded version.
 - Writers can restore a missing head branch from a completed pull request.
   The panel shows the saved commit. Publication checks the current source
   repository, write grant and ref rules, and requires the branch name to be

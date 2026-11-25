@@ -9,6 +9,7 @@ import { useSubmission } from "@/components/discussion/hooks";
 import { Author } from "@/components/discussion/author";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { PullChecks } from "./candidate-checks";
+import { waitingForChecks } from "./required-checks";
 import { ChangeBase } from "./change-base";
 import { EditPullRequest } from "./edit";
 import type { CodeThemes } from "@/lib/code-theme";
@@ -99,25 +100,7 @@ export function PullDetail({
   // Draft and submission identity outlive tab changes and metadata refreshes.
   const comment = useCommentSubmission(repo, `pulls/${number}`, csrf);
   const path = endpoint(repo, `pulls/${number}`);
-  const pull = useRequest<PullRequest>(path);
-  const [current, setCurrent] = useState<PullRequest>();
-  const [epoch, setEpoch] = useState(0);
-  const accept = useCallback((incoming: PullRequest) => {
-    setCurrent((old) =>
-      old && old.version > incoming.version ? old : incoming,
-    );
-  }, []);
-  useEffect(() => {
-    if (pull.data) accept(pull.data);
-  }, [pull.data, accept]);
-  function refresh() {
-    pull.retry();
-    conversationLock?.refresh();
-    setEpoch((value) => value + 1);
-  }
-  const data = current ?? pull.data;
   const publicReader = repo.public_read_only === true;
-  const suggestions = useSuggestionBatch(repo, number, data, csrf, account);
   const route = repositoryRoute(url);
   const requestedTab = route?.pullTab;
   const tab =
@@ -126,6 +109,44 @@ export function PullDetail({
     (requestedTab === "checks" && !publicReader)
       ? requestedTab
       : "conversation";
+  const pull = useRequest<PullRequest>(
+    path,
+    repo.id,
+    undefined,
+    !repo.archived &&
+      !publicReader &&
+      (tab === "conversation" || tab === "checks")
+      ? {
+          interval: (data) =>
+            data.state !== "open"
+              ? null
+              : data.merge_pending ||
+                  waitingForChecks(data.merge_requirements.checks)
+                ? 5_000
+                : tab === "checks"
+                  ? 10_000
+                  : null,
+        }
+      : undefined,
+  );
+  const [current, setCurrent] = useState<PullRequest>();
+  const [epoch, setEpoch] = useState(0);
+  const accept = useCallback((incoming: PullRequest) => {
+    setCurrent((old) =>
+      old && old.version > incoming.version ? old : incoming,
+    );
+  }, []);
+  useEffect(() => {
+    if (pull.unavailable) setCurrent(undefined);
+    else if (pull.data) accept(pull.data);
+  }, [pull.data, pull.unavailable, accept]);
+  function refresh() {
+    pull.retry();
+    conversationLock?.refresh();
+    setEpoch((value) => value + 1);
+  }
+  const data = pull.unavailable ? undefined : (current ?? pull.data);
+  const suggestions = useSuggestionBatch(repo, number, data, csrf, account);
   const thread = Number(url.searchParams.get("thread"));
   const reply = Number(url.searchParams.get("reply"));
   const unresolvedOnly = url.searchParams.get("threads") === "unresolved";

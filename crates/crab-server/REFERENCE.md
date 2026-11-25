@@ -5002,6 +5002,13 @@ Submit `POST .../pulls/{number}/merge` with the candidate's `method`,
 `tested_candidate_oid`, `request_id`, `version`, `base_oid`, and `head_oid`
 to publish the candidate. Retry an interrupted response with the same request.
 
+The **Checks** tab refreshes the open pull request’s head and queued candidate
+while the tab is visible. Head reports and candidate reports identify their
+tested commit separately. The newest check-run page refreshes more often while
+runs are active and continues to pick up reruns. The selected log refreshes when
+its run version changes and keeps its expanded steps. Hidden tabs pause these reads and catch
+up when visible again. Completed pull requests show their saved check history.
+
 ### Merge a pull request through the queue
 
 Enable **Require merge queue** on an exact branch in **Settings → Branches**

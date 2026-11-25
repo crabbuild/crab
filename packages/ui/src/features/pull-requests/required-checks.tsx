@@ -10,6 +10,24 @@ import {
 } from "@primer/octicons-react";
 import type { PullRequest, RequiredCheckReport } from "./model";
 
+type Checks = PullRequest["merge_requirements"]["checks"];
+
+function waiting(report: RequiredCheckReport) {
+  return report.state === null || report.state === "pending";
+}
+
+function failed(report: RequiredCheckReport) {
+  return report.state === "error" || report.state === "failure";
+}
+
+export function waitingForChecks(checks: Checks) {
+  return checks.some(
+    (check) =>
+      waiting(check) ||
+      (check.additional_report && waiting(check.additional_report)),
+  );
+}
+
 function stateLabel(report: RequiredCheckReport) {
   switch (report.state) {
     case null:
@@ -39,7 +57,7 @@ export function RequiredChecks({
   repo: Repository;
   pull: number;
   oid: string | null;
-  checks: PullRequest["merge_requirements"]["checks"];
+  checks: Checks;
   candidate?: boolean;
   source?: PullRequest["head_repository"];
   refresh?: () => void;
@@ -47,27 +65,27 @@ export function RequiredChecks({
   if (!checks.length) return null;
   const testedOid = checks[0]?.head_sha ?? oid;
   const unsuccessful = checks.some(
-    (check) => check.state === "error" || check.state === "failure",
+    (check) =>
+      failed(check) ||
+      (check.additional_report && failed(check.additional_report)),
   );
-  const waiting = checks.some(
-    (check) => check.state === null || check.state === "pending",
-  );
+  const pending = waitingForChecks(checks);
   const SummaryIcon = unsuccessful
     ? XCircleFillIcon
-    : waiting
+    : pending
       ? ClockIcon
       : CheckCircleFillIcon;
   return (
     <div
-      className={`required-checks ${unsuccessful ? "failure" : waiting ? "pending" : "success"}`}
+      className={`required-checks ${unsuccessful ? "failure" : pending ? "pending" : "success"}`}
     >
       <div className="required-checks-summary">
         <SummaryIcon />
         <div className="min-w-0 flex-1">
-          <strong>
+          <strong aria-live="polite">
             {unsuccessful
               ? "Some required checks were not successful"
-              : waiting
+              : pending
                 ? "Required checks are waiting"
                 : "All required checks have passed"}
           </strong>

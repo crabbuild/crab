@@ -117,6 +117,7 @@ export function CheckRuns({
   scopeToPull,
   githubActionsRef,
   candidate = false,
+  live = false,
 }: {
   repo: Repository;
   pull: number;
@@ -126,6 +127,7 @@ export function CheckRuns({
   scopeToPull?: boolean;
   githubActionsRef?: string | null;
   candidate?: boolean;
+  live?: boolean;
 }) {
   const scope = scopeToPull ? String(pull) : undefined;
   const page = useRequest<CheckPage>(
@@ -134,12 +136,25 @@ export function CheckRuns({
       before: before ? String(before) : undefined,
       pull: scope,
     }),
+    repo.id,
+    undefined,
+    live && !before
+      ? {
+          interval: ({ items }) =>
+            items.some((run) => run.status !== "completed") ? 5_000 : 15_000,
+        }
+      : undefined,
   );
-  const active = selected ?? page.data?.items[0]?.id;
+  const active = page.data && (selected ?? page.data.items[0]?.id);
   const detail = useRequest<CheckRun>(
     active
       ? endpoint(repo, `commits/${oid}/check-runs/${active}`, { pull: scope })
       : null,
+    repo.id,
+    undefined,
+    live
+      ? { revision: page.data?.items.find((run) => run.id === active)?.version }
+      : undefined,
   );
   const checkHref = (filters: Record<string, string> = {}) =>
     repoHref(repo, {
