@@ -133,6 +133,8 @@ pub(super) struct QueryPlan {
 pub(super) enum Predicate {
     Repository(String, String),
     Organization(String),
+    Fork,
+    Archived,
     Language(Language),
     Path(Regex),
     Text {
@@ -191,7 +193,7 @@ impl Predicate {
     fn parse(value: &str, kind: Kind, case_sensitive: bool) -> Result<(Self, bool), ApiError> {
         let (scope, raw) = value.split_once(':').unwrap_or(("", value));
         let raw = match scope {
-            "repo" | "org" | "language" | "path" | "content" | "symbol" => raw,
+            "repo" | "org" | "is" | "language" | "path" | "content" | "symbol" => raw,
             _ => value,
         };
         let term = Term::parse(raw)?;
@@ -219,6 +221,11 @@ impl Predicate {
                 }
                 Self::Organization(value)
             }
+            "is" => match term.scoped_value()?.to_ascii_lowercase().as_str() {
+                "fork" => Self::Fork,
+                "archived" => Self::Archived,
+                _ => return Err(ApiError::Input("Use is:fork or is:archived")),
+            },
             "language" => Self::Language(Language::parse(&term.scoped_value()?)?),
             "path" => Self::Path(match term {
                 Term::Literal(value) => path_matcher(&value, raw.starts_with('"'))?,
@@ -267,7 +274,7 @@ impl Predicate {
         Ok((predicate, expression))
     }
 
-    pub(super) fn repository_fact(&self, repo: &Repository) -> Truth {
+    pub(super) fn repository_fact(&self, repo: &Repository, archived: Option<bool>) -> Truth {
         match self {
             Self::Repository(owner, name) => Truth::from_bool(
                 repo.config.owner.eq_ignore_ascii_case(owner)
@@ -277,6 +284,8 @@ impl Predicate {
                 repo.config.owner.eq_ignore_ascii_case(org)
                     || Uuid::parse_str(org).is_ok_and(|expected| expected == id)
             })),
+            Self::Fork => Truth::from_bool(repo.forked_from.is_some()),
+            Self::Archived => archived.map_or(Truth::Unknown, Truth::from_bool),
             _ => Truth::Unknown,
         }
     }

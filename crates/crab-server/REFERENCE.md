@@ -562,8 +562,11 @@ Add qualifiers to the search text to narrow a query. For example,
 `src` and its subdirectories. Bare terms match file contents or paths by default.
 **Search in** can restrict them to one field. Use `repo:owner/name` to select an exact
 repository and `org:` with the organization namespace from the repository
-URL or its UUID. Both selectors use current repository access. A query
-containing only filters lists matching file paths.
+URL or its UUID. Use `is:fork` for forks and `is:archived` for archived
+repositories. For example, `content:retry NOT (is:fork OR is:archived)`
+finds code in active repositories that have no upstream. These filters use
+current repository access. A query containing only filters lists matching file
+paths.
 
 `path:` matches a case-insensitive substring of the repository-relative path.
 Use `*` or `?` within one path component and `**` across directories.
@@ -601,6 +604,8 @@ optional directory `path`, `kind=any|content|path|symbol` (default `any`),
 `matched`, and `after`. Supply the same search parameters with `next`
 to continue. A cursor binds the repository UUID, commit, and search filters.
 Subsequent pages use the pinned commit even if the selected branch advances.
+When a query uses `is:archived`, a change to the repository's archive state
+returns 409 `page_changed` on a continuation. Submit the search again to refresh it.
 A query accepts up to 512 characters, 24 terms, 12 nested operators,
 and 128 characters per literal.
 Every request checks current repository access before returning any matches.
@@ -643,6 +648,10 @@ repository. An indexed content or symbol search can consider all indexed paths
 and checks up to 32 candidates per repository. Follow `next` with the same
 parameters, including after an empty page. A repository in progress keeps
 the same commit until its scan finishes.
+When a query uses `is:archived`, each page checks current archive settings for
+the repositories it visits. A change to those settings while the page runs,
+or to the settings of a repository whose scan is being resumed, returns 409
+`page_changed`. Start over to refresh the results.
 
 An indexed Boolean or regex query examines at most 4,096 path rows per
 repository per page. Follow the continuation even after a page with no

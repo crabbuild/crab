@@ -7,7 +7,6 @@ pub(super) async fn inspect(
     rows: &[Row],
     snapshot: &RemoteGitSnapshot,
     pattern: &Pattern,
-    scope: &Facts,
     window: &Window<'_>,
     operation: &OperationContext,
 ) -> crab_remote_git::Result<Scan> {
@@ -15,7 +14,7 @@ pub(super) async fn inspect(
     if !prefix.is_empty() {
         prefix.push(b'/');
     }
-    let after = window.resume.map(|(_, path)| path.as_bytes());
+    let after = window.resume.map(|resume| resume.after.as_bytes());
     let start = rows.partition_point(|row| {
         let path = row.path.as_bytes();
         path < prefix.as_slice() || after.is_some_and(|after| path <= after)
@@ -38,7 +37,7 @@ pub(super) async fn inspect(
     let mut candidates = Vec::new();
     let mut skipped = 0;
     for (i, row) in range.iter().take(examined).enumerate() {
-        let mut facts = pattern.file_facts(row.path.as_bytes(), scope);
+        let mut facts = pattern.file_facts(row.path.as_bytes(), &window.scope);
         match pattern.query.evaluate(&facts).0 {
             Truth::No => continue,
             Truth::Unknown if row.filter.is_none() => {
@@ -74,7 +73,9 @@ pub(super) async fn inspect(
                     invariant: "code index path disagreed with the pinned Git tree",
                 });
             }
-            pattern.inspect_entry(&entry, scope, operation).await
+            pattern
+                .inspect_entry(&entry, &window.scope, operation)
+                .await
         }))
         .await?;
         verified += matches.iter().filter(|(_, read)| *read).count();

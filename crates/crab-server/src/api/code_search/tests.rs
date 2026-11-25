@@ -526,6 +526,98 @@ async fn code_search_qualifiers_filter_pinned_results_without_widening_access() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn archive_qualifier_filters_both_search_routes_and_rejects_stale_pages() {
+    let h = Harness::new(false).await;
+    h.add_repository("library").await;
+    let alice = h.login().await;
+    let (_, _, head) = searchable_repository(
+        &h,
+        &alice,
+        "team",
+        "private",
+        (0..21).map(|i| (format!("file{i:02}.rs"), "archive_marker\n".into())),
+    )
+    .await;
+    searchable_repository(
+        &h,
+        &alice,
+        "team",
+        "library",
+        [("README.md".into(), "archive_marker\n".into())],
+    )
+    .await;
+    let active = "q=content:archive_marker+repo:team/private+NOT+(is:archived+OR+is:fork)";
+    let repository = format!("/api/repos/team/private/code-search?{active}");
+    let workspace = format!("/api/code-search?{active}");
+    let mut continuations = Vec::new();
+    for (route, count) in [(&repository, 1), (&workspace, 20)] {
+        let route = if count == 1 {
+            format!("{route}&limit=1")
+        } else {
+            route.clone()
+        };
+        let first = h.json(&route, &alice).await;
+        let (commit, files) = if count == 1 {
+            (&first["commit"], &first["items"])
+        } else {
+            (&first["groups"][0]["commit"], &first["groups"][0]["files"])
+        };
+        assert_eq!(*commit, head);
+        assert_eq!(files.as_array().unwrap().len(), count);
+        let token = first["next"].as_str().unwrap();
+        continuations.push(format!("{route}&cursor={token}"));
+    }
+    assert_eq!(
+        h.json(&continuations[1], &alice).await["groups"][0]["files"][0]["path"],
+        "file20.rs"
+    );
+
+    h.write(
+        Method::PUT,
+        "/api/repos/team/private/settings/archive",
+        &alice,
+        json!({"expected_version":0,"archived":true,"repository":"team/private"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    for route in continuations {
+        let stale = h
+            .http
+            .get(format!("{}{route}", h.origin))
+            .header(reqwest::header::COOKIE, &alice)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            stale.json::<Value>().await.unwrap()["error"]["code"],
+            "page_changed"
+        );
+    }
+    assert_eq!(h.json(&repository, &alice).await["scanned"], 0);
+    assert_eq!(h.json(&workspace, &alice).await["scanned"], 0);
+    let archived = "q=content:archive_marker+is:archived";
+    let repo = h
+        .server
+        .repositories
+        .get(&("team".into(), "private".into()))
+        .unwrap();
+    code_index::reconcile(&h.server, &repo, &h.server.cancellation)
+        .await
+        .unwrap();
+    let results = h
+        .json(&format!("/api/code-search?{archived}"), &alice)
+        .await;
+    assert_eq!(results["indexed_repositories"], 1);
+    assert_eq!(results["scanning_repositories"], 0);
+    assert_eq!(results["groups"].as_array().unwrap().len(), 1);
+    assert_eq!(results["groups"][0]["commit"], head);
+    assert_eq!(results["groups"][0]["files"][0]["path"], "file00.rs");
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn code_search_expressions_match_pinned_contents_paths_and_definitions() {
     let h = Harness::new(false).await;
     let alice = h.login().await;
@@ -729,7 +821,7 @@ async fn native_browser_finds_symbols_across_repositories_and_opens_the_definiti
         .await;
     browser.run(&["wait", "#workspace-search-text"]).await;
     browser
-        .run(&["select", "#workspace-search-kind", "symbol"])
+        .choose_select("#workspace-search-kind", "symbol")
         .await;
     browser
         .run(&["fill", "#workspace-search-text", "workspace_needle"])
@@ -743,11 +835,20 @@ async fn native_browser_finds_symbols_across_repositories_and_opens_the_definiti
     browser
         .run(&["wait", "--text", "Index used for 2 repositories"])
         .await;
+    h.write(
+        Method::PUT,
+        "/api/repos/team/private/settings/archive",
+        &alice,
+        json!({"expected_version":0,"archived":true,"repository":"team/private"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
     browser
         .run(&[
             "fill",
             "#workspace-search-text",
-            "repo:team/library language:rust path:*.rs symbol:/^workspace_(needle|hook)$/",
+            "language:rust path:*.rs symbol:/^workspace_(needle|hook)$/ NOT (is:archived OR is:fork)",
         ])
         .await;
     browser
