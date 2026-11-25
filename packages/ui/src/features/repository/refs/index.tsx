@@ -25,6 +25,7 @@ import {
 } from "@/lib/api";
 import { Link } from "@/components/navigation/link";
 import { short } from "@/lib/format";
+import { UpstreamBranches } from "./upstream-branches";
 
 const names = new Intl.Collator("en", {
   numeric: true,
@@ -224,12 +225,16 @@ export function RefsPage({
   repo,
   refs,
   type,
+  csrf,
   onDeleteBranch,
+  onBranchCopied,
 }: {
   repo: Repository;
   refs: Refs;
   type: "branches" | "tags";
+  csrf: string;
   onDeleteBranch?: DeleteBranch;
+  onBranchCopied?: () => void;
 }) {
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -253,7 +258,20 @@ export function RefsPage({
   );
   return (
     <section className="refs-page">
-      <h2>{type === "branches" ? "Branches" : "Tags"}</h2>
+      <header className="mb-5 flex flex-wrap items-center justify-between gap-3 max-sm:mb-4">
+        <h2 className="text-2xl leading-[1.3]">
+          {type === "branches" ? "Branches" : "Tags"}
+        </h2>
+        {type === "branches" && repo.forked_from && onBranchCopied && (
+          <UpstreamBranches
+            repo={repo}
+            upstream={repo.forked_from}
+            refs={refs}
+            csrf={csrf}
+            onRefresh={onBranchCopied}
+          />
+        )}
+      </header>
       <nav
         className="refs-tabs"
         aria-label={type === "tags" ? "Releases and tags" : "Repository refs"}

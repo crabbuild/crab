@@ -19,6 +19,7 @@ export interface GitImportJob {
   id: string;
   source: string;
   fork_source?: string;
+  default_branch_only?: boolean;
   owner: string;
   name: string;
   visibility: RepositoryVisibility;
@@ -347,6 +348,8 @@ export function startRepositoryFork(
     request_id: string;
     name: string;
     destination: "personal" | "organization";
+    description?: string;
+    default_branch_only: boolean;
     properties?: PropertyOverrides;
   },
   csrf: string,
@@ -356,7 +359,10 @@ export function startRepositoryFork(
 
 export async function updateForkBranch(
   repo: Repository,
-  comparison: { branch: string; fork_oid: string; upstream_oid: string },
+  comparison: { branch: string; upstream_oid: string } & (
+    | { fork_oid: string; request_id?: never }
+    | { fork_oid: null; request_id: string }
+  ),
   csrf: string,
 ) {
   const response = await fetch(endpoint(repo, "fork-sync"), {

@@ -149,8 +149,12 @@ epochs and preserve newer direct grants. Team commands and provider projection
 share the lease so conversion captures current team roles.
 Personal private forks keep their account address and inherit the source
 organization's authority. Fork publication verifies source access under the
-organization lease. Member removal moves their personal forks into catalog
-tombstones. Reinstatement checks source ownership and restores the same UUID.
+organization lease and captures the current base grant in the catalog commit.
+Later policy edits leave that grant intact while current membership and team
+grants still apply. `app::require_related_read` checks the upstream grant
+separately before fork actions read or publish upstream data. Member removal
+moves their personal forks into catalog tombstones. Reinstatement checks source
+ownership and restores the same UUID.
 `cells/organization/invitations.rs` owns the reinstatement window and binds a
 restore offer to the exact removal version. Only recipient acceptance may
 reactivate eligible manual team edges. Removing or converting a member also
@@ -285,8 +289,12 @@ and the membership audit together. `catalog/rename.rs` owns historical addresses
 `repository/access.rs` resolves current owner grants, and `app::membership`
 applies them alongside repository members and groups across browser and Git.
 `git_import/jobs.rs` owns actor-scoped durable import status and worker heartbeats.
-The job binds initial visibility to the import intent. `git_import/workflow.rs`
+The job binds visibility and fork branch selection to the import intent.
+`git_import/workflow.rs`
 publishes the selected visibility at catalog readiness after snapshot verification.
+`api/fork_sync.rs` and `git/receive/fork_sync.rs` copy a missing upstream
+branch or fast-forward an existing one under the upstream ref lease. Copy
+receipts bind the requested tip and expected absence to a submission UUID.
 `api/write.rs` owns the shared proven-rejection response marker.
 `api/discussion_state/` owns current membership and state HTTP composition.
 `server/http/boundary.rs` binds browser mutation headers to the stable repository

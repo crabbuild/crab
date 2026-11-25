@@ -28,6 +28,7 @@ pub(super) struct GitImportRequest {
 pub(super) struct ValidatedImport {
     pub(super) source: String,
     pub(super) fork_source: Option<uuid::Uuid>,
+    pub(super) default_branch_only: bool,
     pub(super) owner: String,
     pub(super) name: String,
     pub(super) description: String,
@@ -58,14 +59,7 @@ pub(super) fn validate_request(
         (None, None) => return Err(ImportError::Invalid("A Crab owner is required")),
     };
     let name = identifier(request.name, "name")?;
-    let description = request.description.unwrap_or_default().trim().to_owned();
-    if description.chars().count() > MAX_DESCRIPTION_CHARS
-        || description.chars().any(char::is_control)
-    {
-        return Err(ImportError::Invalid(
-            "description must be at most 1,000 characters without controls",
-        ));
-    }
+    let description = description(request.description.as_deref().unwrap_or_default())?;
     let token = request
         .token
         .map(|token| token.trim().to_owned())
@@ -83,6 +77,7 @@ pub(super) fn validate_request(
     Ok(ValidatedImport {
         source,
         fork_source: None,
+        default_branch_only: false,
         owner,
         name,
         description,
@@ -90,6 +85,16 @@ pub(super) fn validate_request(
         properties: request.properties,
         token,
     })
+}
+
+pub(super) fn description(value: &str) -> Result<String, ImportError> {
+    let value = value.trim();
+    if value.chars().count() > MAX_DESCRIPTION_CHARS || value.chars().any(char::is_control) {
+        return Err(ImportError::Invalid(
+            "description must be at most 1,000 characters without controls",
+        ));
+    }
+    Ok(value.to_owned())
 }
 
 pub(super) fn stored_request(

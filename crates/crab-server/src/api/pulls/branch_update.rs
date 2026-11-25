@@ -117,6 +117,9 @@ impl Destination {
         {
             return Err(Error::BranchUpdatePermission);
         }
+        if let Some(upstream) = &self.upstream {
+            app::require_related_read(server, principal, &self.head, upstream).await?;
+        }
         Ok(())
     }
 

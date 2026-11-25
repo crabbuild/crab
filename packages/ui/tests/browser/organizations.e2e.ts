@@ -36,7 +36,7 @@ async function fixture(page: Page) {
       member_deletion: boolean;
       private_forks: boolean;
       member_visibility: boolean;
-      baseline: "read" | "write" | null;
+      baseline: "read" | "write" | "admin" | null;
       default_branch: string;
     };
   } = {
@@ -301,10 +301,30 @@ test("organization owners save repository policy from settings", async ({
       name: "Owners and members with repository Admin access",
     })
     .click();
-  await page.getByRole("combobox", { name: "Baseline member access" }).click();
-  await page.getByRole("option", { name: "Read", exact: true }).click();
-  await page.getByRole("button", { name: "Save repository policy" }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const basePermissions = page.getByRole("combobox", {
+    name: "Base repository permissions",
+  });
+  await basePermissions.click();
+  await page.getByRole("option", { name: "Admin", exact: true }).click();
+  const savePolicy = page.getByRole("button", {
+    name: "Save repository policy",
+  });
+  const review = page.getByRole("dialog", {
+    name: "Change base repository permissions?",
+  });
+  await savePolicy.click();
+  await expect(review).toContainText("Change from None to Admin");
+  await expectNoAccessibilityViolations(page);
+  await review.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(basePermissions).toBeFocused();
+  expect(state.writes).toHaveLength(0);
+  await savePolicy.click();
+  await review
+    .getByRole("button", { name: "Change base permissions to Admin" })
+    .click();
   await expect(page.getByText("Repository policy saved.")).toBeVisible();
+  await expect(review).toHaveCount(0);
   expect(state.policy).toEqual({
     version: 1,
     member_creation: true,
@@ -313,7 +333,7 @@ test("organization owners save repository policy from settings", async ({
     member_deletion: true,
     private_forks: false,
     member_visibility: false,
-    baseline: "read",
+    baseline: "admin",
     default_branch: "trunk",
   });
   await expectNoAccessibilityViolations(page);

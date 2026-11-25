@@ -1,8 +1,17 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation } from "@/components/discussion/mutations";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Field,
   FieldContent,
@@ -14,6 +23,14 @@ import { FieldSelect } from "@/components/ui/field-select";
 import { Input } from "@/components/ui/input";
 import { useRequest } from "@/lib/api";
 
+const basePermissions = {
+  none: "None",
+  read: "Read",
+  write: "Write",
+  admin: "Admin",
+};
+type BasePermission = Exclude<keyof typeof basePermissions, "none">;
+
 type Policy = {
   version: number;
   member_creation: boolean;
@@ -22,7 +39,7 @@ type Policy = {
   member_deletion: boolean;
   private_forks: boolean;
   member_visibility: boolean;
-  baseline: "read" | "write" | null;
+  baseline: BasePermission | null;
   default_branch: string;
 };
 
@@ -83,7 +100,10 @@ function PolicyForm({
   const [baseline, setBaseline] = useState(initial.baseline);
   const [defaultBranch, setDefaultBranch] = useState(initial.default_branch);
   const [notice, setNotice] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
+  const basePermissionsField = useRef<HTMLButtonElement>(null);
   const mutation = useMutation(csrf, null);
+  const basePermissionsChanged = baseline !== saved.baseline;
   const changed =
     creation !== saved.member_creation ||
     creationVisibility !== saved.member_creation_visibility ||
@@ -91,27 +111,35 @@ function PolicyForm({
     deletion !== saved.member_deletion ||
     privateForks !== saved.private_forks ||
     memberVisibility !== saved.member_visibility ||
-    baseline !== saved.baseline ||
+    basePermissionsChanged ||
     defaultBranch !== saved.default_branch;
+  async function save() {
+    const result = await mutation.run<Policy>(path, "PUT", {
+      version: saved.version,
+      member_creation: creation,
+      member_creation_visibility: creationVisibility,
+      member_transfer: transfer,
+      member_deletion: deletion,
+      private_forks: privateForks,
+      member_visibility: memberVisibility,
+      baseline,
+      default_branch: defaultBranch,
+    });
+    setReviewing(false);
+    if (result) {
+      setSaved(result);
+      setNotice(true);
+    }
+  }
   return (
     <form
-      onSubmit={async (event) => {
+      onSubmit={(event) => {
         event.preventDefault();
-        if (!changed || mutation.conflict) return;
-        const result = await mutation.run<Policy>(path, "PUT", {
-          version: saved.version,
-          member_creation: creation,
-          member_creation_visibility: creationVisibility,
-          member_transfer: transfer,
-          member_deletion: deletion,
-          private_forks: privateForks,
-          member_visibility: memberVisibility,
-          baseline,
-          default_branch: defaultBranch,
-        });
-        if (result) {
-          setSaved(result);
-          setNotice(true);
+        if (!changed || mutation.pending || mutation.conflict) return;
+        if (basePermissionsChanged) {
+          setReviewing(true);
+        } else {
+          void save();
         }
       }}
     >
@@ -239,23 +267,28 @@ function PolicyForm({
         </Field>
         <Field>
           <FieldLabel htmlFor="organization-repo-baseline">
-            Baseline member access
+            Base repository permissions
           </FieldLabel>
           <FieldSelect
             id="organization-repo-baseline"
-            label="Baseline member access"
+            ref={basePermissionsField}
+            aria-describedby="organization-repo-baseline-help"
             value={baseline ?? "none"}
-            options={{ none: "None", read: "Read", write: "Write" }}
+            options={basePermissions}
             disabled={mutation.pending}
             onValueChange={(value) => {
-              setBaseline(value === "read" || value === "write" ? value : null);
+              setBaseline(
+                value === "read" || value === "write" || value === "admin"
+                  ? value
+                  : null,
+              );
               setNotice(false);
             }}
           />
-          <p className="text-sm text-muted-foreground">
-            Applies to current members across this organization’s repositories.
-            Higher repository and team grants still apply.
-          </p>
+          <FieldDescription id="organization-repo-baseline-help">
+            Applies to all organization members across existing and new
+            repositories. Higher repository and team grants still apply.
+          </FieldDescription>
         </Field>
         <Field orientation="horizontal">
           <Checkbox
@@ -320,6 +353,52 @@ function PolicyForm({
           )}
         </div>
       </FieldGroup>
+      <Dialog
+        open={reviewing}
+        onOpenChange={(open) => {
+          if (!mutation.pending) setReviewing(open);
+        }}
+      >
+        <DialogContent
+          showCloseButton={false}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            basePermissionsField.current?.focus();
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>Change base repository permissions?</DialogTitle>
+            <DialogDescription>
+              Change from {basePermissions[saved.baseline ?? "none"]} to{" "}
+              {basePermissions[baseline ?? "none"]} for all organization
+              members. Existing private forks keep their base permissions.
+              Outside collaborators keep their repository grants.
+              {baseline === "admin" &&
+                " Members will be able to manage repository settings and access."}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={mutation.pending}
+              >
+                Cancel
+              </Button>
+            </DialogClose>
+            <Button
+              type="button"
+              disabled={mutation.pending}
+              onClick={() => void save()}
+            >
+              {mutation.pending
+                ? "Saving…"
+                : `Change base permissions to ${basePermissions[baseline ?? "none"]}`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </form>
   );
 }

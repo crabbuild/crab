@@ -13,7 +13,10 @@ use super::{
 };
 use crate::{
     RepositoryAccess, RepositoryMember,
-    catalog::{CatalogRecord, CatalogStore, MembershipActor, RepositoryApplicationState},
+    catalog::{
+        CatalogRecord, CatalogStore, MembershipActor, RepositoryApplicationState,
+        RepositoryBaseline,
+    },
     repository::{
         MaintenanceTrigger, Repository,
         settings::{RulesetScope, with_ruleset_lease},
@@ -244,10 +247,13 @@ async fn import_repository(
     };
     let key = key.as_ref().map(|value| value.as_str());
     let mut clone = Command::new("git");
-    clone
-        .args(["clone", "--mirror", "--quiet", "--"])
-        .arg(source)
-        .arg(&mirror);
+    clone.args(["clone", "--quiet"]);
+    if request.default_branch_only {
+        clone.args(["--bare", "--single-branch", "--no-tags"]);
+    } else {
+        clone.arg("--mirror");
+    }
+    clone.arg("--").arg(source).arg(&mirror);
     configure_git(&mut clone, request.token.as_deref(), key);
     run_git(clone, cancellation, key.or(request.token.as_deref())).await?;
     drop(fork_source);
@@ -276,6 +282,11 @@ async fn import_repository(
         )));
     }
     let branch = default_branch(&mirror, &refs, cancellation).await?;
+    if request.default_branch_only && refs.len() != 1 {
+        return Err(ImportError::Git(
+            "The default-branch clone contains extra refs".into(),
+        ));
+    }
     let snapshot = jobs::Snapshot::new(branch, &refs);
     job.pin(&snapshot).await?;
     job.update(jobs::State::Running, "Preparing Crab repository")
@@ -424,9 +435,9 @@ pub(super) async fn finish_destination(
         .await
         .map_err(ImportError::Setup)?;
     job.verify().await?;
-    let mark_ready = || async {
+    let mark_ready = |baseline| async move {
         catalog
-            .mark_cell_ready(id)
+            .publish_cell(id, baseline)
             .await
             .map(|_| ())
             .map_err(ImportError::Catalog)
@@ -462,10 +473,18 @@ pub(super) async fn finish_destination(
                             .authorize_publication(server, id, snapshot, policy)
                             .await?;
                     }
+                    // Freeze the fork's base grant in the same catalog commit
+                    // that exposes it, while policy writers still wait on the lease.
+                    let baseline = match fork {
+                        Some(source) => RepositoryBaseline::PrivateFork(
+                            source.policy_grant(server, false).await?.baseline,
+                        ),
+                        None => RepositoryBaseline::Organization,
+                    };
                     if cancel.is_cancelled() {
                         return Err(ImportError::Cancelled);
                     }
-                    mark_ready().await
+                    mark_ready(baseline).await
                 }
                 .await;
                 Ok(outcome)
@@ -474,7 +493,7 @@ pub(super) async fn finish_destination(
         .await;
         published.map_err(ImportError::organization)??;
     } else {
-        mark_ready().await?;
+        mark_ready(RepositoryBaseline::Organization).await?;
     }
     install_destination(server, catalog, id).await
 }

@@ -54,8 +54,7 @@ pub(super) async fn apply_to_fork(
     let fork = app::repository(&server, &principal, &(owner, name))?;
     let upstream = fork.fork_source(&server).ok_or(Error::NotFound)?;
     let Json(input) = input?;
-    // The fork's live membership inherits upstream grants. The credential
-    // stays scoped to the repository whose ref this request can publish.
+    app::require_related_read(&server, &principal, &fork, &upstream).await?;
     apply_batch(server, principal, &upstream, &fork, number, input).await
 }
 
@@ -308,6 +307,7 @@ async fn active_pull(
 pub(crate) async fn authorize_suggestion_publication(
     server: &Server,
     target: &Repository,
+    principal: &Principal,
     suggestion: &SuggestionPublication,
     branch: &str,
 ) -> std::result::Result<(), ReceiveError> {
@@ -320,6 +320,9 @@ pub(crate) async fn authorize_suggestion_publication(
                 .ok_or(ReceiveError::NotFound)
         })
         .transpose()?;
+    if let Some(upstream) = &upstream {
+        app::require_related_read(server, principal, target, upstream).await?;
+    }
     let discussion = upstream.as_deref().unwrap_or(target);
     let pull = active_pull(server, discussion, target, suggestion.number)
         .await

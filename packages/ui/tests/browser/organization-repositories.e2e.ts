@@ -454,7 +454,13 @@ test("a personal fork keeps its job scope across reload and resume", async ({
     name: "library",
     visibility: "private",
     forked_from: { id, owner, name: "library" },
+    protected_branches: [],
+    access: "write",
   };
+  const main = { name: "refs/heads/main", oid: "a".repeat(40) };
+  const feature = { name: "refs/heads/feature", oid: "b".repeat(40) };
+  const forkRefs = [main];
+  let copyRequestId: string | undefined;
   let jobId: string | undefined;
   let reads = 0;
   const job = () => ({
@@ -463,6 +469,7 @@ test("a personal fork keeps its job scope across reload and resume", async ({
     name: fork.name,
     source: `${owner}/library`,
     fork_source: id,
+    default_branch_only: true,
     state: "interrupted",
     message: "Fork interrupted",
     resumable: true,
@@ -501,8 +508,34 @@ test("a personal fork keeps its job scope across reload and resume", async ({
       });
     if (pathname.endsWith("/refs"))
       return route.fulfill({
-        json: { head: null, unborn_head: "refs/heads/main", refs: [] },
+        json: {
+          head: main,
+          refs: pathname.startsWith(`/api/repos/${owner}/`)
+            ? [main, feature]
+            : forkRefs,
+        },
       });
+    if (pathname === `/api/repos/${fork.owner}/library/fork-sync`) {
+      expect(req.headers()["x-crab-repository-id"]).toBe(fork.id);
+      const input = req.postDataJSON();
+      expect(input).toEqual({
+        branch: feature.name,
+        fork_oid: null,
+        upstream_oid: feature.oid,
+        request_id: copyRequestId ?? expect.any(String),
+      });
+      if (!copyRequestId) {
+        copyRequestId = input.request_id;
+        return route.fulfill({
+          status: 503,
+          json: { error: { message: "Connection interrupted" } },
+        });
+      }
+      forkRefs.push(feature);
+      return route.fulfill({
+        json: { branch: feature.name, commit: feature.oid },
+      });
+    }
     if (pathname === `/api/repos/${owner}/library/forks`) {
       expect(req.headers()["x-crab-repository-id"]).toBe(id);
       const input = req.postDataJSON();
@@ -510,6 +543,8 @@ test("a personal fork keeps its job scope across reload and resume", async ({
         request_id: expect.any(String),
         name: "library",
         destination: "personal",
+        description: "Work on release tooling",
+        default_branch_only: true,
       });
       jobId = input.request_id;
       return route.fulfill({ status: 202, json: job() });
@@ -536,6 +571,7 @@ test("a personal fork keeps its job scope across reload and resume", async ({
     });
   });
 
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`/${owner}/library`);
   await page
     .getByRole("button", { name: "Fork repository", exact: true })
@@ -544,6 +580,15 @@ test("a personal fork keeps its job scope across reload and resume", async ({
   await destination.click();
   await page.getByRole("option", { name: "Personal", exact: true }).click();
   await expect(page.getByLabel("Repository name")).toHaveValue("library");
+  const defaultBranch = page.getByRole("checkbox", {
+    name: "Copy only the default branch",
+  });
+  await expect(defaultBranch).toBeChecked();
+  await defaultBranch.uncheck();
+  await expect(defaultBranch).not.toBeChecked();
+  await defaultBranch.check();
+  await page.getByLabel("Description").fill("Work on release tooling");
+  await expectNoAccessibilityViolations(page);
   await page.getByRole("button", { name: "Create fork", exact: true }).click();
   await expect(
     page.getByText("Fork interrupted", { exact: true }),
@@ -553,7 +598,36 @@ test("a personal fork keeps its job scope across reload and resume", async ({
   ).toHaveCount(0);
   await page.reload();
   await expect(destination).toHaveText("Personal");
+  await expect(defaultBranch).toBeChecked();
+  await expect(defaultBranch).toBeDisabled();
   await page.getByRole("button", { name: "Resume fork", exact: true }).click();
   await expect(page).toHaveURL(/\/user-personal\/library$/);
   expect(reads).toBeGreaterThan(0);
+  await page.goto(`/${fork.owner}/library/branches`);
+  await page.getByRole("button", { name: "Copy from upstream" }).click();
+  const copyDialog = page.getByRole("dialog", {
+    name: "Copy an upstream branch",
+  });
+  await expect(
+    copyDialog.getByRole("button", { name: "Copy main" }),
+  ).toHaveCount(0);
+  const search = copyDialog.getByRole("textbox", {
+    name: "Search upstream branches",
+  });
+  await search.fill("missing");
+  await expect(
+    copyDialog.getByText("No upstream branches match your search."),
+  ).toBeVisible();
+  await search.fill("feat");
+  const copy = copyDialog.getByRole("button", { name: "Copy feature" });
+  await expect(copy).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+  await copy.click();
+  await expect(copyDialog.getByRole("alert")).toHaveText(
+    "Connection interrupted",
+  );
+  await copy.click();
+  await expect(
+    page.getByRole("link", { name: "feature", exact: true }),
+  ).toBeVisible();
 });

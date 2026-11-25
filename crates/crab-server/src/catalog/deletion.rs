@@ -90,6 +90,7 @@ impl CatalogDocument {
                 || !record.timestamps_valid()
                 || record.ownership_epoch != record.name_version()
                 || !record.property_seed_valid()
+                || !record.fork_baseline_valid()
                 || record.application != RepositoryApplicationState::CellReady
                 || record.transfer.is_some()
                 || (entry.retired_for_removal
