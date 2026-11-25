@@ -73,9 +73,7 @@ impl Read for MatchRepositories {
             let current: Values = context.document(&repo.key()?)?.unwrap_or_default();
             if terms.iter().all(|(definition, term, exclude)| {
                 let matches = current
-                    .overrides
-                    .get(&definition.id)
-                    .or(definition.default.as_ref())
+                    .effective(definition)
                     .is_some_and(|value| value.matches(term));
                 matches != *exclude
             }) {

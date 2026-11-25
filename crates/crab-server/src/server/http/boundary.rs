@@ -432,6 +432,7 @@ fn public_read_route(method: &axum::http::Method, uri: &axum::http::Uri) -> bool
                             | "lfs-content"
                             | "crab-content"
                             | "code-search"
+                            | "properties"
                     )
             })
 }
@@ -600,6 +601,8 @@ mod tests {
             (Method::GET, "/api/repos", true),
             (Method::HEAD, "/api/repos/org/library/file", true),
             (Method::GET, "/api/repos/org/library/code-search", true),
+            (Method::GET, "/api/repos/org/library/properties", true),
+            (Method::PUT, "/api/repos/org/library/properties", false),
             (Method::GET, "/api/repos/org/library/issues", true),
             (
                 Method::GET,

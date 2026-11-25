@@ -1,6 +1,105 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread")]
+async fn required_properties_keep_a_default_and_public_reads_expose_only_effective_values() {
+    let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+    let h = Harness::new_with_store_and_prefix(false, false, store, "org-property-public").await;
+    h.initialize_directory().await;
+    let (organization, _, _) = crate::test_support::http::organizations::bootstrap(&h).await;
+    let alice = h.login().await;
+    let org = format!("/api/organizations/{organization}");
+    let schema = format!("{org}/repository-properties");
+    let (id, owner) = create(&h, &org, &alice, "library").await;
+    let property = Uuid::now_v7().to_string();
+    let mut definition = json!({
+        "id":property,"name":"regulated","description":"Organization definition",
+        "kind":"boolean","options":[],"required":true,"default":null,
+    });
+    assert_eq!(
+        h.write(
+            Method::PUT,
+            &schema,
+            &alice,
+            json!({"expected_version":0,"definitions":[definition]})
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    definition["default"] = json!(false);
+    h.write(
+        Method::PUT,
+        &schema,
+        &alice,
+        json!({"expected_version":0,"definitions":[definition]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    let properties = format!("/api/repos/{owner}/library/properties");
+    let get = async |path: &str| {
+        h.http
+            .get(format!("{}{path}", h.origin))
+            .send()
+            .await
+            .unwrap()
+    };
+    assert_eq!(get(&properties).await.status(), StatusCode::UNAUTHORIZED);
+    let visibility = format!("/api/repositories/{id}/visibility");
+    let change = async |version, value| {
+        h.write(
+            Method::PUT,
+            &visibility,
+            &alice,
+            json!({
+                "version":version,"value":value,"confirmation":format!("{owner}/library"),
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+    };
+    change(0, "public").await;
+    let public = |value| json!({"properties":[{"name":"regulated","value":value}]});
+    assert_eq!(
+        get(&properties)
+            .await
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap(),
+        public(false)
+    );
+    assert_eq!(get(&schema).await.status(), StatusCode::UNAUTHORIZED);
+    repository_write(
+        &h,
+        Method::PUT,
+        &properties,
+        &alice,
+        id,
+        json!({"expected_version":0,"schema_version":1,"overrides":{(property):true}}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        get(&properties)
+            .await
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap(),
+        public(true)
+    );
+    change(1, "private").await;
+    assert_eq!(get(&properties).await.status(), StatusCode::UNAUTHORIZED);
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn property_search_binds_continuations_to_values_and_visible_candidates() {
     let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
     let h = Harness::new_with_store_and_prefix(false, false, store, "org-property-search").await;

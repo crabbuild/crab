@@ -6,6 +6,12 @@ import { Failure } from "@/components/discussion/failure";
 import { useMutation } from "@/components/discussion/mutations";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
+import {
+  Field,
+  FieldContent,
+  FieldDescription,
+  FieldLabel,
+} from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 
@@ -26,6 +32,10 @@ interface PropertyView {
   values: { version: number; overrides: Record<string, PropertyValue> };
   editable: string[];
 }
+
+type PublicPropertyView = {
+  properties: { name: string; value: PropertyValue }[];
+};
 
 const kinds = {
   text: "Text",
@@ -111,6 +121,7 @@ function Definitions({
             <strong>{definition.name}</strong>
             <p className="text-sm text-muted-foreground">
               {kinds[definition.kind]}
+              {definition.required && " · Required"}
               {definition.values_editable_by === "repository" &&
                 " · Repository administrators can edit values"}
               {definition.description && ` · ${definition.description}`}
@@ -139,6 +150,7 @@ function Definitions({
               kind: "text",
               options: [],
               default: null,
+              required: false,
               values_editable_by: "organization",
             })
           }
@@ -152,6 +164,7 @@ function Definitions({
           className="grid gap-3 rounded-md border p-4"
           onSubmit={(event) => {
             event.preventDefault();
+            if (draft.required && draft.default === null) return;
             void save(
               existing
                 ? schema.definitions.map((item) =>
@@ -237,11 +250,29 @@ function Definitions({
               />
             </label>
           )}
+          <Field orientation="horizontal">
+            <Checkbox
+              id="require-repository-property"
+              checked={draft.required}
+              aria-describedby="require-repository-property-help"
+              onCheckedChange={(checked) =>
+                setDraft({ ...draft, required: checked === true })
+              }
+            />
+            <FieldContent>
+              <FieldLabel htmlFor="require-repository-property">
+                Require this property for all repositories
+              </FieldLabel>
+              <FieldDescription id="require-repository-property-help">
+                Repositories without an override inherit the default value.
+              </FieldDescription>
+            </FieldContent>
+          </Field>
           <PropertyInput
             label="Default value"
             definition={draft}
             value={draft.default}
-            unset="No default"
+            unset={draft.required ? "Choose a default value" : "No default"}
             onChange={(value) => setDraft({ ...draft, default: value })}
           />
           <label className="flex items-start gap-2">
@@ -265,7 +296,12 @@ function Definitions({
             </span>
           </label>
           <div className="flex flex-wrap gap-2">
-            <Button type="submit" disabled={mutation.pending}>
+            <Button
+              type="submit"
+              disabled={
+                mutation.pending || (draft.required && draft.default === null)
+              }
+            >
               Save property
             </Button>
             <Button
@@ -329,18 +365,36 @@ export function RepositoryProperties({
   csrf: string;
 }) {
   const path = endpoint(repo, "properties");
-  const request = useRequest<PropertyView>(path, repo.id);
+  const request = useRequest<PropertyView | PublicPropertyView>(path, repo.id);
   return (
     <Result state={request} timingLabel="Repository property values">
-      {(view) => (
-        <RepositoryValues
-          view={view}
-          repo={repo}
-          path={path}
-          csrf={csrf}
-          reload={request.retry}
-        />
-      )}
+      {(view) =>
+        "properties" in view ? (
+          view.properties.length ? (
+            <dl className="grid gap-3">
+              {view.properties.map(({ name, value }) => (
+                <div
+                  key={name}
+                  className="grid gap-1 rounded-md border p-3 wrap-anywhere"
+                >
+                  <dt className="font-medium">{name}</dt>
+                  <dd>{display(value)}</dd>
+                </div>
+              ))}
+            </dl>
+          ) : (
+            <p>No repository properties have values.</p>
+          )
+        ) : (
+          <RepositoryValues
+            view={view}
+            repo={repo}
+            path={path}
+            csrf={csrf}
+            reload={request.retry}
+          />
+        )
+      }
     </Result>
   );
 }
@@ -470,6 +524,9 @@ function RepositoryValues({
                         ? "Unset"
                         : `Default · ${display(definition.default)}`}
                   </dd>
+                  {definition.required && (
+                    <dd className="text-sm text-muted-foreground">Required</dd>
+                  )}
                   {writable.has(definition.id) &&
                     definition.values_editable_by === "repository" && (
                       <dd className="text-sm text-muted-foreground">

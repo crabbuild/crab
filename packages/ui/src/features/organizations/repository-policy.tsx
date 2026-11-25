@@ -17,6 +17,7 @@ import { useRequest } from "@/lib/api";
 type Policy = {
   version: number;
   member_creation: boolean;
+  member_creation_visibility: "private" | "public" | "any";
   member_transfer: boolean;
   member_deletion: boolean;
   private_forks: boolean;
@@ -70,6 +71,9 @@ function PolicyForm({
 }) {
   const [saved, setSaved] = useState(initial);
   const [creation, setCreation] = useState(initial.member_creation);
+  const [creationVisibility, setCreationVisibility] = useState(
+    initial.member_creation_visibility,
+  );
   const [transfer, setTransfer] = useState(initial.member_transfer);
   const [deletion, setDeletion] = useState(initial.member_deletion);
   const [privateForks, setPrivateForks] = useState(initial.private_forks);
@@ -82,6 +86,7 @@ function PolicyForm({
   const mutation = useMutation(csrf, null);
   const changed =
     creation !== saved.member_creation ||
+    creationVisibility !== saved.member_creation_visibility ||
     transfer !== saved.member_transfer ||
     deletion !== saved.member_deletion ||
     privateForks !== saved.private_forks ||
@@ -96,6 +101,7 @@ function PolicyForm({
         const result = await mutation.run<Policy>(path, "PUT", {
           version: saved.version,
           member_creation: creation,
+          member_creation_visibility: creationVisibility,
           member_transfer: transfer,
           member_deletion: deletion,
           private_forks: privateForks,
@@ -155,6 +161,38 @@ function PolicyForm({
             the organization requires an owner.
           </p>
         </Field>
+        {creation && (
+          <Field>
+            <FieldLabel htmlFor="organization-repo-creation-visibility">
+              Visibilities members can create
+            </FieldLabel>
+            <FieldSelect
+              id="organization-repo-creation-visibility"
+              label="Visibilities members can create"
+              aria-describedby="organization-creation-visibility-help"
+              value={creationVisibility}
+              options={{
+                private: "Private only",
+                public: "Public only",
+                any: "Public and private",
+              }}
+              disabled={mutation.pending}
+              onValueChange={(value) => {
+                if (
+                  value === "private" ||
+                  value === "public" ||
+                  value === "any"
+                ) {
+                  setCreationVisibility(value);
+                  setNotice(false);
+                }
+              }}
+            />
+            <FieldDescription id="organization-creation-visibility-help">
+              Organization owners can create public or private repositories.
+            </FieldDescription>
+          </Field>
+        )}
         <Field>
           <FieldLabel htmlFor="organization-repo-transfer">
             Who can transfer repositories

@@ -156,7 +156,7 @@ async fn decide(
 ) -> Result<Json<organization::Invitation>> {
     let actor = actor(&server, &principal).await?;
     let worker = Arc::clone(&server);
-    let result = super::membership_change(&server, id, move |cancel| async move {
+    let result = super::with_org_policy(&server, id, move |cancel| async move {
         super::membership_changes::decide_locked(
             &worker,
             id,

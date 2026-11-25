@@ -155,16 +155,19 @@ async fn private_fork_push_synchronizes_only_the_matching_upstream_pull() {
         .await;
     let upstream = catalog
         .reserve_git_import(
-            upstream_id,
             BrowserNamespace::Organization(organization),
-            "upstream".into(),
-            String::new(),
+            crate::catalog::GitImportReservation {
+                id: upstream_id,
+                name: "upstream".into(),
+                description: String::new(),
+                visibility: crate::catalog::visibility::Visibility::Private,
+                forked_from: None,
+            },
             MembershipActor {
                 issuer: h.provider.issuer.clone(),
                 subject: "alice-id".into(),
             },
             vec![],
-            None,
         )
         .await
         .unwrap();

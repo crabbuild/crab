@@ -786,14 +786,30 @@ creation. Existing catalog entries keep their previous ownership and grants.
 
 ### Repository visibility
 
-Managed repositories start private. In **Settings → General → Danger Zone**,
-an organization owner can make a repository public or private. Organization
-owners can let repository admins change visibility in **Member privileges**.
-Administrators can change visibility in a managed personal repository.
+The **New repository** dialog shows the visibility choices for its selected
+owner. Organization owners can create public or private repositories. When
+members can create repositories, **Settings → Member privileges** limits
+their choices to private only, public only, or both. **Import from Git** also
+offers private or public for organization and managed personal destinations.
 
-Public repositories appear in **Public repositories** and support signed-out
-code browsing, source archives, and HTTP Git clone and fetch. Visitors can
-also browse published issues, pull requests, conversations, attachments, and
+The creation options endpoint returns `visibilities`. Send `visibility` in
+the creation request. Omitting it selects private, subject to current policy.
+`member_creation_visibility` in the organization policy accepts `private`,
+`public`, or `any`. Organization creation checks policy under the same
+lease used for policy changes and binds the choice to the exact reservation.
+The catalog makes a new public repository visible when its Git and Cell setup
+are ready. A creation retry retains the original visibility choice and never
+overwrites a subsequent visibility change.
+
+In **Settings → General → Danger Zone**, an organization owner can make an
+existing repository public or private. Organization owners can let repository
+admins change visibility in **Member privileges**. Administrators can change
+visibility in a managed personal repository.
+
+Public repositories appear in **Public repositories** at `/-/public` and
+support signed-out code browsing, source archives, and HTTP Git clone and
+fetch. Visitors can also browse published issues, pull requests,
+conversations, attachments, and
 available same-repository pull request comparisons. Repository access is still
 required for writes, draft reviews, settings, checks, and Git LFS transport.
 Large files linked from published code can be downloaded through the browser.
@@ -985,8 +1001,8 @@ copied as well.
 
 | Endpoint | Contract |
 | --- | --- |
-| `POST /api/imports/git` | Starts an asynchronous import. The JSON body is `{request_id?, source, owner, name, description?, token?}`. `source` is an HTTPS or SSH clone URL (or GitHub `owner/repository` shorthand) whose host appears in `import.allowed_hosts`. HTTPS tokens are sent as bearer headers and remain in memory. Browser requests require the session CSRF token. An exact request UUID replay returns the existing job. |
-| `GET /api/imports/git/{id}` | Reads the caller's job from object storage on any serving replica. States are `queued`, `running`, `succeeded`, `failed`, and `interrupted`. The response includes `resumable` and includes the destination link after success. |
+| `POST /api/imports/git` | Starts an asynchronous import. The JSON body is `{request_id?, source, owner, name, description?, visibility?, token?}`. `visibility` is `private` (default) or `public`. `source` is an HTTPS or SSH clone URL (or GitHub `owner/repository` shorthand) whose host appears in `import.allowed_hosts`. HTTPS tokens are sent as bearer headers and remain in memory. Browser requests require the session CSRF token. An exact request UUID replay returns the existing job. |
+| `GET /api/imports/git/{id}` | Reads the caller's job from object storage on any serving replica. States are `queued`, `running`, `succeeded`, `failed`, and `interrupted`. The response includes the saved `visibility`, `resumable`, and the destination link after success. |
 | `POST /api/imports/git/{id}/resume` | Resumes a failed or interrupted job as the original account. Send the session CSRF token and a JSON body of `{}` or `{"token":"…"}` for a private HTTPS source. An active or completed job returns its existing status. |
 
 Organization owners use **Import from Git** in the organization's
@@ -997,6 +1013,12 @@ fields except `owner`, which is derived from the organization UUID. Its
 owners. One owner can share the import status link with another owner, who can
 resume the same job and repository. The imported repository grants Admin
 access through current organization ownership.
+
+Public imports require a managed personal namespace or an organization
+destination. An import request ID fixes visibility alongside the source and
+destination. Resuming preserves that choice and accepts a replacement source
+token. Public visibility takes effect in the catalog when the verified Git
+snapshot and Repository Cell are ready.
 
 Crab checks organization authority at reservation, during native Git
 publication, and at the decision to expose the repository. The final decision
@@ -1358,10 +1380,13 @@ multi-select fields. Select up to 50 repositories across search pages and
 choose **Edit properties**. The editor shows shared and mixed values. For
 each field you can keep existing values, set an override, or restore defaults.
 A default applies to repositories with no override, including new repositories.
+To require a property for all repositories, specify a default of the property's
+type. Repositories inherit that default until an override is set. Clearing the
+override restores inheritance.
 One save applies the entire selection. A stale selection prevents every write
 in the batch. Retry a lost response with the same submission to recover the
-original receipt. Repository readers can open
-**Repository properties** from the repository's **Rulesets** page.
+original receipt. Open the repository's **Properties** tab to view its effective
+values. Public repositories publish these values to signed-out visitors.
 Organization owners manage definitions and overrides. Enable **Allow repository
 administrators to set this property** on a definition to delegate its value
 to each repository's current administrators, including members of teams with an
@@ -1394,6 +1419,10 @@ versioned overrides. A repository `PUT` accepts `schema_version`,
 use `values_editable_by` with `organization` as the default and `repository` to
 allow repository administrators. A repository administrator's save must retain
 the current overrides for organization-managed properties.
+Required definitions use `required: true` and must have a valid `default`.
+Public-only readers receive `{properties:[{name,value}]}` with the effective
+values of set properties. The organization schema and editing controls require
+their respective signed-in access.
 Organization owners can use `GET /api/organizations/{id}/repository-properties/values?repositories={uuid},{uuid}`
 to capture the schema, repository IDs, ownership epochs, value versions, and
 effective values. A `PUT` to the same path takes a `request_id`, `issued_at_ms`,
@@ -1439,7 +1468,8 @@ page one. Later pages read live archive state for their candidates.
 ### Filter by visibility and sort repositories
 
 Choose **Visibility** to add `is:public` or `is:private`. **Sort repositories**
-uses `sort:name-asc`, `sort:name-desc`, `sort:created-asc`, or `sort:created-desc`.
+uses `sort:name-asc`, `sort:name-desc`, `sort:created-asc`, `sort:created-desc`,
+`sort:updated-asc`, or `sort:updated-desc`.
 Best match keeps the catalog's normal search order. Sorting runs on the server
 across all matching repositories. A continuation binds visibility and sort, so
 switching either starts at the first page.
@@ -1448,6 +1478,12 @@ Catalog registration records `created_at_ms` in the same write that reserves
 the repository. Retries and later renames, transfers, and restorations retain
 that date. Entries without a recorded date appear after dated repositories
 when sorting by creation. The catalog leaves those dates blank.
+
+Updated order uses `metadata_updated_at_ms`. This timestamp changes when
+repository name, owner, description, topics, visibility, or fork details
+change in the catalog. Repositories without a recorded edit sort by creation
+date when available. Entries without either date sort last. An update can
+invalidate an updated-order continuation and require restarting at page one.
 
 ### Grant ruleset bypass access
 

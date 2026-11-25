@@ -65,6 +65,8 @@ pub struct CatalogRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) created_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) metadata_updated_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) fork_owner: Option<MembershipActor>,
@@ -82,6 +84,9 @@ pub struct CatalogRecord {
     pub(crate) topics: topics::Topics,
     #[serde(default, skip_serializing_if = "forking::Forking::is_initial")]
     pub(crate) forking: forking::Forking,
+    // The immutable reservation intent survives later visibility changes.
+    #[serde(default, skip_serializing_if = "visibility::Visibility::is_private")]
+    pub(crate) creation_visibility: visibility::Visibility,
     #[serde(default, skip_serializing_if = "visibility::Setting::is_initial")]
     pub(crate) visibility: visibility::Setting,
     pub members: Vec<RepositoryMember>,
@@ -307,9 +312,7 @@ impl CatalogDocument {
         let mut prefixes = HashSet::new();
         for record in &self.repositories {
             if record.placement_generation == 0
-                || record
-                    .created_at_ms
-                    .is_some_and(|time| time > crate::app::MAX_NUMBER)
+                || !record.timestamps_valid()
                 || record.ownership_epoch > record.name_version()
                 || (record.visibility.value.is_public()
                     && record.application != RepositoryApplicationState::CellReady)
@@ -375,6 +378,14 @@ impl CatalogDocument {
 
 fn ownership_epoch_is_initial(epoch: &u32) -> bool {
     *epoch == 0
+}
+
+fn catalog_time_ms() -> Result<u64, CatalogError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| CatalogError::Invalid("system clock is before epoch"))?;
+    u64::try_from(now.as_millis())
+        .map_err(|_| CatalogError::Invalid("repository timestamp overflowed"))
 }
 
 fn valid_digest(value: &str) -> bool {
@@ -496,6 +507,19 @@ fn membership_digest(
 }
 
 impl CatalogRecord {
+    fn timestamps_valid(&self) -> bool {
+        self.created_at_ms
+            .is_none_or(|time| time <= crate::app::MAX_NUMBER)
+            && self.metadata_updated_at_ms.is_none_or(|time| {
+                time <= crate::app::MAX_NUMBER
+                    && self.created_at_ms.is_none_or(|created| time >= created)
+            })
+    }
+
+    fn record_metadata_update(&mut self, now_ms: u64) {
+        let previous = self.metadata_updated_at_ms.or(self.created_at_ms);
+        self.metadata_updated_at_ms = Some(now_ms.max(previous.unwrap_or_default()));
+    }
     pub fn organization_id(&self) -> Option<Uuid> {
         self.organization.as_ref().map(|access| access.id)
     }
@@ -590,6 +614,24 @@ enum InsertMode {
     Reserved(MembershipActor),
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BrowserCreation {
+    pub(crate) request_id: Uuid,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    #[serde(default)]
+    pub(crate) visibility: visibility::Visibility,
+}
+
+pub(crate) struct GitImportReservation {
+    pub(crate) id: Uuid,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) visibility: visibility::Visibility,
+    pub(crate) forked_from: Option<Uuid>,
+}
+
 impl CatalogStore {
     pub(crate) fn new(root: StorageRoot) -> Self {
         let path = root.path(CATALOG_RELATIVE_PATH);
@@ -628,6 +670,7 @@ impl CatalogStore {
             id: Uuid::now_v7(),
             owner,
             created_at_ms: None,
+            metadata_updated_at_ms: None,
             organization: None,
             forked_from: None,
             fork_owner: None,
@@ -640,6 +683,7 @@ impl CatalogStore {
             description_edit: None,
             topics: topics::Topics::default(),
             forking: forking::Forking::default(),
+            creation_visibility: visibility::Visibility::Private,
             visibility: visibility::Setting::default(),
             members,
             groups: Vec::new(),
@@ -655,9 +699,7 @@ impl CatalogStore {
     pub(crate) async fn reserve_browser_repository(
         &self,
         namespace: BrowserNamespace,
-        name: String,
-        description: String,
-        request: Uuid,
+        input: BrowserCreation,
         actor: MembershipActor,
         members: Vec<RepositoryMember>,
     ) -> Result<CatalogRecord, CatalogError> {
@@ -674,7 +716,7 @@ impl CatalogStore {
         let (owner, organization) = namespace.catalog_owner(&[])?;
         let mut hash = blake3::Hasher::new_derive_key("crab browser repository creation v1");
         hash.update(owner.as_bytes());
-        hash.update(request.as_bytes());
+        hash.update(input.request_id.as_bytes());
         let mut id = [0; 16];
         id.copy_from_slice(&hash.finalize().as_bytes()[..16]);
         let id = uuid::Builder::from_custom_bytes(id).into_uuid();
@@ -683,18 +725,20 @@ impl CatalogStore {
                 id,
                 owner,
                 created_at_ms: None,
+                metadata_updated_at_ms: None,
                 organization,
                 forked_from: None,
                 fork_owner: None,
-                name,
+                name: input.name,
                 prefix: format!("browser-repositories/{id}"),
                 placement_generation: 1,
                 ownership_epoch: 0,
                 application: RepositoryApplicationState::EmptyCellPending,
-                description,
+                description: input.description,
                 description_edit: None,
                 topics: topics::Topics::default(),
                 forking: forking::Forking::default(),
+                creation_visibility: input.visibility,
                 visibility: visibility::Setting::default(),
                 members,
                 groups: Vec::new(),
@@ -709,14 +753,21 @@ impl CatalogStore {
 
     pub(crate) async fn reserve_git_import(
         &self,
-        id: Uuid,
         namespace: BrowserNamespace,
-        name: String,
-        description: String,
+        input: GitImportReservation,
         actor: MembershipActor,
         members: Vec<RepositoryMember>,
-        forked_from: Option<Uuid>,
     ) -> Result<CatalogRecord, CatalogError> {
+        let GitImportReservation {
+            id,
+            name,
+            description,
+            visibility,
+            forked_from,
+        } = input;
+        if visibility.is_public() && forked_from.is_some() {
+            return Err(CatalogError::Invalid("Managed forks must start private"));
+        }
         let fork_owner = match &namespace {
             BrowserNamespace::PersonalFork { owner, .. }
                 if forked_from.is_some() && owner == &actor =>
@@ -734,6 +785,7 @@ impl CatalogStore {
                 id,
                 owner,
                 created_at_ms: None,
+                metadata_updated_at_ms: None,
                 organization,
                 forked_from,
                 fork_owner,
@@ -746,6 +798,7 @@ impl CatalogStore {
                 description_edit: None,
                 topics: topics::Topics::default(),
                 forking: forking::Forking::default(),
+                creation_visibility: visibility,
                 visibility: visibility::Setting::default(),
                 members,
                 groups: Vec::new(),
@@ -795,6 +848,7 @@ impl CatalogStore {
             id: Uuid::now_v7(),
             owner,
             created_at_ms: None,
+            metadata_updated_at_ms: None,
             organization: None,
             forked_from: None,
             fork_owner: None,
@@ -807,6 +861,7 @@ impl CatalogStore {
             description_edit: None,
             topics: topics::Topics::default(),
             forking: forking::Forking::default(),
+            creation_visibility: visibility::Visibility::Private,
             visibility: visibility::Setting::default(),
             members,
             groups: Vec::new(),
@@ -1161,6 +1216,12 @@ impl CatalogStore {
                 return Err(CatalogError::Conflict);
             }
             record.application = RepositoryApplicationState::CellReady;
+            if record.creation_visibility.is_public() {
+                record.visibility = visibility::Setting {
+                    version: 1,
+                    value: record.creation_visibility,
+                };
+            }
             let updated = record.clone();
             document.version = document
                 .version
@@ -1201,6 +1262,7 @@ impl CatalogStore {
                                 && existing.owner == record.owner
                                 && existing.name == record.name
                                 && existing.description == record.description
+                                && existing.creation_visibility == record.creation_visibility
                         }
                     };
                 return if same {
@@ -1238,13 +1300,8 @@ impl CatalogStore {
                 .version
                 .checked_add(1)
                 .ok_or(CatalogError::Invalid("catalog version overflowed"))?;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| CatalogError::Invalid("system clock is before epoch"))?;
-            record.created_at_ms = Some(
-                u64::try_from(now.as_millis())
-                    .map_err(|_| CatalogError::Invalid("repository timestamp overflowed"))?,
-            );
+            let now_ms = catalog_time_ms()?;
+            record.created_at_ms = Some(now_ms);
             document.release_alias(&record.owner, &record.name);
             document.repositories.push(record.clone());
             document.normalize();
@@ -1263,7 +1320,7 @@ impl CatalogStore {
                     previous_members_digest: membership_digest(&[], &[], None)?,
                     new_members_digest: record.membership_digest()?,
                     repository_version: document.version,
-                    occurred_at: now.as_secs(),
+                    occurred_at: now_ms / 1_000,
                     previous: document.membership_audit_head.clone(),
                     organizations: audit::Scope::for_record(&record, audit::Action::Registered)
                         .into_iter()

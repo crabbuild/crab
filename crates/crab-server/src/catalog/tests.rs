@@ -606,16 +606,19 @@ async fn import_reservation_rejects_an_existing_repository() {
         .unwrap();
     let result = catalog
         .reserve_git_import(
-            Uuid::now_v7(),
             BrowserNamespace::Personal("team".into()),
-            "project".into(),
-            String::new(),
+            GitImportReservation {
+                id: Uuid::now_v7(),
+                name: "project".into(),
+                description: String::new(),
+                visibility: visibility::Visibility::Private,
+                forked_from: None,
+            },
             MembershipActor {
                 issuer: "issuer".into(),
                 subject: "author".into(),
             },
             vec![],
-            None,
         )
         .await;
     assert!(matches!(result, Err(CatalogError::Conflict)));

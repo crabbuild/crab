@@ -10,6 +10,123 @@ mod personal_forks;
 mod sync;
 
 #[tokio::test(flavor = "multi_thread")]
+async fn repository_creation_visibility_restricts_members_and_binds_the_reservation() {
+    let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+    let h = Harness::new_with_store_and_prefix(false, false, store, "creation-visibility").await;
+    h.initialize_directory().await;
+    let (organization, _, bob_actor) =
+        crate::test_support::http::organizations::bootstrap(&h).await;
+    let alice = h.login().await;
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    let root = format!("/api/organizations/{organization}");
+    h.write(
+        Method::PUT,
+        &format!("{root}/invitations/{bob_actor}"),
+        &alice,
+        json!({"version":0,"role":"member"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.write(
+        Method::POST,
+        &format!("{root}/invitation"),
+        &bob,
+        json!({"version":1,"accept":true}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    let set_policy = async |version, visibility: &str| {
+        h.write(
+            Method::PUT,
+            &format!("{root}/repository-policy"),
+            &alice,
+            json!({"version":version,"member_creation":true,"member_creation_visibility":visibility,"baseline":null}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    };
+    set_policy(0, "public").await;
+    let creation = format!("{root}/repositories/creation");
+    assert_eq!(
+        h.json(&creation, &bob).await["visibilities"],
+        json!(["public"])
+    );
+    assert_eq!(
+        h.json(&creation, &alice).await["visibilities"],
+        json!(["private", "public"])
+    );
+
+    let request_id = Uuid::now_v7();
+    let member_input = |visibility| {
+        json!({
+            "request_id":request_id,"name":"open-library","description":"","visibility":visibility,
+        })
+    };
+    assert_eq!(
+        h.write(Method::POST, &creation, &bob, member_input("private"))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let public = h
+        .write(Method::POST, &creation, &bob, member_input("public"))
+        .await
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    h.write(
+        Method::POST,
+        &creation,
+        &alice,
+        json!({"request_id":Uuid::now_v7(),"name":"closed-library","description":"","visibility":"private"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    let list = h
+        .http
+        .get(format!("{}/api/repos?public=true", h.origin))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    let repositories = list["repositories"].as_array().unwrap();
+    assert_eq!(repositories.len(), 1);
+    assert_eq!(repositories[0]["id"], public["id"]);
+
+    set_policy(1, "any").await;
+    assert_eq!(
+        h.write(Method::POST, &creation, &bob, member_input("private"))
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        h.write(Method::POST, &creation, &bob, member_input("public"))
+            .await
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap(),
+        public
+    );
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn repository_policy_controls_creation_and_current_baseline_access() {
     let h = Harness::new(false).await;
     let (organization, _, bob_actor) =
@@ -707,6 +824,7 @@ async fn organization_creation_retries_keep_the_branch_authorized_for_that_reque
                 request_id,
                 name: "old-branch".into(),
                 description: String::new(),
+                visibility: crate::catalog::visibility::Visibility::Private,
             },
         )
         .await
@@ -818,6 +936,7 @@ async fn organization_repository_ownership_survives_creator_revocation_without_a
                 request_id,
                 name: "widget".into(),
                 description: "Organization owned".into(),
+                visibility: crate::catalog::visibility::Visibility::Private,
             },
         )
         .await
@@ -832,9 +951,12 @@ async fn organization_repository_ownership_survives_creator_revocation_without_a
     let pending = catalog
         .reserve_browser_repository(
             BrowserNamespace::Organization(id),
-            "widget".into(),
-            "Organization owned".into(),
-            request_id,
+            crate::catalog::BrowserCreation {
+                request_id,
+                name: "widget".into(),
+                description: "Organization owned".into(),
+                visibility: crate::catalog::visibility::Visibility::Private,
+            },
             qualified,
             vec![],
         )

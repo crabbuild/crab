@@ -18,6 +18,84 @@ async fn get(h: &Harness, cookie: &str, path: &str) -> reqwest::Response {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn repository_update_order_uses_committed_metadata_and_invalidates_the_cursor() {
+    let store =
+        crab_storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
+    let h =
+        Harness::new_with_store_and_prefix(false, false, store, "repository-update-order").await;
+    h.initialize_directory().await;
+    let (organization, _, _) = crate::test_support::http::organizations::bootstrap(&h).await;
+    let alice = h.login().await;
+    let creation = format!("/api/organizations/{organization}/repositories/creation");
+    let create = async |name| {
+        h.write(
+            Method::POST,
+            &creation,
+            &alice,
+            json!({"request_id":Uuid::now_v7(),"name":name,"description":""}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let older = create("alpha").await;
+    tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+    let newer = create("zulu").await;
+    let listing = format!("/api/repos?organization={organization}&limit=1&q=sort%3Aupdated");
+    let descending = format!("{listing}-desc");
+    let first = h.json(&descending, &alice).await;
+    let cursor = first["next"].as_str().unwrap();
+    assert_eq!(first["repositories"][0]["id"], newer);
+    assert_eq!(
+        h.json(&format!("{listing}-asc"), &alice).await["repositories"][0]["id"],
+        older
+    );
+    let edit = async |id: &str| {
+        h.write(
+            Method::PUT,
+            &format!("/api/repositories/{id}/description"),
+            &alice,
+            json!({"version":0,"description":"Revised description"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+    edit(&newer).await;
+    assert_eq!(
+        get(&h, &alice, &format!("{descending}&after={cursor}"))
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        h.json(&descending, &alice).await["repositories"][0]["id"],
+        newer
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+    edit(&older).await;
+    let result = h.json(&descending, &alice).await;
+    let row = &result["repositories"][0];
+    assert_eq!(row["id"], older);
+    assert!(
+        row["metadata_updated_at_ms"].as_u64().unwrap() > row["created_at_ms"].as_u64().unwrap()
+    );
+    assert_eq!(
+        h.json(&format!("{listing}-asc"), &alice).await["repositories"][0]["id"],
+        newer
+    );
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn organization_visibility_and_order_apply_across_repository_pages() {
     let store =
         crab_storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
@@ -227,7 +305,7 @@ async fn personal_repository_browse_uses_stable_ownership_and_current_viewer_acc
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires agent-browser and the built embedded UI; uses isolated real OIDC/native Cells"]
-async fn native_browser_creates_in_personal_scope_and_opens_the_profile_repository() {
+async fn native_browser_creates_a_public_personal_repository() {
     let h = Harness::new(false).await;
     h.server
         .catalog()
@@ -285,6 +363,11 @@ async fn native_browser_creates_in_personal_scope_and_opens_the_profile_reposito
         .await;
     browser
         .run(&[
+            "find", "role", "radio", "click", "--name", "Public", "--exact",
+        ])
+        .await;
+    browser
+        .run(&[
             "find",
             "role",
             "button",
@@ -299,6 +382,7 @@ async fn native_browser_creates_in_personal_scope_and_opens_the_profile_reposito
         .await;
     let personal = h.json("/api/repos/personal", &alice).await;
     assert_eq!(personal["repositories"][0]["name"], "alice-notes");
+    assert_eq!(personal["repositories"][0]["visibility"], "public");
 
     browser.run(&["open", &profile_url]).await;
     browser
@@ -313,9 +397,15 @@ async fn native_browser_creates_in_personal_scope_and_opens_the_profile_reposito
             "nav[aria-label='User profile'] a[href$='/repositories']",
         ])
         .await;
-    browser
-        .run(&["wait", "--fn", "document.querySelector('ul[aria-label=\"Repository results\"]')?.textContent.trim() === 'alice-notes'"])
+    let repository = "ul[aria-label='Repository results'] a[href$='/alice-notes']";
+    browser.run(&["wait", repository]).await;
+
+    let visitor = Browser::new("visitor");
+    visitor
+        .run(&["open", &format!("{}/-/public", h.origin)])
         .await;
+    visitor.run(&["wait", repository]).await;
+    drop(visitor);
     drop(browser);
     h.close().await;
 }

@@ -3,7 +3,7 @@ import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { Button } from "@/components/ui/button";
 import { FieldSelect } from "@/components/ui/field-select";
-import { Field, FieldLabel } from "@/components/ui/field";
+import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import {
@@ -23,6 +23,7 @@ import {
   useRequest,
   type GitImportJob,
   type Repository,
+  type RepositoryVisibility,
 } from "@/lib/api";
 import { parseGitRepository } from "./source";
 import { Link } from "@/components/navigation/link";
@@ -31,6 +32,8 @@ interface ImportedRepository {
   owner: string;
   name: string;
 }
+
+const visibilityLabels = { private: "Private", public: "Public" } as const;
 
 export function GitImport({
   account,
@@ -84,9 +87,10 @@ export function GitImport({
   const jobOrganization =
     fork && forkDestination === "personal" ? undefined : organizationId;
   const [open, setOpen] = useState(!!jobId);
-  const personalDestination = useRequest<{ owner: string }>(
-    personal && open ? "/api/repos/creation" : null,
-  );
+  const personalDestination = useRequest<{
+    owner: string;
+    visibilities: RepositoryVisibility[];
+  }>(personal && open ? "/api/repos/creation" : null);
   const [source, setSource] = useState("");
   const [owner, setOwner] = useState(defaultOwner);
   const defaultName = fork
@@ -96,11 +100,17 @@ export function GitImport({
     : "";
   const [name, setName] = useState(defaultName);
   const [description, setDescription] = useState("");
+  const [visibility, setVisibility] = useState<RepositoryVisibility>("private");
   const [token, setToken] = useState("");
   const [nameEdited, setNameEdited] = useState(false);
   const [job, setJob] = useState<GitImportJob>();
   const forkJob = Boolean(fork || job?.fork_source);
   const operation = forkJob ? "fork" : "import";
+  const visibilities: RepositoryVisibility[] = job
+    ? [job.visibility]
+    : organization
+      ? ["private", "public"]
+      : (personalDestination.data?.visibilities ?? ["private"]);
   const [error, setError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
   const [statusCheck, setStatusCheck] = useState(0);
@@ -182,6 +192,7 @@ export function GitImport({
     setOwner(defaultOwner);
     setName(defaultName);
     setDescription("");
+    setVisibility("private");
     setToken("");
     setNameEdited(false);
     setJob(undefined);
@@ -238,6 +249,7 @@ export function GitImport({
       owner: organizationId ? undefined : destination,
       name: repositoryName.trim(),
       description: description.trim() || undefined,
+      visibility,
     };
     const intent = JSON.stringify([fields, fork ? forkDestination : null]);
     const request_id =
@@ -424,6 +436,32 @@ export function GitImport({
                 disabled={running || submitting}
               />
             </label>
+          )}
+          {!forkJob && (
+            <Field>
+              <FieldLabel htmlFor="git-import-visibility">
+                Visibility
+              </FieldLabel>
+              <FieldSelect
+                id="git-import-visibility"
+                label="Visibility"
+                aria-describedby="git-import-visibility-help"
+                value={job?.visibility ?? visibility}
+                disabled={fixedDestination || !!jobId}
+                options={visibilities.map((value) => ({
+                  value,
+                  label: visibilityLabels[value],
+                }))}
+                onValueChange={(value) => {
+                  setVisibility(value === "public" ? "public" : "private");
+                }}
+              />
+              <FieldDescription id="git-import-visibility-help">
+                {(job?.visibility ?? visibility) === "public"
+                  ? "Anyone can view the imported code and commit history once setup finishes."
+                  : "Only people with access can view the imported repository."}
+              </FieldDescription>
+            </Field>
           )}
           {!forkJob && !job && (
             <label className="git-import-description">
