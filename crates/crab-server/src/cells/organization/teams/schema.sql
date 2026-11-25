@@ -14,6 +14,7 @@ CREATE TABLE organization_teams (
     name_key TEXT NOT NULL,
     description TEXT NOT NULL,
     visibility TEXT NOT NULL CHECK(visibility IN ('closed','secret')),
+    parent BLOB REFERENCES organization_teams(id) CHECK(parent IS NULL OR (parent<>id AND visibility='closed')),
     version INTEGER NOT NULL CHECK(version BETWEEN 1 AND 9007199254740991),
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms>=0),
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms>=created_at_ms),
@@ -21,6 +22,7 @@ CREATE TABLE organization_teams (
 ) STRICT, WITHOUT ROWID;
 CREATE UNIQUE INDEX organization_team_names ON organization_teams(name_key) WHERE deleted_at_ms IS NULL;
 CREATE INDEX organization_live_teams ON organization_teams(deleted_at_ms,id);
+CREATE INDEX organization_team_children ON organization_teams(parent,id) WHERE deleted_at_ms IS NULL;
 CREATE TABLE organization_team_members (
     team BLOB NOT NULL REFERENCES organization_teams(id),
     actor BLOB NOT NULL REFERENCES organization_members(actor),
@@ -30,6 +32,17 @@ CREATE TABLE organization_team_members (
     PRIMARY KEY(team,actor)
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX organization_actor_teams ON organization_team_members(actor,team);
+CREATE TABLE organization_team_hierarchy_requests (
+    id BLOB PRIMARY KEY CHECK(length(id)=16),
+    child BLOB NOT NULL REFERENCES organization_teams(id),
+    parent BLOB NOT NULL REFERENCES organization_teams(id) CHECK(parent<>child),
+    child_version INTEGER NOT NULL CHECK(child_version BETWEEN 1 AND 9007199254740991),
+    requester BLOB NOT NULL REFERENCES organization_members(actor),
+    requester_epoch INTEGER NOT NULL CHECK(requester_epoch BETWEEN 1 AND 9007199254740991),
+    side TEXT NOT NULL CHECK(side IN ('child','parent')),
+    UNIQUE(child,parent,side)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX organization_hierarchy_request_parent ON organization_team_hierarchy_requests(parent);
 CREATE TABLE organization_team_submissions (
     request_id BLOB PRIMARY KEY CHECK(length(request_id)=16),
     actor BLOB NOT NULL CHECK(length(actor)=16),

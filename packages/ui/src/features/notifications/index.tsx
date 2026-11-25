@@ -38,6 +38,7 @@ import {
 } from "./actions";
 import { EmailNotifications } from "./email";
 import { IncomingTransfers, transfersHref } from "./incoming-transfers";
+import { IncomingTeamRequests, teamRequestsHref } from "./team-requests";
 import {
   OrganizationDirectory,
   organizationInvitationsHref,
@@ -129,7 +130,8 @@ export function Notifications({
   const tab = url.searchParams.get("tab");
   const transfers = tab === "transfers";
   const invitations = tab === "organization-invitations";
-  const discussions = !transfers && !invitations;
+  const teamRequests = tab === "team-requests";
+  const discussions = !transfers && !invitations && !teamRequests;
   const criteria = criteriaAt(url);
   const { view, repository, kind, organization, author } = criteria;
   return (
@@ -172,6 +174,14 @@ export function Notifications({
               Organization invitations
             </Link>
           </Button>
+          <Button asChild variant={teamRequests ? "secondary" : "ghost"}>
+            <Link
+              href={teamRequestsHref()}
+              aria-current={teamRequests ? "page" : undefined}
+            >
+              Team requests
+            </Link>
+          </Button>
         </nav>
       </div>
       <div className="flex flex-wrap gap-2">
@@ -195,6 +205,9 @@ export function Notifications({
         <IncomingTransfers before={url.searchParams.get("before")} />
       )}
       {invitations && <OrganizationDirectory invitations />}
+      {teamRequests && (
+        <IncomingTeamRequests after={url.searchParams.get("after")} />
+      )}
       {discussions && view === "done" && (
         <p className="text-sm text-muted-foreground">
           Done shows the last 90 days. Bookmarks remain in Saved until you

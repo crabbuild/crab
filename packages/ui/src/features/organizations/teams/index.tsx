@@ -10,6 +10,11 @@ import { FieldSelect } from "@/components/ui/field-select";
 import { TeamFields } from "./form";
 import { TeamPages } from "./members";
 import { TeamDetail } from "./team";
+import {
+  HierarchyPicker,
+  HierarchyRequests,
+  type TeamChoice,
+} from "./hierarchy";
 import { useTeamRead } from "./read";
 import type { TeamListing, TeamPolicy } from "@/lib/contracts";
 import { teamHref, type Draft } from "./model";
@@ -54,6 +59,13 @@ export function Teams({
       owner={owner}
       commands={commands}
     />
+  ) : url.searchParams.get("view") === "requests" ? (
+    <HierarchyRequests
+      organization={id}
+      actor={actor}
+      request={url.searchParams.get("request")}
+      commands={commands}
+    />
   ) : (
     <TeamList id={id} actor={actor} owner={owner} commands={commands} />
   );
@@ -73,6 +85,7 @@ function TeamList({
   const [search, setSearch] = useState("");
   const [after, setAfter] = useState<string>();
   const [creating, setCreating] = useState(false);
+  const [parent, setParent] = useState<TeamChoice | null>(null);
   const [draft, setDraft] = useState<Draft>({
     name: "",
     description: "",
@@ -95,6 +108,11 @@ function TeamList({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-lg font-semibold">Organization teams</h2>
         <div className="flex flex-wrap items-center gap-2">
+          <Button asChild variant="outline">
+            <Link href={teamHref(id, undefined, "requests")}>
+              Team requests
+            </Link>
+          </Button>
           <Button variant="outline" onClick={refresh}>
             Refresh teams
           </Button>
@@ -159,12 +177,19 @@ function TeamList({
               .submit(
                 id,
                 actor,
-                { kind: "create", name, description, visibility },
+                {
+                  kind: "create",
+                  name,
+                  description,
+                  visibility,
+                  parent: visibility === "closed" ? parent?.id : undefined,
+                },
                 "Create team",
               )
               .then((value) => {
                 if (value?.outcome === "applied") {
                   setCreating(false);
+                  setParent(null);
                   setDraft({
                     name: "",
                     description: "",
@@ -181,6 +206,15 @@ function TeamList({
             onChange={setDraft}
             disabled={commands.locked}
           />
+          {draft.visibility === "closed" && (
+            <HierarchyPicker
+              organization={id}
+              value={parent}
+              generation={commands.generation}
+              disabled={commands.locked}
+              onChange={setParent}
+            />
+          )}
           <Button
             className="w-fit"
             type="submit"
@@ -230,7 +264,9 @@ function TeamList({
                         )}
                         <p className="mt-2 text-sm text-muted-foreground">
                           {item.members.toLocaleString()}{" "}
-                          {item.members === 1 ? "member" : "members"}
+                          {item.members === 1
+                            ? "direct member"
+                            : "direct members"}
                           {item.role
                             ? ` · ${item.role === "maintainer" ? "Maintainer" : "Member"}`
                             : ""}

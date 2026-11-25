@@ -7,6 +7,7 @@ import {
 import type {
   ReviewRoutingSettings,
   TeamMember,
+  TeamHierarchyRequest,
   TeamPolicy,
   TeamSubmission,
   TeamView,
@@ -15,6 +16,167 @@ const id = "01900000-0000-7000-8000-000000000010";
 const alice = "01900000-0000-7000-8000-000000000011";
 const bob = "01900000-0000-7000-8000-000000000012";
 const root = `/-/organizations/${id}`;
+
+test("owners can review and change a parent team and browse inherited grants", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  const parent = "01900000-0000-7000-8000-000000000016";
+  const child = "01900000-0000-7000-8000-000000000017";
+  const other = "01900000-0000-7000-8000-000000000018";
+  for (const [id, name, parentId] of [
+    [parent, "Engineering", undefined],
+    [child, "Infrastructure", parent],
+    [other, "Support", undefined],
+  ] as const) {
+    state.teams.push({
+      team: {
+        id,
+        name,
+        parent: parentId,
+        description: "",
+        visibility: "closed",
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        version: 1,
+      },
+      role: "maintainer",
+      can_manage: true,
+    });
+    state.members.set(id, []);
+  }
+  await page.setViewportSize({ width: 390, height: 850 });
+  await page.goto(`${root}?tab=teams&team=${parent}&view=children`);
+  await page.getByRole("link", { name: "Infrastructure" }).click();
+  await expect(page.getByRole("link", { name: "Engineering" })).toBeVisible();
+  const teamNav = page.getByRole("navigation", { name: "Team", exact: true });
+  await teamNav.getByRole("link", { name: "Repositories" }).click();
+  await expect(page.getByText("Write · Inherited")).toBeVisible();
+  await teamNav.getByRole("link", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Parent team", exact: true }).click();
+  await page
+    .getByRole("searchbox", { name: "Search parent teams" })
+    .fill("support");
+  await page.getByRole("button", { name: "Support" }).click();
+  await page.getByRole("button", { name: "Review parent change" }).click();
+  await expect(
+    page.getByRole("dialog", { name: "Change parent team" }),
+  ).toContainText("inherit repository roles from Support");
+  expect(state.writes).toHaveLength(0);
+  await page.getByRole("button", { name: "Confirm parent change" }).click();
+  await expect(page.getByRole("link", { name: "Support" })).toBeVisible();
+  expect(state.writes[0].body.command).toEqual({
+    kind: "reparent",
+    team: child,
+    version: 1,
+    parent: other,
+  });
+
+  await page.getByRole("link", { name: "All teams" }).click();
+  await page.getByRole("button", { name: "New team" }).click();
+  await page.getByRole("textbox", { name: "Team name" }).fill("DNS");
+  await chooseSelectOption(
+    page.getByRole("combobox", { name: "Team visibility" }),
+    "closed",
+  );
+  await page.getByRole("button", { name: "Parent team", exact: true }).click();
+  await page.getByRole("button", { name: "Infrastructure" }).click();
+  await page.getByRole("button", { name: "Create team", exact: true }).click();
+  await page.getByRole("link", { name: "DNS", exact: true }).click();
+  await expect(
+    page.getByRole("link", { name: "Infrastructure" }),
+  ).toBeVisible();
+  expect(state.writes[1].body.command).toMatchObject({
+    kind: "create",
+    name: "DNS",
+    parent: child,
+  });
+});
+
+test("team maintainers send and review hierarchy requests from separate accounts", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  const parent = "01900000-0000-7000-8000-000000000020";
+  const child = "01900000-0000-7000-8000-000000000021";
+  for (const [id, name] of [
+    [parent, "Engineering"],
+    [child, "Infrastructure"],
+  ]) {
+    state.teams.push({
+      team: {
+        id,
+        name,
+        version: 1,
+        visibility: "closed",
+        description: "",
+        created_at_ms: 1,
+        updated_at_ms: 1,
+      },
+      role: "maintainer",
+      can_manage: true,
+    });
+    state.members.set(id, []);
+  }
+  state.bobTeams.add(child);
+  state.account = "bob";
+  await page.setViewportSize({ width: 390, height: 850 });
+  await page.goto(`${root}?tab=teams&team=${child}&view=settings`);
+  await page.getByRole("button", { name: "Parent team", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Engineering Approval required" })
+    .click();
+  await page.getByRole("button", { name: "Review parent change" }).click();
+  await expect(
+    page.getByRole("dialog", { name: "Change parent team request" }),
+  ).toContainText("A parent team maintainer must approve");
+  await page.getByRole("button", { name: "Send request" }).click();
+  await page.getByRole("link", { name: "View team requests" }).click();
+  await expect(page.getByText("Awaiting approval")).toBeVisible();
+  expect(
+    state.teams.find(({ team }) => team.id === child)?.team.parent,
+  ).toBeUndefined();
+
+  state.account = "alice";
+  await page.goto("/-/notifications");
+  const teamRequests = page.getByRole("link", {
+    name: "Team requests",
+    exact: true,
+  });
+  await teamRequests.click();
+  await expect(teamRequests).toHaveAttribute("aria-current", "page");
+  await expect(
+    page.getByText("Infrastructure under Engineering"),
+  ).toBeVisible();
+  await page
+    .getByRole("link", {
+      name: "Review request for Infrastructure in Crab engineering",
+    })
+    .click();
+  await expect(page).toHaveURL(
+    new RegExp(`request=${state.writes[0].body.request_id}$`),
+  );
+  await page.getByRole("button", { name: "Approve", exact: true }).click();
+  await expect(
+    page.getByText("This team request is no longer pending."),
+  ).toBeVisible();
+  expect(state.teams.find(({ team }) => team.id === child)?.team.parent).toBe(
+    parent,
+  );
+  expect(state.writes.map(({ body }) => body.command.kind)).toEqual([
+    "propose_hierarchy",
+    "decide_hierarchy",
+  ]);
+  expect(state.writes[1].body.command).toEqual({
+    kind: "decide_hierarchy",
+    team: child,
+    request: state.writes[0].body.request_id,
+    decision: "approve",
+  });
+  await page.goto("/-/notifications?tab=team-requests");
+  await expect(page.getByText("No incoming team requests.")).toBeVisible();
+});
+
 async function fixture(page: Page, local = false) {
   const state: {
     teams: TeamView[];
@@ -29,6 +191,8 @@ async function fixture(page: Page, local = false) {
     revoked: boolean;
     conflict: boolean;
     account: string;
+    bobTeams: Set<string>;
+    hierarchy: (TeamHierarchyRequest & { sender: string })[];
   } = {
     teams: [],
     syncEnabled: false,
@@ -42,6 +206,8 @@ async function fixture(page: Page, local = false) {
     revoked: false,
     conflict: false,
     account: "alice",
+    bobTeams: new Set(),
+    hierarchy: [],
   };
   const receipts = new Map<
     string,
@@ -52,6 +218,22 @@ async function fixture(page: Page, local = false) {
     name: actor === alice ? "Alice" : "Bob",
     handle: actor === alice ? "alice" : "bob",
   });
+  const isBob = () => state.bobTeams.size > 0 && state.account === "bob";
+  const currentView = (view: TeamView): TeamView =>
+    isBob()
+      ? {
+          ...view,
+          can_manage: state.bobTeams.has(view.team.id),
+          role: state.bobTeams.has(view.team.id) ? "maintainer" : null,
+        }
+      : view;
+  const visibleRequests = () =>
+    state.hierarchy.map(({ sender, ...request }) => ({
+      ...request,
+      can_review: sender !== state.account,
+      can_approve: sender !== state.account,
+      can_withdraw: sender === state.account,
+    }));
   await page.route("**/api/**", async (route) => {
     const request = route.request(),
       url = new URL(request.url()),
@@ -74,6 +256,22 @@ async function fixture(page: Page, local = false) {
       });
     if (path === "/api/repos")
       return route.fulfill({ json: { repositories: [] } });
+    if (path === "/api/notifications/unread")
+      return route.fulfill({ json: { unread: false } });
+    if (path === "/api/notifications")
+      return route.fulfill({ json: { items: [], next: null } });
+    if (path === "/api/notifications/team-requests") {
+      if (state.revoked)
+        return route.fulfill({ json: { items: [], next: null } });
+      const items = visibleRequests()
+        .filter((request) => request.can_review)
+        .map((request) => ({
+          organization: id,
+          organization_name: "Crab engineering",
+          request,
+        }));
+      return route.fulfill({ json: { items, next: null } });
+    }
     if (path === base) {
       if (state.revoked)
         return route.fulfill({
@@ -90,8 +288,8 @@ async function fixture(page: Page, local = false) {
             created_at_ms: 1,
             updated_at_ms: 1,
           },
-          actor: alice,
-          role: "owner",
+          actor: isBob() ? bob : alice,
+          role: isBob() ? "member" : "owner",
         },
       });
     }
@@ -154,6 +352,7 @@ async function fixture(page: Page, local = false) {
               name: command.name,
               description: command.description,
               visibility: command.visibility,
+              parent: command.parent,
               version: 1,
               created_at_ms: 1,
               updated_at_ms: 1,
@@ -176,6 +375,43 @@ async function fixture(page: Page, local = false) {
             ...command,
             version: current.team.version + 1,
           };
+        } else if (command.kind === "reparent") {
+          const current = state.teams.find((view) => view.team.id === target)!;
+          current.team.parent = command.parent ?? undefined;
+          current.team.version += 1;
+        } else if (command.kind === "propose_hierarchy") {
+          const child = state.teams.find(
+            (view) => view.team.id === command.team,
+          )!.team;
+          const parent = state.teams.find(
+            (view) => view.team.id === command.parent,
+          )!.team;
+          state.hierarchy.push({
+            id: body.request_id,
+            child: child.id,
+            child_name: child.name,
+            parent: parent.id,
+            parent_name: parent.name,
+            side: command.side,
+            sender: state.account,
+            can_review: false,
+            can_approve: false,
+            can_withdraw: false,
+          });
+        } else if (command.kind === "decide_hierarchy") {
+          const offered = state.hierarchy.find(
+            (request) => request.id === command.request,
+          )!;
+          state.hierarchy = state.hierarchy.filter(
+            (request) => request.id !== offered.id,
+          );
+          if (command.decision === "approve") {
+            const child = state.teams.find(
+              (view) => view.team.id === offered.child,
+            )!.team;
+            child.parent = offered.parent;
+            child.version++;
+          }
         } else if (command.kind === "member") {
           const members = state.members.get(target)!;
           const current = members.find(
@@ -250,17 +486,33 @@ async function fixture(page: Page, local = false) {
     }
     if (path === `${base}/teams/policy`)
       return route.fulfill({ json: state.policy });
+    if (path === `${base}/teams/hierarchy-requests`) {
+      const team = url.searchParams.get("team");
+      const id = url.searchParams.get("request");
+      const items = visibleRequests()
+        .filter(
+          (request) =>
+            !team || request.child === team || request.parent === team,
+        )
+        .filter((request) => !id || request.id === id);
+      return route.fulfill({ json: { items, next: null } });
+    }
     if (path === `${base}/teams`)
       return route.fulfill({
         json: {
           items: state.teams
+            .filter(
+              (view) =>
+                !url.searchParams.has("parent") ||
+                view.team.parent === url.searchParams.get("parent"),
+            )
             .filter((view) =>
               view.team.name
                 .toLowerCase()
                 .includes((url.searchParams.get("search") ?? "").toLowerCase()),
             )
             .map((view) => ({
-              ...view,
+              ...currentView(view),
               members: state.members
                 .get(view.team.id)!
                 .filter((member) => member.role).length,
@@ -271,7 +523,7 @@ async function fixture(page: Page, local = false) {
         },
       });
     const match = new RegExp(
-      `^${base}/teams/([^/]+)(?:/(members|candidates|identity-group))?$`,
+      `^${base}/teams/([^/]+)(?:/(members|candidates|identity-group|repositories))?$`,
     ).exec(path);
     if (match) {
       const team = match[1],
@@ -281,7 +533,27 @@ async function fixture(page: Page, local = false) {
           status: 404,
           json: { error: { message: "Team not found" } },
         });
-      if (!match[2]) return route.fulfill({ json: view });
+      if (!match[2]) return route.fulfill({ json: currentView(view) });
+      if (match[2] === "repositories") {
+        return route.fulfill({
+          json: {
+            repositories: view.team.parent
+              ? [
+                  {
+                    id: "01900000-0000-7000-8000-000000000015",
+                    owner: "engineering",
+                    name: "network",
+                    description: "",
+                    visibility: "private",
+                    team_access: "write",
+                    team_access_inherited: true,
+                  },
+                ]
+              : [],
+            next: null,
+          },
+        });
+      }
       if (match[2] === "identity-group") {
         if (request.method() === "PUT") {
           expect(request.headers()["x-csrf-token"]).toBe("csrf");

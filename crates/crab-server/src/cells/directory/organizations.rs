@@ -11,16 +11,25 @@ pub(crate) struct Candidate {
 }
 
 fn key(candidate: &Candidate) -> String {
-    let digest = blake3::derive_key(
-        "crab organization candidate v1",
-        &[
-            candidate.actor.as_bytes().as_slice(),
-            candidate.organization.as_bytes(),
-        ]
-        .concat(),
-    );
-    let hash = blake3::Hash::from_bytes(digest);
-    format!("{PREFIX}{}/{hash}", candidate.actor.simple())
+    format!(
+        "{PREFIX}{}/{}",
+        candidate.actor.simple(),
+        candidate.position()
+    )
+}
+
+impl Candidate {
+    pub(crate) fn position(&self) -> String {
+        let digest = blake3::derive_key(
+            "crab organization candidate v1",
+            &[
+                self.actor.as_bytes().as_slice(),
+                self.organization.as_bytes(),
+            ]
+            .concat(),
+        );
+        blake3::Hash::from_bytes(digest).to_hex().to_string()
+    }
 }
 
 pub(crate) struct RecordCandidate;

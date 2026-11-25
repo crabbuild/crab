@@ -374,11 +374,13 @@ through `api/asset_transfer.rs`.
 against the target grant and opens UUID-bound typed links.
 `cells/organization/` owns native organization metadata, membership tombstones,
 versioned invitation decisions, indexed roster pages and transactional audit.
-`cells/organization/teams/` owns standalone teams, current-incarnation direct
+`cells/organization/teams/` owns team hierarchy, current-incarnation direct
 memberships, visibility/creation policy, bounded explicit preparation and permanent
 applied/cancelled submissions. `api/organizations/teams/` owns its browser contract
-and revision-checked profile enrichment. Existing organizations require private
-`cells prepare-organization-teams`; ordinary serving never installs its feature DDL.
+and revision-checked profile enrichment. `api/notifications/team_requests.rs` pages
+Directory candidates and rechecks review authority in each Organization Cell.
+Schema 3 requires fresh Organization Cell UUIDs. Ordinary serving never installs
+feature DDL.
 `api/organizations/` owns account-to-actor resolution, late permission checks after
 Directory enrichment and browser routes. Explicit first-owner bootstrap belongs
 to `server/management/organizations.rs` and `cells bootstrap-organization`.
@@ -427,7 +429,7 @@ and session migration paths are supported.
   of the branch and exact commit being deleted. The branch list uses the
   existing pull request deletion action with its confirmed impact. Git pushes
   lease the combined ref set and commit all dependent comparisons together.
-- `api/catalog_browse/` ranks and pages catalog matches. Reuse `api/catalog.rs`
+- `api/catalog_browse/` filters, sorts and pages catalog matches. Reuse `api/catalog.rs`
   for current direct, group, organization, and fork grants and topic metadata. Browse reads
   lifecycle settings only for the result page and rechecks access before
   returning results and continuations.

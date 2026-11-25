@@ -63,6 +63,8 @@ pub struct CatalogRecord {
     pub id: Uuid,
     pub owner: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) created_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) fork_owner: Option<MembershipActor>,
@@ -305,6 +307,9 @@ impl CatalogDocument {
         let mut prefixes = HashSet::new();
         for record in &self.repositories {
             if record.placement_generation == 0
+                || record
+                    .created_at_ms
+                    .is_some_and(|time| time > crate::app::MAX_NUMBER)
                 || record.ownership_epoch > record.name_version()
                 || (record.visibility.value.is_public()
                     && record.application != RepositoryApplicationState::CellReady)
@@ -622,6 +627,7 @@ impl CatalogStore {
         let record = CatalogRecord {
             id: Uuid::now_v7(),
             owner,
+            created_at_ms: None,
             organization: None,
             forked_from: None,
             fork_owner: None,
@@ -676,6 +682,7 @@ impl CatalogStore {
             CatalogRecord {
                 id,
                 owner,
+                created_at_ms: None,
                 organization,
                 forked_from: None,
                 fork_owner: None,
@@ -726,6 +733,7 @@ impl CatalogStore {
             CatalogRecord {
                 id,
                 owner,
+                created_at_ms: None,
                 organization,
                 forked_from,
                 fork_owner,
@@ -786,6 +794,7 @@ impl CatalogStore {
         let record = CatalogRecord {
             id: Uuid::now_v7(),
             owner,
+            created_at_ms: None,
             organization: None,
             forked_from: None,
             fork_owner: None,
@@ -1172,7 +1181,7 @@ impl CatalogStore {
 
     async fn insert_with_mode(
         &self,
-        record: CatalogRecord,
+        mut record: CatalogRecord,
         mode: InsertMode,
     ) -> Result<CatalogRecord, CatalogError> {
         for _ in 0..MAX_CAS_ATTEMPTS {
@@ -1229,6 +1238,13 @@ impl CatalogStore {
                 .version
                 .checked_add(1)
                 .ok_or(CatalogError::Invalid("catalog version overflowed"))?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| CatalogError::Invalid("system clock is before epoch"))?;
+            record.created_at_ms = Some(
+                u64::try_from(now.as_millis())
+                    .map_err(|_| CatalogError::Invalid("repository timestamp overflowed"))?,
+            );
             document.release_alias(&record.owner, &record.name);
             document.repositories.push(record.clone());
             document.normalize();
@@ -1247,10 +1263,7 @@ impl CatalogStore {
                     previous_members_digest: membership_digest(&[], &[], None)?,
                     new_members_digest: record.membership_digest()?,
                     repository_version: document.version,
-                    occurred_at: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_err(|_| CatalogError::Invalid("system clock is before epoch"))?
-                        .as_secs(),
+                    occurred_at: now.as_secs(),
                     previous: document.membership_audit_head.clone(),
                     organizations: audit::Scope::for_record(&record, audit::Action::Registered)
                         .into_iter()

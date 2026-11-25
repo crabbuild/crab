@@ -18,6 +18,107 @@ async fn get(h: &Harness, cookie: &str, path: &str) -> reqwest::Response {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn organization_visibility_and_order_apply_across_repository_pages() {
+    let store =
+        crab_storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
+    let h = Harness::new_with_store_and_prefix(false, false, store, "repository-order").await;
+    h.initialize_directory().await;
+    let (organization, _, _) = crate::test_support::http::organizations::bootstrap(&h).await;
+    let alice = h.login().await;
+    let creation = format!("/api/organizations/{organization}/repositories/creation");
+    let create = async |name: &str| {
+        h.write(
+            Method::POST,
+            &creation,
+            &alice,
+            json!({
+                "request_id":Uuid::now_v7(),"name":name,"description":"shared search term",
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()
+    };
+    let older = create("zulu").await;
+    let hidden = create("bravo").await;
+    tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+    let newer = create("alpha").await;
+    let visibility = async |repo: &Value, version: u64, value: &str| {
+        let id = repo["id"].as_str().unwrap();
+        let owner = repo["owner"].as_str().unwrap();
+        let name = repo["name"].as_str().unwrap();
+        h.write(
+            Method::PUT,
+            &format!("/api/repositories/{id}/visibility"),
+            &alice,
+            json!({
+                "version":version,"value":value,"confirmation":format!("{owner}/{name}"),
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    };
+    visibility(&older, 0, "public").await;
+    visibility(&newer, 0, "public").await;
+
+    let query = |text: &str, after: Option<&str>| {
+        let mut parsed = url::form_urlencoded::Serializer::new(String::new());
+        parsed
+            .append_pair("organization", &organization.to_string())
+            .append_pair("q", text)
+            .append_pair("limit", "1");
+        if let Some(after) = after {
+            parsed.append_pair("after", after);
+        }
+        format!("/api/repos?{}", parsed.finish())
+    };
+    let private = h.json(&query("is:private", None), &alice).await;
+    assert_eq!(private["repositories"][0]["id"], hidden["id"]);
+    assert_eq!(private["next"], Value::Null);
+    let by_name = h
+        .json(&query("is:public sort:name-asc", None), &alice)
+        .await;
+    assert_eq!(by_name["repositories"][0]["id"], newer["id"]);
+    assert_eq!(
+        h.json(&query("is:public sort:name-desc", None), &alice)
+            .await["repositories"][0]["id"],
+        older["id"]
+    );
+    let text = "shared archived:false is:public sort:created-asc";
+    let first = h.json(&query(text, None), &alice).await;
+    assert_eq!(first["repositories"][0]["id"], older["id"]);
+    let cursor = first["next"].as_str().unwrap();
+    let second = h.json(&query(text, Some(cursor)), &alice).await;
+    assert_eq!(second["repositories"][0]["id"], newer["id"]);
+    assert!(
+        first["repositories"][0]["created_at_ms"].as_u64().unwrap()
+            < second["repositories"][0]["created_at_ms"].as_u64().unwrap()
+    );
+    let reverse = "shared archived:false is:public sort:created-desc";
+    assert_eq!(
+        h.json(&query(reverse, None), &alice).await["repositories"][0]["id"],
+        newer["id"]
+    );
+    assert_eq!(
+        get(&h, &alice, &query(reverse, Some(cursor)))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    visibility(&newer, 1, "private").await;
+    assert_eq!(
+        get(&h, &alice, &query(text, Some(cursor))).await.status(),
+        StatusCode::CONFLICT
+    );
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn personal_repository_browse_uses_stable_ownership_and_current_viewer_access() {
     let h = Harness::new(false).await;
     h.server

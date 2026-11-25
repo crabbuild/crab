@@ -185,13 +185,13 @@ export type TeamVisibility = "closed" | "secret";
 export type TeamRole = "member" | "maintainer";
 
 // prettier-ignore
-export type Team = { id: string, name: string, description: string, visibility: TeamVisibility, version: number, created_at_ms: number, updated_at_ms: number, };
+export type Team = { id: string, name: string, description: string, visibility: TeamVisibility, parent?: string, version: number, created_at_ms: number, updated_at_ms: number, };
 
 // prettier-ignore
-export type TeamView = { team: Team, role: TeamRole | null, can_manage: boolean, };
+export type TeamView = { team: Team, role: TeamRole | null, can_manage: boolean, ancestors?: Array<string>, tree_version?: number, };
 
 // prettier-ignore
-export type TeamSummary = { members: number, team: Team, role: TeamRole | null, can_manage: boolean, };
+export type TeamSummary = { members: number, team: Team, role: TeamRole | null, can_manage: boolean, ancestors?: Array<string>, tree_version?: number, };
 
 // prettier-ignore
 export type TeamMembership = { actor: string, role: TeamRole | null, version: number, };
@@ -209,7 +209,25 @@ export type ReviewRoutingOptions = { count_existing: boolean, keep_team: boolean
 export type ReviewRoutingSettings = { version: number, algorithm: ReviewRoutingAlgorithm, reviewers: number, excluded: Array<string>, options: ReviewRoutingOptions, };
 
 // prettier-ignore
-export type TeamCommand = { "kind": "create", name: string, description: string, visibility: TeamVisibility, } | { "kind": "edit", team: string, version: number, name: string, description: string, visibility: TeamVisibility, } | { "kind": "delete", team: string, version: number, } | { "kind": "member", team: string, member: string, version: number, role: TeamRole | null, } | { "kind": "review_routing", team: string, version: number, algorithm: ReviewRoutingAlgorithm, reviewers: number, excluded?: Array<string>, options?: ReviewRoutingOptions, } | { "kind": "policy", version: number, member_creation: boolean, };
+export type TeamHierarchySide = "child" | "parent";
+
+// prettier-ignore
+export type TeamHierarchyDecision = "approve" | "decline" | "withdraw";
+
+// prettier-ignore
+export type TeamHierarchyRequest = { id: string, child: string, child_name: string, parent: string, parent_name: string, side: TeamHierarchySide, can_review: boolean, can_approve: boolean, can_withdraw: boolean, };
+
+// prettier-ignore
+export type TeamHierarchyRequests = { items: Array<TeamHierarchyRequest>, next: string | null, organization_name?: string, };
+
+// prettier-ignore
+export type TeamRequestInboxItem = { organization: string, organization_name: string, request: TeamHierarchyRequest, };
+
+// prettier-ignore
+export type TeamRequestInboxPage = { items: Array<TeamRequestInboxItem>, next: string | null, };
+
+// prettier-ignore
+export type TeamCommand = { "kind": "create", name: string, description: string, visibility: TeamVisibility, parent?: string, } | { "kind": "edit", team: string, version: number, name: string, description: string, visibility: TeamVisibility, } | { "kind": "delete", team: string, version: number, hierarchy_version?: number, } | { "kind": "reparent", team: string, version: number, parent: string | null, } | { "kind": "propose_hierarchy", team: string, parent: string, version: number, side: TeamHierarchySide, } | { "kind": "decide_hierarchy", team: string, request: string, decision: TeamHierarchyDecision, } | { "kind": "member", team: string, member: string, version: number, role: TeamRole | null, } | { "kind": "review_routing", team: string, version: number, algorithm: ReviewRoutingAlgorithm, reviewers: number, excluded?: Array<string>, options?: ReviewRoutingOptions, } | { "kind": "policy", version: number, member_creation: boolean, };
 
 // prettier-ignore
 export type TeamSubmission = { request_id: string, command: TeamCommand, };
@@ -221,7 +239,7 @@ export type TeamAcknowledgement = { "outcome": "applied", id: string, } | { "out
 export type TeamListing = { can_create: boolean, items: Array<TeamSummary>, next: string | null, revision: number, };
 
 // prettier-ignore
-export type TeamMember = { actor: string, role: TeamRole | null, version: number, profile: ActorSummary | null, };
+export type TeamMember = { actor: string, role: TeamRole | null, version: number, profile: ActorSummary | null, inherited?: boolean, };
 
 // prettier-ignore
 export type TeamRoster = { can_manage: boolean, items: Array<TeamMember>, next: string | null, revision: number, };

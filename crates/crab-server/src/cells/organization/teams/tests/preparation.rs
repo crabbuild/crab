@@ -7,7 +7,7 @@ impl Mutation for WithoutTeams {
     type Input = Caller;
     type Output = ();
     fn execute(context: &mut Transaction<'_>, _: Caller) -> Result<MutationResult<()>> {
-        context.install_schema("DROP TABLE organization_team_members; DROP TABLE organization_team_submissions; DROP TABLE organization_teams; DROP TABLE organization_team_settings; DROP TABLE organization_membership_epochs;")?;
+        context.install_schema("DROP TABLE organization_team_hierarchy_requests; DROP TABLE organization_team_members; DROP TABLE organization_team_submissions; DROP TABLE organization_teams; DROP TABLE organization_team_settings; DROP TABLE organization_membership_epochs;")?;
         context.delete_document("organization/teams/v1/state")?;
         Ok(MutationResult::Success(()))
     }
@@ -57,6 +57,7 @@ async fn explicit_preparation_is_bounded_atomic_and_preserves_membership_version
                 request(
                     Uuid::now_v7(),
                     Command::Create {
+                        parent: None,
                         name: "Unrelated".into(),
                         description: String::new(),
                         visibility: Visibility::Secret

@@ -1,6 +1,7 @@
 import { RepoIcon } from "@primer/octicons-react";
 import { SettingsIcon } from "lucide-react";
 import { useRef } from "react";
+import { RelativeTime } from "@/components/discussion/time";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Badge } from "@/components/ui/badge";
@@ -21,8 +22,10 @@ type Entry = Pick<
 type Page = {
   repositories: (Entry & {
     fork: boolean;
+    created_at_ms?: number;
     can_admin?: boolean;
     team_access?: RepositoryAccess;
+    team_access_inherited?: boolean;
     can_manage_team_access?: boolean;
   })[];
   next: string | null;
@@ -135,6 +138,7 @@ export function BrowseRepositories({ url, scope }: { url: URL; scope: Scope }) {
       <RepositoryStateFilters
         key={query}
         query={query}
+        showVisibility={scope.kind !== "public"}
         draft={draft}
         apply={apply}
       />
@@ -188,12 +192,15 @@ export function BrowseRepositories({ url, scope }: { url: URL; scope: Scope }) {
                         <Badge variant="outline">Archived</Badge>
                       )}
                       {repo.fork && <Badge variant="outline">Fork</Badge>}
-                      {repo.visibility === "public" && (
-                        <Badge variant="outline">Public</Badge>
+                      {repo.visibility && (
+                        <Badge variant="outline">
+                          {repo.visibility === "public" ? "Public" : "Private"}
+                        </Badge>
                       )}
                       {repo.team_access && (
                         <Badge variant="secondary">
                           {repositoryRoleLabels[repo.team_access]}
+                          {repo.team_access_inherited && " · Inherited"}
                         </Badge>
                       )}
                       {scope.kind === "organization" && repo.can_admin && (
@@ -247,6 +254,11 @@ export function BrowseRepositories({ url, scope }: { url: URL; scope: Scope }) {
                       names={repo.topics}
                       href={(topic) => href(`topic:${topic}`)}
                     />
+                    {repo.created_at_ms !== undefined && (
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        Created <RelativeTime value={repo.created_at_ms} />
+                      </p>
+                    )}
                   </li>
                 ))}
               </ul>
