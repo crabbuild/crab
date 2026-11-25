@@ -25,6 +25,7 @@ import { useProjectCommands, CommandError } from "./commands";
 import type { Project, Field as ProjectField, Layout } from "./model";
 import { useProjectDraft } from "./drafts";
 import { ProjectTypeFilter } from "./issue-type";
+import { ProjectPriorityFilter } from "./project-items";
 import { ProjectGrouping, selectedGrouping } from "./grouping";
 import type { IssueType } from "@/lib/contracts";
 export function ProjectSettings({
@@ -480,6 +481,29 @@ export function ProjectSettings({
                                 ]),
                               ),
                             }}
+                          />
+                        </Field>
+                        <Field>
+                          <FieldLabel htmlFor={`${id}-priority-${view.id}`}>
+                            Priority filter
+                          </FieldLabel>
+                          <ProjectPriorityFilter
+                            id={`${id}-priority-${view.id}`}
+                            label={`Priority filter for ${view.name}`}
+                            value={view.priority?.toString() ?? ""}
+                            onChange={(value) =>
+                              setDraft({
+                                ...draft,
+                                views: draft.views.map((v, n) =>
+                                  n === i
+                                    ? {
+                                        ...v,
+                                        priority: value ? Number(value) : null,
+                                      }
+                                    : v,
+                                ),
+                              })
+                            }
                           />
                         </Field>
                       </div>

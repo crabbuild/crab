@@ -419,7 +419,7 @@ when the server reports `repository_changed`; an earlier attempt may have commit
 ### Repository projects
 
 The repository **Projects** tab provides template-based creation, saved table,
-board and dated roadmap views, title/status/state filters, typed custom fields,
+board and dated roadmap views, title/status/priority/state filters, typed custom fields,
 project settings/README, archiving and reusable repository templates. Board cards
 can move by dragging or through their accessible item editor. Every displayed
 page has exact native counts and bounded pagination. Planning status is separate
@@ -447,7 +447,7 @@ Browser coverage is `tests/browser/projects.e2e.ts`; native coverage lives besid
 The organization **Projects** workspace at `/-/organizations/{uuid}/projects`
 coordinates work across repositories. Projects have a brief, delivery status,
 health, lead, start/target dates, linked repositories, drafts, typed planning
-fields, and saved table/board/roadmap views. Repository and planning-status
+fields, and saved table/board/roadmap views. Repository, planning-status and priority
 filters query the native project collection; rows include current source titles,
 states, assignees, parents, progress and linked work. Planning status remains
 separate from closing an issue or merging a PR.
@@ -457,7 +457,12 @@ source-aware item/repository editors. Shared selectors, views, settings and the
 account-bound submission controller stay in `src/features/projects/`. Metadata
 refresh keeps open editors mounted and waits for the confirmed project version
 before enabling another write. A stale pagination cursor offers a first-page
-reset. Project and organization planning dropdowns use the owned shadcn Select.
+reset that keeps the current filters. Item filters stay available during loading
+and after a read error. In both project scopes, **Settings → Views** saves a
+default priority for a view. The priority filter in the workspace can override
+that default, and **Reset filters** clears the current work filters. Reopening
+the saved view restores its defaults.
+Project and organization planning dropdowns use the owned shadcn Select.
 Project, custom-field and milestone dates use the shared DatePicker, composed
 from the owned Calendar, Popover and Select. Dates remain nullable `YYYY-MM-DD`
 civil dates; selecting or clearing a date never converts it through UTC. Start

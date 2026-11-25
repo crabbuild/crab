@@ -397,6 +397,7 @@ struct Filter {
     after: Option<Uuid>,
     version: Option<u64>,
     status: Option<String>,
+    priority: Option<u8>,
     repository: Option<Uuid>,
     item: Option<Uuid>,
     issue_type: Option<String>,
@@ -419,6 +420,7 @@ async fn filter_repositories(
             project: selected,
             item: None,
             include_pulls: false,
+            priority: None,
         },
     )
     .await?;
@@ -471,6 +473,7 @@ async fn items(
                 after: input.after,
                 version: input.version,
                 status: input.status,
+                priority: input.priority,
                 item: input.item,
                 group_by: input.group_by,
                 matched: type_scope.as_ref().map(|filter| filter.matched.clone()),

@@ -49,6 +49,7 @@ pub(super) async fn resolve(
         .map(Selection::parse)
         .transpose()
         .map_err(Error::Invalid)?;
+    // Issue type group counts must use the same priority slice as the item page.
     let locations = placements::resolve(
         server,
         principal,
@@ -58,6 +59,7 @@ pub(super) async fn resolve(
             project,
             item: input.item,
             include_pulls: input.repository.is_some(),
+            priority: input.priority,
         },
     )
     .await?;
@@ -175,6 +177,7 @@ pub(super) async fn resolve(
         input.repository,
         input.item,
         &input.status,
+        input.priority,
         input.group_by,
         stamps,
         locations.stamp(),

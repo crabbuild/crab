@@ -37,6 +37,12 @@ import {
 import { ProjectSettings } from "../settings";
 import { ProjectTypeFilter } from "../issue-type";
 import {
+  ProjectItemPagination,
+  ProjectItemSummary,
+  ProjectPriorityFilter,
+  ProjectStatusFilter,
+} from "../project-items";
+import {
   applyProjectGroup,
   ProjectGrouping,
   selectedGrouping,
@@ -177,16 +183,12 @@ function PlanningWorkspace({
   const [access, setAccess] = useState(false);
   const [properties, setProperties] = useState(false);
   const overview = url.searchParams.get("view") === "overview";
+  const history = url.searchParams.get("view") === "history";
   const selected =
     project.definition.views.find(
       (view) => view.id === url.searchParams.get("pv"),
     ) ?? project.definition.views[0];
-  const activeView =
-    url.searchParams.get("view") === "history"
-      ? "history"
-      : overview
-        ? "overview"
-        : selected.id;
+  const activeView = history ? "history" : overview ? "overview" : selected.id;
   const requestedLayout = url.searchParams.get("layout");
   const layout =
     requestedLayout === "table" ||
@@ -201,10 +203,15 @@ function PlanningWorkspace({
     url.searchParams.get("group_by") ?? selected.group_by,
   );
   const status = url.searchParams.get("status") ?? selected.status ?? "";
+  const priority =
+    url.searchParams.get("priority") ?? selected.priority?.toString() ?? "";
   const issueType =
     url.searchParams.get("issue_type") ?? selected.issue_type_filter ?? "";
   const repository = url.searchParams.get("repository") ?? "";
-  const after = url.searchParams.get("after") ?? undefined;
+  const after =
+    overview || history
+      ? undefined
+      : (url.searchParams.get("after") ?? undefined);
   const [loadRepositories, setLoadRepositories] = useState(false);
   const repositoryChoices = useRequest<{ items: LinkedRepository[] }>(
     loadRepositories
@@ -212,20 +219,28 @@ function PlanningWorkspace({
       : null,
   );
   const resource = useRequest<{ page: ItemPage; can_manage: boolean }>(
-    projectEndpoint({ organization }, `${project.id}/items`, {
-      status: !overview && status ? status : undefined,
-      repository: !overview && repository ? repository : undefined,
-      issue_type: !overview && issueType ? issueType : undefined,
-      group_by: overview ? undefined : groupBy,
-      after: overview ? undefined : after,
-      type_cursor:
-        !overview && after
-          ? (url.searchParams.get("type_cursor") ?? undefined)
-          : undefined,
-      version: after
-        ? (url.searchParams.get("version") ?? undefined)
-        : undefined,
-    }),
+    history
+      ? null
+      : projectEndpoint(
+          { organization },
+          `${project.id}/items`,
+          overview
+            ? {}
+            : {
+                status: status || undefined,
+                priority: priority || undefined,
+                repository: repository || undefined,
+                issue_type: issueType || undefined,
+                group_by: groupBy,
+                after,
+                type_cursor: after
+                  ? (url.searchParams.get("type_cursor") ?? undefined)
+                  : undefined,
+                version: after
+                  ? (url.searchParams.get("version") ?? undefined)
+                  : undefined,
+              },
+        ),
   );
   const filterRepositories = new Map(
     [
@@ -236,6 +251,8 @@ function PlanningWorkspace({
       ) ?? []),
     ].map((repo) => [repo.id, `${repo.owner}/${repo.name}`]),
   );
+  if (repository && !filterRepositories.has(repository))
+    filterRepositories.set(repository, "Unavailable repository");
   function filters(values: Record<string, string | undefined>) {
     const next = new URL(url);
     for (const [key, value] of Object.entries(values)) {
@@ -247,6 +264,7 @@ function PlanningWorkspace({
     next.searchParams.delete("type_cursor");
     navigate(next.pathname + next.search);
   }
+  const filtered = !!(status || priority || repository || issueType);
   useEffect(() => {
     if (generation.current !== commands.generation) {
       generation.current = commands.generation;
@@ -307,6 +325,7 @@ function PlanningWorkspace({
     editable &&
     groupBy !== undefined &&
     (groupBy !== "issue_type" || canCreateIssue);
+  const showEmptyView = layout === "board" || createInGroup;
   const initialItem =
     typeof editing === "object" && "initialItem" in editing
       ? editing.initialItem
@@ -393,6 +412,7 @@ function PlanningWorkspace({
               value === "overview" || value === "history" ? value : undefined,
             pv: value === "overview" || value === "history" ? undefined : value,
             status: undefined,
+            priority: undefined,
             repository: undefined,
             layout: undefined,
             issue_type: undefined,
@@ -429,23 +449,87 @@ function PlanningWorkspace({
         <TabsContent value={overview ? "overview" : selected.id}>
           <div className="workspace-project-content">
             <div className="workspace-project-work">
-              {resource.error &&
-                (after || status || repository || issueType || groupBy) && (
-                  <Button
-                    variant="outline"
-                    onClick={() =>
+              {!overview && (
+                <div
+                  className="project-filter-bar"
+                  role="group"
+                  aria-label="Project item filters"
+                >
+                  <FieldSelect
+                    label="Layout"
+                    value={layout}
+                    options={{
+                      table: "Table",
+                      board: "Board",
+                      roadmap: "Roadmap",
+                    }}
+                    onValueChange={(layout) => filters({ layout })}
+                  />
+                  <FieldSelect
+                    label="Filter by repository"
+                    value={repository || "all"}
+                    options={{
+                      all: "All repositories",
+                      ...Object.fromEntries(filterRepositories),
+                    }}
+                    onOpenChange={(open) => {
+                      if (!open) return;
+                      if (loadRepositories) repositoryChoices.retry();
+                      else setLoadRepositories(true);
+                    }}
+                    onValueChange={(value) =>
                       filters({
-                        status: "",
-                        repository: undefined,
-                        issue_type: "",
-                        group_by: "none",
+                        repository: value === "all" ? undefined : value,
                       })
                     }
-                  >
-                    Reset filters
-                  </Button>
-                )}
-              <Result state={resource}>
+                  />
+                  {repositoryChoices.error && (
+                    <Button variant="outline" onClick={repositoryChoices.retry}>
+                      Retry loading repositories
+                    </Button>
+                  )}
+                  <ProjectStatusFilter
+                    statuses={project.definition.statuses}
+                    value={status}
+                    onChange={(value) => filters({ status: value })}
+                  />
+                  <ProjectPriorityFilter
+                    value={priority}
+                    onChange={(value) => filters({ priority: value })}
+                  />
+                  <ProjectTypeFilter
+                    types={detail.issue_types ?? []}
+                    value={issueType}
+                    onChange={(value) => filters({ issue_type: value })}
+                  />
+                  <ProjectGrouping
+                    layout={layout}
+                    fields={project.definition.fields}
+                    issueTypes
+                    groupBy={groupBy}
+                    onChange={(value) => filters({ group_by: value })}
+                  />
+                  {filtered && (
+                    <Button
+                      variant="ghost"
+                      onClick={() =>
+                        filters({
+                          status: "",
+                          priority: "",
+                          repository: undefined,
+                          issue_type: "",
+                        })
+                      }
+                    >
+                      Reset filters
+                    </Button>
+                  )}
+                </div>
+              )}
+              <Result
+                state={resource}
+                timingLabel={overview ? "Workflow progress" : "Project items"}
+              >
                 {({ page, can_manage: canManageItems }) =>
                   overview ? (
                     <section className="workspace-project-overview">
@@ -500,81 +584,11 @@ function PlanningWorkspace({
                     </section>
                   ) : (
                     <>
-                      <div className="workspace-project-filters">
-                        <FieldSelect
-                          label="Layout"
-                          value={layout}
-                          options={{
-                            table: "Table",
-                            board: "Board",
-                            roadmap: "Roadmap",
-                          }}
-                          onValueChange={(layout) => filters({ layout })}
-                        />
-                        <FieldSelect
-                          label="Filter by repository"
-                          value={repository || "all"}
-                          options={{
-                            all: "All repositories",
-                            ...Object.fromEntries(filterRepositories),
-                          }}
-                          onOpenChange={(open) => {
-                            if (!open) return;
-                            if (loadRepositories) repositoryChoices.retry();
-                            else setLoadRepositories(true);
-                          }}
-                          onValueChange={(value) =>
-                            filters({
-                              repository: value === "all" ? undefined : value,
-                            })
-                          }
-                        />
-                        {repositoryChoices.error && (
-                          <Button
-                            variant="outline"
-                            onClick={repositoryChoices.retry}
-                          >
-                            Retry loading repositories
-                          </Button>
-                        )}
-                        <FieldSelect
-                          label="Filter by status"
-                          value={status ? `status:${status}` : "all"}
-                          options={{
-                            all: "All statuses",
-                            ...Object.fromEntries(
-                              project.definition.statuses.map((status) => [
-                                `status:${status}`,
-                                status,
-                              ]),
-                            ),
-                          }}
-                          onValueChange={(value) =>
-                            filters({
-                              status: value === "all" ? "" : value.slice(7),
-                            })
-                          }
-                        />
-                        <ProjectTypeFilter
-                          types={detail.issue_types ?? []}
-                          value={issueType}
-                          onChange={(value) => filters({ issue_type: value })}
-                        />
-                        <ProjectGrouping
-                          layout={layout}
-                          fields={project.definition.fields}
-                          issueTypes
-                          groupBy={groupBy}
-                          onChange={(value) => filters({ group_by: value })}
-                        />
-                        <span className="text-sm text-muted-foreground">
-                          {page.total.toLocaleString()}{" "}
-                          {page.total === 1 ? "item" : "items"}
-                        </span>
-                      </div>
-                      {layout === "board" ||
-                      page.items.length ||
-                      createInGroup ? (
+                      <ProjectItemSummary
+                        page={page}
+                        showNoMatches={filtered && showEmptyView}
+                      />
+                      {page.items.length || showEmptyView ? (
                         <View
                           page={page}
                           viewId={selected.id}
@@ -608,18 +622,21 @@ function PlanningWorkspace({
                               <FolderKanbanIcon />
                             </EmptyMedia>
                             <EmptyTitle>
-                              {issueType && !page.total
-                                ? "No work matches this view"
-                                : page.total
-                                  ? "No items on this page"
+                              {page.total
+                                ? "No items on this page"
+                                : filtered
+                                  ? "No work matches this view"
                                   : "Bring your work together"}
                             </EmptyTitle>
                             <EmptyDescription>
-                              Link repositories, then add existing issues, pull
-                              requests, or draft notes.
+                              {page.total
+                                ? "Return to the first page to see matching work."
+                                : filtered
+                                  ? "Change the filters to see more work."
+                                  : "Link repositories, then add existing issues, pull requests, or draft notes."}
                             </EmptyDescription>
                           </EmptyHeader>
-                          {editable && (
+                          {editable && !filtered && !page.total && (
                             <Button onClick={() => setEditing("new")}>
                               <PlusIcon data-icon="inline-start" />
                               Add work
@@ -627,38 +644,17 @@ function PlanningWorkspace({
                           )}
                         </Empty>
                       )}
-                      <div className="workspace-pagination">
-                        {after && (
-                          <Button variant="outline" onClick={() => filters({})}>
-                            First page
-                          </Button>
-                        )}
-                        {page.next && (
-                          <Button
-                            variant="outline"
-                            onClick={() => {
-                              const next = new URL(url);
-                              next.searchParams.set("after", page.next!);
-                              next.searchParams.set(
-                                "version",
-                                String(page.project.version),
-                              );
-                              if (page.type_cursor)
-                                next.searchParams.set(
-                                  "type_cursor",
-                                  page.type_cursor,
-                                );
-                              navigate(next.pathname + next.search);
-                            }}
-                          >
-                            More items
-                          </Button>
-                        )}
-                      </div>
                     </>
                   )
                 }
               </Result>
+              {!overview && !resource.loading && (
+                <ProjectItemPagination
+                  url={url}
+                  page={resource.data?.page}
+                  revisionKey="version"
+                />
+              )}
             </div>
             <aside
               className="workspace-project-properties"

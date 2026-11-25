@@ -129,6 +129,7 @@ struct Filter {
     revision: Option<u64>,
     q: String,
     status: Option<String>,
+    priority: Option<u8>,
     hide_closed: bool,
     issue_type: Option<String>,
     type_cursor: Option<String>,
@@ -163,6 +164,7 @@ async fn items(
             input.item,
             &input.q,
             &input.status,
+            input.priority,
             input.hide_closed,
             input.group_by,
         ))?;
@@ -187,6 +189,7 @@ async fn items(
                     revision: input.revision,
                     query: input.q,
                     status: input.status,
+                    priority: input.priority,
                     hide_closed: input.hide_closed,
                     default_ref: repo.default_ref().await?,
                     issue_type: type_scope,

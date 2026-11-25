@@ -202,6 +202,8 @@ pub(crate) struct ItemQuery {
     pub revision: Option<u64>,
     pub query: String,
     pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
     pub hide_closed: bool,
     pub default_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -247,6 +249,12 @@ impl Read for Items {
         preparation::ensure_ready(context)?;
         if !text_valid(&input.query, 256, false) {
             return Err(Error::Invalid("invalid project filter"));
+        }
+        if input
+            .priority
+            .is_some_and(|priority| priority > MAX_PRIORITY)
+        {
+            return Err(Error::Invalid("invalid project priority filter"));
         }
         let Some(project) = load(context, input.project)? else {
             return Ok(None);
@@ -303,6 +311,10 @@ impl Read for Items {
             SqlValue::Integer(i64::from(input.hide_closed)),
             SqlValue::Text(input.query),
         ]);
+        if let Some(priority) = input.priority {
+            predicate.push_str(" AND json_extract(p.data,'$.priority')=?");
+            args.push(SqlValue::Integer(i64::from(priority)));
+        }
         if let Some(scope) = input.issue_type {
             let (condition, value) = scope.filter();
             predicate.push_str(&format!(" AND ({condition})"));
