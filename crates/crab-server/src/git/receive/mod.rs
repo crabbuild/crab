@@ -89,6 +89,8 @@ pub(crate) enum ReceiveError {
     DefaultBranchChanged,
     #[error("selected branch changed or was deleted")]
     BranchChanged,
+    #[error("native push has a new predecessor for a previously committed request")]
+    NativeRepeat(Box<publish::NativeRepeat>),
     #[error("receive metadata failed")]
     Metadata(#[from] crab_metadata::error::MetadataError),
     #[error("receive storage failed")]
@@ -465,7 +467,7 @@ impl IntoResponse for ReceiveError {
                 "Git transfers are busy; retry shortly",
             ),
             Self::Request(message) => (StatusCode::BAD_REQUEST, message),
-            Self::DefaultBranchChanged | Self::BranchChanged => {
+            Self::DefaultBranchChanged | Self::BranchChanged | Self::NativeRepeat(_) => {
                 (StatusCode::CONFLICT, "Repository changed; retry")
             }
             Self::PackWrite(crab_git::pack_writer::Error::Limit) => {
@@ -1045,4 +1047,4 @@ async fn publish_ref(
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
-pub(crate) use tests::{fault_plan_intent, fault_plan_receipt};
+pub(crate) use tests::{fault_plan_intent, fault_plan_receipt, hold_policy_lease};

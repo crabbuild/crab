@@ -133,6 +133,10 @@ test("repository admins manage rulesets and readers see active rules", async ({
     .getByLabel("Allow review dismissal for")
     .selectOption(`team:${releaseTeam}`);
   await page.getByLabel("Restrict updates", { exact: true }).check();
+  await chooseSelectOption(
+    page.getByRole("combobox", { name: "Force pushes" }),
+    { label: "Block force pushes" },
+  );
   await page.getByLabel("Require linear history", { exact: true }).check();
   await page.getByLabel("Restrict deletions").check();
   await page.getByLabel("Require conversation resolution").check();
@@ -167,6 +171,7 @@ test("repository admins manage rulesets and readers see active rules", async ({
     exclude: ["release/sandbox"],
     restrict_deletions: true,
     restrict_updates: true,
+    force_pushes: "block",
     require_linear_history: true,
     require_conversation_resolution: true,
     require_up_to_date: true,
@@ -205,6 +210,9 @@ test("repository admins manage rulesets and readers see active rules", async ({
   ).toBeVisible();
   await expect(
     page.getByText("Restrict updates", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Block force pushes", { exact: true }),
   ).toBeVisible();
   await expect(
     page.getByText("Require merge queue", { exact: true }),

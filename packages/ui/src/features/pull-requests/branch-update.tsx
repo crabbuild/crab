@@ -54,9 +54,10 @@ export function BranchUpdate({
     : branch(pull.head_ref);
   const action = `${scope}/${pull.number}/update-branch`;
   const url = endpoint(head, action);
-  const preview = useRequest<{ update: UpdateInput | null }>(
-    active ? url : null,
-  );
+  const preview = useRequest<{
+    update: UpdateInput | null;
+    rebase_blocked?: boolean;
+  }>(active ? url : null);
   const mutation = useMutation(csrf, head);
   const [missingReply, setMissingReply] = useState(false);
   const [attempt, setAttempt] = useState<Submission>();
@@ -73,6 +74,7 @@ export function BranchUpdate({
       ? "The response was lost. Retry this update to recover a possible completed write."
       : preview.error);
   const update = preview.data?.update;
+  const rebaseBlocked = preview.data?.rebase_blocked === true;
   const changed =
     update &&
     (update.base_oid !== pull.base_oid ||
@@ -120,6 +122,7 @@ export function BranchUpdate({
         {changed && (
           <p role="alert">The comparison changed. Refresh before updating.</p>
         )}
+        {update && rebaseBlocked && <p>A branch rule blocks rebasing here.</p>}
         {failure && (
           <p role="alert" className="text-destructive">
             {failure}
@@ -158,34 +161,36 @@ export function BranchUpdate({
             <Button
               variant="outline"
               size="sm"
-              className="rounded-r-none"
+              className={rebaseBlocked ? undefined : "rounded-r-none"}
               onClick={() => void apply(update)}
             >
               <SyncIcon /> Update branch
             </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  ref={options}
-                  variant="outline"
-                  size="sm"
-                  className="rounded-l-none border-l-0 px-2"
-                  aria-label="Branch update options"
+            {!rebaseBlocked && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    ref={options}
+                    variant="outline"
+                    size="sm"
+                    className="rounded-l-none border-l-0 px-2"
+                    aria-label="Branch update options"
+                  >
+                    <ChevronDownIcon />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  align="end"
+                  onCloseAutoFocus={(event) => {
+                    if (confirmation) event.preventDefault();
+                  }}
                 >
-                  <ChevronDownIcon />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align="end"
-                onCloseAutoFocus={(event) => {
-                  if (confirmation) event.preventDefault();
-                }}
-              >
-                <DropdownMenuItem onSelect={() => setConfirmation(update)}>
-                  Update with rebase
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                  <DropdownMenuItem onSelect={() => setConfirmation(update)}>
+                    Update with rebase
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
           </div>
         ) : null}
         {(changed || failure) && (
@@ -229,7 +234,7 @@ export function BranchUpdate({
               Cancel
             </Button>
             <Button
-              disabled={changed || mutation.pending}
+              disabled={changed || rebaseBlocked || mutation.pending}
               onClick={() => {
                 if (!confirmation) return;
                 setConfirmation(undefined);

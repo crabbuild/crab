@@ -601,6 +601,7 @@ async fn review_filters_apply_rulesets_to_the_default_ref_in_the_search_snapshot
                 restrict_creations: false,
                 restrict_updates: false,
                 restrict_deletions: false,
+                force_pushes: None,
                 require_pull_request: false,
                 required_approvals: 2,
                 required_code_owner_reviews: false,

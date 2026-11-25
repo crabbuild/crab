@@ -396,6 +396,12 @@ pub(crate) struct MatchingRulesets<'a> {
 }
 
 impl<'a> MatchingRulesets<'a> {
+    pub(crate) fn allows_force_push(&self, reference: &str, default_ref: &str) -> bool {
+        self.matches(reference, default_ref).any(|(_, rule)| {
+            rule.force_pushes == Some(crate::cells::repository::rulesets::ForcePushes::Allow)
+        })
+    }
+
     pub(crate) fn matches(
         &self,
         reference: &str,

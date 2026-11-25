@@ -1332,6 +1332,20 @@ and workflow. Any applicable rule can require the head to contain the current
 base commit or require the merge queue. Each setting requires at least one
 required check or workflow.
 
+In a repository or organization branch ruleset, **Force pushes** can allow or
+block non-fast-forward updates on matching branches. Use an active allow rule
+for topic branches that contributors rebase locally. Native Git pushes require
+an explicit allow rule. A matching block takes precedence unless the pusher has
+an **Always** bypass for it. The PR and linear-history rules still apply.
+Crab checks the exact advertised tip, current rules, and paths protected by Git
+LFS locks before publishing a rewrite. A block also prevents the browser from
+rebasing a matching PR head.
+
+If a later rewrite restores the exact predecessor for a previously committed
+Git request, sending that request again uses a new publication plan bound to
+the current ref transactions. A former success receipt stays valid for
+transport recovery when the request's expected predecessor is no longer live.
+
 **Require linear history** is available in classic branch protection and in
 repository and organization rulesets. Crab checks the commits introduced by
 each matching ref update, including objects already reachable from another
@@ -1349,7 +1363,7 @@ under the ref and policy leases.
 `can_manage`. Administrators can see disabled rulesets and replace the complete
 collection with matching `expected_version`. Each entry contains `id` (UUID),
 `name`, `target` (`branch` or `tag`), `enforcement` (`active` or `disabled`),
-`include`, `exclude`, `restrict_creations`, `restrict_updates`, `restrict_deletions`,
+`include`, `exclude`, `restrict_creations`, `restrict_updates`, `restrict_deletions`, optional `force_pushes` (`allow` or `block`),
 `require_pull_request`, `required_approvals`, `required_code_owner_reviews`, `require_last_push_approval`,
 `require_conversation_resolution`, `require_up_to_date`, `require_merge_queue`, `require_linear_history`,
 `required_checks`, `required_integrations`, and optional `review_dismissal`.

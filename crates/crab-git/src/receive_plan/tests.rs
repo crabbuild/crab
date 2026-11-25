@@ -232,19 +232,20 @@ fn force_and_delete_policy_are_enforced_without_commit_translation() {
         inspect_linear_history: false,
         allow_delete: false,
     };
+    let plan = validate(
+        &incoming,
+        &refs,
+        &updates,
+        force,
+        &mut source,
+        graph_limits(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(plan.refs()["refs/heads/main"], new);
     assert_eq!(
-        validate(
-            &incoming,
-            &refs,
-            &updates,
-            force,
-            &mut source,
-            graph_limits(),
-            || false
-        )
-        .unwrap()
-        .refs()["refs/heads/main"],
-        new
+        plan.rewritten_refs(),
+        &BTreeSet::from(["refs/heads/main".to_owned()])
     );
     assert!(
         validate(

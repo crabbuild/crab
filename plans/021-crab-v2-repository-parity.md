@@ -19,6 +19,10 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   the latest push. A review binds to the verified Git head publication and
   merge base. The merge panel reports pending approval or missing push
   attribution, and publication checks the reviewer's current access.
+- Branch rulesets can allow topic-branch force pushes and block rewrites on
+  matching branches. Git publication checks current rules, exact predecessor
+  refs, and locked paths. A repeated wire request uses current ref
+  transactions if a branch returns to its former tip.
 - Merged pull requests retain access to check runs and commit statuses for
   the exact reviewed head and, when published, the tested candidate. The
   Checks tab separates these commits after squash or rebase and branch
@@ -176,7 +180,8 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
 - Writers can rebase the pull request head on the inspected base in the browser.
   Crab checks the replayed tree, applies current head policy, and records the
   result through the same ref leases and retry receipt. It replaces visibility
-  when the old head is no longer reachable. Native Git push stays fast-forward.
+  when the old head is no longer reachable. Native Git rewrites require an
+  active allow rule for the branch.
 - Writers can resolve a protected-head conflict on a new branch in the head
   repository and switch the existing PR to it. Branch creation and the PR
   switch have durable receipts. The switch records the head change, expires

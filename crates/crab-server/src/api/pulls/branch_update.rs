@@ -109,15 +109,12 @@ impl Destination {
         self.upstream.as_deref().unwrap_or(&self.head)
     }
 
-    async fn permit(&self, server: &Server, principal: &Principal) -> Result<()> {
-        if !app::membership(server, principal, &self.head)
-            .await?
-            .principal
-            .can_write(self.head.id)
-        {
+    async fn permit(&self, server: &Server, principal: &Principal) -> Result<app::Membership> {
+        let grant = app::membership(server, principal, &self.head).await?;
+        if !grant.principal.can_write(self.head.id) {
             return Err(Error::BranchUpdatePermission);
         }
-        Ok(())
+        Ok(grant)
     }
 
     async fn pull(&self, server: &Server) -> Result<storage::PullRequest> {
@@ -233,8 +230,26 @@ async fn preview_destination(
     } else {
         vec![]
     };
-    destination.permit(server, principal).await?;
-    Ok(Json(json!({"update":ready, "conflicts":conflicts})))
+    let grant = destination.permit(server, principal).await?;
+    let rebase_blocked = if ready.is_some() {
+        let policy = settings::load_ref_policy(server, &destination.head).await?;
+        let default_ref = policy.default_ref(&destination.head).await?;
+        let teams = policy.organization_teams(server, &grant).await?;
+        let actor = grant
+            .bypass_context(destination.head.id)
+            .organization_teams(teams.as_deref());
+        policy
+            .active()?
+            .matches(&pull.head_ref, &default_ref)
+            .any(|(id, rule)| {
+                rule.blocks_force_push() && !rule.allows_bypass(actor.for_rule(id), false)
+            })
+    } else {
+        false
+    };
+    Ok(Json(
+        json!({"update":ready, "conflicts":conflicts, "rebase_blocked":rebase_blocked}),
+    ))
 }
 
 async fn update(

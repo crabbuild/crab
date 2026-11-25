@@ -624,7 +624,13 @@ The visibility source pins one prior ref tip and its complete closure to the adm
 
 The planner first prunes objects already covered by the prior closure. It emits additive evidence only when traversal reaches the exact prior tip. Otherwise it expands every pruned edge and emits a complete replacement closure.
 
-Native Git receive rejects non-fast-forward pushes. A generated pull request head rebase can replace the exact leased head through the browser publication path. It records replacement visibility when the old tip is unreachable, so a rewritten ref authorizes only the new history.
+Native Git receive requires an active allow rule for non-fast-forward branch
+updates. A generated pull request head rebase can replace the exact leased
+head through browser publication. Both paths honor matching block rules and
+their current bypasses. The receive plan records verified rewrites and
+checks the old and new trees for locked paths even when both commits were
+already visible. Final authorization rechecks policy under the shared lease.
+Replacement visibility authorizes only the rewritten ref's new history.
 
 Commits, trees, and tags require their outgoing edges when a closure expands. Proven blobs are leaves. Gitlinks remain external. Unreachable incoming objects never enter a ref's visibility evidence.
 

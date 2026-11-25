@@ -6,6 +6,8 @@ use uuid::Uuid;
 
 use crate::test_support::{git, http::Harness};
 
+mod force_pushes;
+
 const REPO: &str = "/api/repos/team/private";
 const RULESETS: &str = "/api/repos/team/private/rulesets";
 
