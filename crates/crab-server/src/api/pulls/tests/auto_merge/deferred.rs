@@ -76,7 +76,9 @@ async fn native_browser_merge_when_ready_queues_and_publishes_the_tested_head() 
     assert_eq!(waiting["request"]["waiting_for_queue"], true);
     assert_eq!(schedule().await["request"], waiting["request"]);
     let queue = format!("{REPO}/pulls/queue?branch=refs%2Fheads%2Fmain");
+    let queued_search = format!("{REPO}/pulls?q=is%3Aqueued");
     assert_eq!(h.json(&queue, &alice).await["items"], json!([]));
+    assert_eq!(h.json(&queued_search, &alice).await["items"], json!([]));
 
     git(&[
         "commit",
@@ -192,6 +194,10 @@ async fn native_browser_merge_when_ready_queues_and_publishes_the_tested_head() 
     let queued = h.json(AUTO, &alice).await;
     assert_eq!(&queued["request"]["request_id"], request);
     assert_eq!(queued["request"]["waiting_for_queue"], false);
+    assert_eq!(
+        h.json(&queued_search, &alice).await["items"][0]["number"],
+        1
+    );
     assert_eq!(
         h.json(&queue, &alice).await["items"]
             .as_array()

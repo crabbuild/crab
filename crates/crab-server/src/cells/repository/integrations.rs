@@ -403,6 +403,7 @@ pub(super) fn required_connections(
                     CheckRunKey {
                         oid: oid.to_owned(),
                         number: cursor.number,
+                        baseline: None,
                     },
                 )?
                 .ok_or(crate::cells::Error::Invalid(
@@ -580,6 +581,7 @@ impl Mutation for Record {
                         oid: input.oid,
                         name: connection.name,
                         report: input.report,
+                        scan: None,
                     },
                 )? {
                     Success(CreateCheckRunOutcome::Created(detail)) => detail,

@@ -92,11 +92,12 @@ export default function WorkSearch({ url }: { url: URL }) {
             defaultValue={q}
             maxLength={256}
             placeholder='is:open label:"bug" deployment'
-            aria-describedby="discussion-search-date-format"
+            aria-describedby="discussion-search-examples"
           />
-          <FieldDescription id="discussion-search-date-format">
+          <FieldDescription id="discussion-search-examples">
             Use date filters such as <code>updated:&gt;=2025-01-01</code> or{" "}
-            <code>merged:2025-01-01..2025-01-31</code>.
+            <code>merged:2025-01-01..2025-01-31</code>. Find queued pull
+            requests with <code>is:queued</code>.
           </FieldDescription>
         </Field>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-[minmax(0,1fr)_auto_auto_auto] sm:items-end">

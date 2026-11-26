@@ -353,6 +353,11 @@ fn criteria(
     subject_kind: Option<SubjectKind>,
 ) -> crate::cells::Result<Criteria> {
     let query = Query::parse(input.query.as_deref()).map_err(crate::cells::Error::Invalid)?;
+    if input.public_reader && query.uses_merge_queue() {
+        return Err(crate::cells::Error::Invalid(
+            "Merge queue filters require repository access",
+        ));
+    }
     let archived = query
         .needs_lock_state()
         .then(|| crate::cells::repository::settings::archived(context))
@@ -776,6 +781,7 @@ fn scoped_expression(
             Term::State(SubjectState::Merged) => "d.state = 2".into(),
             Term::Kind(subject_kind) => format!("d.kind = {}",kind(*subject_kind)),
             Term::Unmerged => "d.kind = 1 AND d.state <> 2".into(),
+            Term::Queued => "d.kind = 1 AND d.state = 0 AND d.number IN (SELECT pull FROM discussion_index_merge_queue)".into(),
             Term::Draft(draft) => format!("d.kind = 1 AND d.draft = {}",u8::from(*draft)),
             Term::Locked(locked) => {
                 if bindings.archived {

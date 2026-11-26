@@ -138,10 +138,11 @@ impl Read for ListWorkspaceWork {
         let filter_snapshot = if criteria.query.needs_pull_heads()
             || criteria.query.uses_review_teams()
             || criteria.query.has_dates()
+            || criteria.query.uses_merge_queue()
             || matches!(input.search.sort, Sort::Comments | Sort::Reactions)
         {
             // Workspace continuations merge repository pages. A team roster
-            // or a change to discussion dates or counts can move the boundary.
+            // or a change to dates, counts, or queue membership can move the boundary.
             let data = serde_json::to_vec(&(
                 generation,
                 revision(context)?,

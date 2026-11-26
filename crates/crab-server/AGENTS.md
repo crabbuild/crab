@@ -7,6 +7,15 @@ Root `AGENTS.md` and `crates/AGENTS.md` apply. Read
 
 Owns the repository HTTP application, native Git endpoints, authentication, and embedded React assets. It composes remote-git/read/write/storage APIs; shared Git and storage mechanics remain in their owner crates.
 
+`api/checks/sarif.rs` normalizes scanner uploads into the exact-commit check
+owner. Finding output and replay use existing check records. Required checks
+evaluate the resulting conclusion through the existing provider policy.
+`cells/repository/checks/scans.rs` owns code-scanning evidence and the latest
+report index by author, category, and commit. Evidence and its pointer commit
+with the immutable check. Comparisons are read-only and bind two exact SHAs.
+`api/checks/sarif/history.rs` binds scan discovery to a verified first-parent
+branch window and joins report counts through the Repository Cell.
+
 ## Read first
 
 Read `crates/crab-server/CELLAR.md` for native Cellar storage, lifecycle,
@@ -89,6 +98,8 @@ the first entry. `auto_merge/queue.rs` reconciles candidate checks and retries.
 A merge-when-ready request waits outside the queue index. The worker rechecks
 its exact head and current eligibility under the ref and ruleset leases.
 The Cell allocates its position and transitions the active request together.
+The discussion index captures queue membership in the same admission or
+removal transaction. Format 18 preparation backfills from active jobs.
 An administrator's priority change advances the branch queue's order
 revision in the same Cell transaction as the move. Candidate sources, CI
 admission, and begin-merge compare that revision so a stale worker cannot

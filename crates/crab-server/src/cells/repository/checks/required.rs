@@ -162,6 +162,7 @@ fn reports(
                 oid: oid.to_owned(),
                 before: None,
                 limit: MAX_CHECK_RUNS_PER_COMMIT as u8,
+                scans_only: false,
             },
         )?
         .runs

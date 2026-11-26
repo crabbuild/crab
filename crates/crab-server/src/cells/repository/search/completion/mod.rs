@@ -300,6 +300,7 @@ fn suggestions(
             ("is:pr", "Pull requests"),
             ("is:merged", "Merged pull requests"),
             ("draft:true", "Draft pull requests"),
+            ("is:queued", "Pull requests in the merge queue"),
             ("is:unmerged", "Pull requests that have not merged"),
             ("is:locked", "Locked conversations"),
             ("is:unlocked", "Unlocked conversations"),

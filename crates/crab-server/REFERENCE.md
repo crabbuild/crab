@@ -3511,6 +3511,12 @@ the cursor. Restart the search to use the current matches. An absent `q` default
 `is:issue is:open` for the issue workspace and `is:open` for the PR workspace.
 An explicit query has no additional hidden state filter. The issue endpoint
 searches both discussion kinds; the PR endpoint retains its PR scope.
+Use `is:queued` to find open pull requests admitted to a merge queue in
+repository or workspace search. Combine it with `base:main` to narrow to a
+target branch, or use `-is:queued` to exclude queued work. An auto-merge request
+waiting for eligibility starts matching when it takes a queue position.
+The qualifier uses member access, including read-only members. Queue membership
+changes invalidate continuations for queued searches.
 Use `is:issue` or `is:pr` to include all states of that kind. The former separate
 `state` parameter is rejected; milestone and release state parameters keep their
 own contracts. Text terms search titles, bodies, conversation comments, submitted reviews, inline threads and replies. Spaces and `AND` require both terms; `OR` matches either; parentheses
@@ -4800,6 +4806,10 @@ at least one active approval. Checks and other merge conditions are independent.
 
 Head-dependent filters bind the verified Git source token to a ready immutable
 ref projection and capture current private fork heads from their own repositories.
+When a query requires `base:` or `head:` across all results, fork discovery
+uses the projected exact base or head prefix before reading object storage.
+The same scope covers matching rows and open/closed totals. Mixed Boolean
+queries retain the fork heads needed by every arm.
 Pending reconciliation returns 503 `review_index_pending` with visible retry.
 Source changes and effective rule edits invalidate repository and workspace cursors.
 An empty repository requires no Git manifest. Completed merges use the recorded
@@ -5435,7 +5445,7 @@ It accepts optional `kind=issue|pull`, `sort=created|updated|comments|reactions`
 Crab merges bounded pages from each readable repository's discussion index.
 The account, search parameters, and readable scope bind the cursor. Current
 repository access is checked again before results are returned. A changed
-scope returns HTTP 409. For date filters and comment or reaction sorts, an
+scope returns HTTP 409. For date and queue filters and comment or reaction sorts, an
 index revision change also returns HTTP 409. Open **First page** to refresh
 the results.
 An unavailable repository index returns its normal preparation error so an
@@ -5527,6 +5537,68 @@ Each output can contain:
 - Up to 50 file and line annotations
 
 Encoded output can contain at most 192 KiB. Requests can contain at most 256 KiB. A commit retains at most 100 runs. Lists default to 30 and accept 1 to 50 with an exclusive `before` cursor.
+
+### Publish SARIF findings
+
+Send `POST /api/repos/{owner}/{name}/check-runs/sarif` with repository Write
+access or a repository-scoped write token using Basic authentication
+(`crab` as the username). The JSON body supplies `request_id` (UUID),
+`head_sha` (exact commit), `category` (stable scanner name), and `sarif`
+(the SARIF 2.1.0 JSON object). Pass `?pull={number}` for the existing
+authorized live fork-head scope. Resend the same request ID and normalized
+findings to recover a lost response.
+
+A report creates the completed check `Code scanning / <category>`.
+It fails on errors by default. Use `"fail_on":"warning"` to fail on errors
+and warnings. A run that reports unsuccessful execution also fails the check.
+To require the scan before merging, add that exact check name to branch
+protection or a ruleset. Provider-bound checks still require their configured
+reporting integration.
+
+The request limit is 1 MiB with at most 50 current findings across all runs.
+The normal check-output size limits apply. Successful runs include an explicit
+results array, including an empty array for a clean scan. Report findings with
+inline text or Markdown messages. Emit explicit severity when a finding uses
+external rule components or the run supplies invocation-level rule overrides.
+Crab counts current findings and uses the first resolvable file and line per
+finding. For absolute file URIs, supply `checkout_uri` or a `%SRCROOT%`
+mapping. Unmapped or unlocated findings still count and appear in the check
+details. PR **Checks** links annotations from a branch in the repository to
+the reported commit and line.
+
+PR **Checks** also compares a head or tested merge report to the exact base
+shown in that view. The details API accepts `baseline=<sha>` for any readable
+base commit in the repository. Crab uses the latest SARIF upload for that
+commit from the same reporting identity and category. Scanner execution must
+have completed on both commits with the same tool set. Findings can still
+cause either check to fail.
+
+Crab matches findings by tool, rule, and SARIF fingerprint. It uses
+`partialFingerprints.primaryLocationLineHash` with the repository-relative
+path when available and falls back to full fingerprints. Findings without
+usable evidence and duplicate fingerprints with ambiguous matches remain
+unclassified. The comparison shows counts for every finding and labels
+source annotations. Required checks still use the conclusion of the scan for
+the exact commit being evaluated.
+
+### Browse repository scan history
+
+Open **Security** to choose a branch and inspect its scan reports outside a
+pull request. The branch tip shows its own report count. Older results are
+displayed with their scanned commit and link to the source at that commit.
+
+`GET /api/repos/{owner}/{name}/code-scanning/history` requires repository
+membership. It defaults to the default branch and accepts `branch` as a full
+`refs/heads/...` name. The server examines up to 30 first-parent commits
+by default (`limit` accepts 1–50). Each page includes the exact branch tip,
+its report count, scanned commits in that window, and a `next` cursor when
+more commits exist. A page can have zero reports and still have older commits.
+The cursor binds to the repository, branch, and tip. A branch move invalidates
+the cursor. Start at the latest commits to refresh the view.
+
+Add `scans_only=true` to commit check lists or individual check reads to
+select reports ingested through SARIF. The detail keeps the original report
+output and exact commit.
 
 ### Send repository webhooks
 

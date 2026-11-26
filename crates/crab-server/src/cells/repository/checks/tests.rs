@@ -75,6 +75,8 @@ fn maximum_check_results_fit_their_registered_output_bounds() {
 
     let detail = CheckRunDetail {
         run,
+        scan: None,
+        scan_comparison: None,
         output: CheckOutputRecord {
             title: "🦀".repeat(200),
             summary: "s".repeat(32 * 1024),

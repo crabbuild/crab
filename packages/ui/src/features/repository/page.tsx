@@ -39,6 +39,7 @@ import {
   ProjectIcon,
   RepoForkedIcon,
   SearchIcon,
+  ShieldLockIcon,
 } from "@primer/octicons-react";
 import {
   Suspense,
@@ -81,6 +82,7 @@ const PullRequests = lazy(() =>
 );
 const ProjectsPage = lazy(() => import("@/features/projects"));
 const ActivityPage = lazy(() => import("@/features/activity"));
+const RepositorySecurity = lazy(() => import("./security"));
 const MilestonesPage = lazy(() => import("@/features/milestones"));
 const LabelsPage = lazy(() =>
   import("@/features/labels").then((module) => ({
@@ -448,6 +450,7 @@ export function RepositoryPage({
                 view !== "pulls" &&
                 view !== "settings" &&
                 view !== "activity" &&
+                view !== "security" &&
                 view !== "properties" &&
                 view !== "projects",
             },
@@ -484,6 +487,12 @@ export function RepositoryPage({
               label: "Activity",
               icon: HistoryIcon,
               active: view === "activity",
+            },
+            {
+              view: "security",
+              label: "Security",
+              icon: ShieldLockIcon,
+              active: view === "security",
             },
             ...(repo.can_admin || repo.can_maintain
               ? [
@@ -712,6 +721,25 @@ export function RepositoryPage({
           >
             <ActivityPage repo={repo} />
           </Suspense>
+        ) : view === "security" ? (
+          <Result state={visibleRefState} timingLabel="Repository references">
+            {(data) => (
+              <Suspense
+                fallback={
+                  <div className="notice" role="status">
+                    <Spinner /> Loading code scanning…
+                  </div>
+                }
+              >
+                <RepositorySecurity
+                  key={repo.id}
+                  repo={repo}
+                  refs={data}
+                  url={url}
+                />
+              </Suspense>
+            )}
+          </Result>
         ) : view === "rulesets" ? (
           <Suspense
             fallback={

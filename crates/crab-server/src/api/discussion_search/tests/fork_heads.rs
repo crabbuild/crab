@@ -134,6 +134,7 @@ async fn exercise(browser: Option<&Browser>) {
     let path = checkout.path();
     let shared = git::push_review_branches(path, upstream.as_str()).await;
     let base = git::success(path, &["rev-parse", "main"]).await;
+    git::success(path, &["push", upstream.as_str(), "main:release"]).await;
     let fork_request = Uuid::now_v7();
     write(
         &h,
@@ -162,12 +163,23 @@ async fn exercise(browser: Option<&Browser>) {
         .repositories
         .get(&(owner.to_owned(), "fork".into()))
         .unwrap();
-    for (title, source) in [("Upstream change", None), ("Fork change", Some(fork.id))] {
-        write(&h, &alice, id, Method::POST, &pulls, json!({
-            "request_id":Uuid::now_v7(),"title":title,"body":"",
-                "base_ref":"refs/heads/main","head_ref":"refs/heads/feature","head_repository":source,
-                "expected":{"base_oid":base,"head_oid":shared},
-        })).await;
+    for (title, source, base_ref) in [
+        ("Upstream change", None, "refs/heads/main"),
+        ("Fork change", Some(fork.id), "refs/heads/release"),
+    ] {
+        write(
+            &h,
+            &alice,
+            id,
+            Method::POST,
+            &pulls,
+            json!({
+                "request_id":Uuid::now_v7(),"title":title,"body":"",
+                    "base_ref":base_ref,"head_ref":"refs/heads/feature","head_repository":source,
+                    "expected":{"base_oid":base,"head_oid":shared},
+            }),
+        )
+        .await;
     }
     let members = format!("{root}/members");
     let acl = h.json(&members, &alice).await;
@@ -183,9 +195,20 @@ async fn exercise(browser: Option<&Browser>) {
         }),
     )
     .await;
-    write(&h, &alice, id, Method::PUT, &format!("{root}/settings/branch-protections"), json!({
-        "expected_version":0,"rules":[{"branch":"main","required_approvals":1,"required_checks":[]}],
-    })).await;
+    write(
+        &h,
+        &alice,
+        id,
+        Method::PUT,
+        &format!("{root}/settings/branch-protections"),
+        json!({
+            "expected_version":0,"rules":[
+                {"branch":"main","required_approvals":1,"required_checks":[]},
+                {"branch":"release","required_approvals":1,"required_checks":[]},
+            ],
+        }),
+    )
+    .await;
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
     for number in 1..=2 {
@@ -214,6 +237,27 @@ async fn exercise(browser: Option<&Browser>) {
     let fork_link = format!(".issue-list a[href='/{owner}/upstream/pull/2']");
     let mut continuations = Vec::new();
     for (search, cursor_parameter) in searches.iter().zip(["before", "after"]) {
+        for (query, title, has_more) in [
+            (
+                "base:main head:feat review:approved",
+                "Upstream change",
+                false,
+            ),
+            (
+                "base:release head:feat review:approved",
+                "Fork change",
+                false,
+            ),
+            (
+                "(base:main OR status:success) review:approved",
+                "Fork change",
+                true,
+            ),
+        ] {
+            let result = ready_search(&h, &alice, search, query).await;
+            assert_eq!(result["items"][0]["title"], title, "{query}");
+            assert_eq!(result["next"].is_string(), has_more, "{query}");
+        }
         for query in [
             approved,
             "is:open status:success",
@@ -244,6 +288,25 @@ async fn exercise(browser: Option<&Browser>) {
             ])
             .await;
         browser.run(&["wait", &upstream_link]).await;
+        browser.run(&["wait", &fork_link]).await;
+        let search = "input[aria-label='Search pulls']";
+        browser
+            .run(&["fill", search, "base:main head:feat review:approved"])
+            .await;
+        browser.run(&["press", "Enter"]).await;
+        browser
+            .run(&[
+                "wait",
+                "--fn",
+                &format!(
+                    "new URL(location.href).searchParams.get('q')?.includes('base:main') && !document.querySelector({})",
+                    serde_json::to_string(&fork_link).unwrap()
+                ),
+            ])
+            .await;
+        browser.run(&["wait", &upstream_link]).await;
+        browser.run(&["fill", search, approved]).await;
+        browser.run(&["press", "Enter"]).await;
         browser.run(&["wait", &fork_link]).await;
     }
     let fork_remote = remote(&h, &alice, owner, "fork").await;

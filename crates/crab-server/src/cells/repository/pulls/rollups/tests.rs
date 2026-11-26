@@ -102,6 +102,7 @@ async fn run(
             oid: "b".repeat(40),
             name: name.into(),
             report: report(status, conclusion),
+            scan: None,
         },
     )
     .await

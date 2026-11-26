@@ -543,6 +543,7 @@ pub(in crate::cells::repository) struct IndexFixture;
 pub(in crate::cells::repository) enum IndexFixtureInput {
     Format14,
     Format15,
+    Format17,
     ShortDeadline { number: u64 },
 }
 
@@ -557,6 +558,13 @@ impl Mutation for IndexFixture {
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         let deadline = match input {
+            IndexFixtureInput::Format17 => {
+                let mut current = state(context)?.unwrap();
+                current.format = 17;
+                context.put_document(STATE_KEY, &current)?;
+                context.install_schema("DROP TABLE discussion_index_merge_queue;")?;
+                None
+            }
             IndexFixtureInput::Format15 => {
                 let mut current = state(context)?.unwrap();
                 current.format = 15;
@@ -587,6 +595,154 @@ impl Mutation for IndexFixture {
         };
         Ok(MutationResult::Success(deadline))
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn format_17_backfills_admitted_queue_entries_in_bounded_pages() {
+    use pull_auto_merge::{Change, Edit, Job, Outcome};
+    let server = fixtures::fixture().await;
+    let cell = cell(&server);
+    let base = "a".repeat(40);
+    let head = "b".repeat(40);
+    create(&cell, "Issue with the first queued number", "").await;
+    for pull in 1..=10 {
+        let base_ref = if pull % 2 == 0 {
+            "refs/heads/main"
+        } else {
+            "refs/heads/release"
+        };
+        let head_ref = format!("refs/heads/change-{pull}");
+        assert!(matches!(
+            write::<CreatePull>(
+                &cell,
+                CreatePullInput {
+                    metadata: Default::default(),
+                    submission_id: *Uuid::now_v7().as_bytes(),
+                    code_owner_requests: Default::default(),
+                    author: actor(),
+                    title: format!("Queue change {pull}"),
+                    body: String::new(),
+                    base_ref: base_ref.into(),
+                    base_oid: base.clone(),
+                    head_ref: head_ref.clone(),
+                    head_repository: None,
+                    head_oid: head.clone(),
+                    draft: false,
+                }
+            )
+            .await,
+            CreatePullOutcome::Created(_)
+        ));
+        assert!(matches!(
+            write::<Edit>(
+                &cell,
+                Change::Arm {
+                    version: 1,
+                    job: Job {
+                        pull,
+                        id: Uuid::now_v7(),
+                        actor: actor(),
+                        base_ref: base_ref.into(),
+                        head_ref,
+                        head_repository: None,
+                        head_oid: head.clone(),
+                        tracked_head: None,
+                        initial_base_oid: base.clone(),
+                        initial_version: 1,
+                        generation: 0,
+                        queue_method_revision: 0,
+                        comparison_revision: None,
+                        method: MergeMethod::MergeCommit,
+                        message: String::new(),
+                        when_ready: pull == 10,
+                        queue: None,
+                    },
+                    queue: true,
+                    configured_queue_required: true,
+                    ruleset_queue_required: false,
+                }
+            )
+            .await,
+            Outcome::Saved
+        ));
+    }
+
+    let SearchIndexStatus::Ready {
+        generation: previous,
+        revision,
+    } = cell
+        .client
+        .query::<GetSearchIndexStatus>(&cell.target, None, ())
+        .await
+        .unwrap()
+        .output
+    else {
+        panic!("index not ready");
+    };
+    write::<IndexFixture>(&cell, IndexFixtureInput::Format17).await;
+    let generation = Uuid::now_v7();
+    let mut result = write::<RebuildIndex>(
+        &cell,
+        RebuildSearchInput::Begin {
+            expected: Some(previous),
+            generation,
+        },
+    )
+    .await;
+    for after in [0, 8] {
+        let RebuildSearchOutcome::Progress {
+            status: SearchIndexStatus::Building { progress, .. },
+        } = result
+        else {
+            panic!("index finished before reading all queue jobs");
+        };
+        assert_eq!(
+            (progress.phase, progress.after),
+            (SearchIndexPhase::MergeQueue, after)
+        );
+        result = write::<RebuildIndex>(
+            &cell,
+            RebuildSearchInput::Step {
+                generation,
+                version: progress.version,
+            },
+        )
+        .await;
+    }
+    assert!(matches!(result, RebuildSearchOutcome::Progress {
+        status: SearchIndexStatus::Ready { generation: new, revision: unchanged }
+    } if generation == new && revision == unchanged));
+    for (query, expected) in [
+        ("is:queued", vec![9, 8, 7, 6, 5, 4, 3, 2, 1]),
+        ("is:queued base:main", vec![8, 6, 4, 2]),
+        ("is:pr -is:queued", vec![10]),
+        ("is:issue is:queued", vec![]),
+    ] {
+        let results = page(
+            &cell,
+            SearchInput {
+                query: Some(query.into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(numbers(&results), expected, "{query}");
+        assert_eq!(results.matching, expected.len() as u64, "{query}");
+    }
+    let public = cell
+        .client
+        .query::<ListDiscussions>(
+            &cell.target,
+            None,
+            SearchInput {
+                query: Some("-is:queued".into()),
+                public_reader: true,
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(public.is_err());
+    fixtures::close(&server).await;
 }
 
 fn lock(

@@ -161,6 +161,12 @@ async fn native_browser_queue_publishes_tested_commits_in_admission_order() {
     assert_eq!(visible["items"][0]["title"], "feature");
     assert_eq!(visible["items"][0]["can_remove"], false);
     assert_eq!(visible["items"][1]["can_prioritize"], false);
+    let work =
+        "/api/discussion-search?scope=team%2Fprivate&q=is%3Aqueued%20base%3Aintegration&limit=1";
+    let next = h.json(work, &reader).await["next"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert_eq!(
         h.write(
             Method::PUT,
@@ -202,7 +208,7 @@ async fn native_browser_queue_publishes_tested_commits_in_admission_order() {
         .run(&["wait", "--fn", "Array.from(document.querySelectorAll('ol[aria-label=\"Queued pull requests\"] li a:first-child'), a => a.textContent.trim()).join(',') === '#1 feature,#2 feature-two'"])
         .await;
     browser
-        .run(&["select", "#merge-queue-branch", "refs/heads/main"])
+        .choose_select("#merge-queue-branch", "refs/heads/main")
         .await;
     browser
         .run(&[
@@ -212,7 +218,7 @@ async fn native_browser_queue_publishes_tested_commits_in_admission_order() {
         ])
         .await;
     browser
-        .run(&["select", "#merge-queue-branch", "refs/heads/integration"])
+        .choose_select("#merge-queue-branch", "refs/heads/integration")
         .await;
     for number in [2, 1] {
         let move_button = format!("[aria-label='Move pull request #{number} to front']");
@@ -248,6 +254,38 @@ async fn native_browser_queue_publishes_tested_commits_in_admission_order() {
             .collect::<Vec<_>>(),
         [1]
     );
+    let continued = h
+        .http
+        .get(format!("{}{work}&after={next}", h.origin))
+        .header(reqwest::header::COOKIE, &reader)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(continued.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(h.json(work, &reader).await["items"][0]["number"], 1);
+    browser
+        .run(&["open", &format!("{}/team/private/pulls", h.origin)])
+        .await;
+    let search = "input[aria-label='Search pulls']";
+    browser.run(&["wait", search]).await;
+    browser.run(&["fill", search, "is:que"]).await;
+    browser
+        .run(&["wait", "--text", "Pull requests in the merge queue"])
+        .await;
+    browser.run(&["press", "ArrowDown"]).await;
+    browser.run(&["press", "Enter"]).await;
+    browser
+        .run(&[
+            "wait",
+            "--fn",
+            "document.activeElement?.value?.trim() === 'is:queued'",
+        ])
+        .await;
+    browser.run(&["press", "Enter"]).await;
+    browser.run(&[
+        "wait", "--fn",
+        "new URL(location.href).searchParams.get('q') === 'is:queued' && Array.from(document.querySelectorAll('.issue-list .issue-link'), a => a.getAttribute('href')).join(',') === '/team/private/pull/1'"
+    ]).await;
     browser
         .run(&["open", &format!("{}/team/private/pull/2", h.origin)])
         .await;
@@ -336,6 +374,7 @@ async fn native_browser_queue_publishes_tested_commits_in_admission_order() {
     browser
         .run(&["wait", "--text", "Published the tested merge candidate."])
         .await;
+    assert_eq!(h.json(work, &reader).await["items"], json!([]));
     git(path, &["fetch", remote.as_str(), "integration"]).await;
     assert_eq!(
         git(path, &["rev-list", "--parents", "-1", "FETCH_HEAD"]).await,

@@ -215,6 +215,8 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   On required branches, writers can request **Merge when ready**. A durable
   request waits for the exact head to pass current reviews and checks before
   receiving a queue position and undergoing candidate CI.
+  Repository and workspace pull request searches support `is:queued` across
+  target branches. Results follow active queue admission and removal.
   Required workflows can start automatically within the configured build limit.
   Candidate checks show the bound run and its GitHub Actions link. Repository
   settings choose merge commit, squash, or rebase for queued changes while
@@ -307,6 +309,16 @@ Crab v2 uses separate issue and PR sequences, including at the alpha tag. A repo
 Prioritize the workflows needed to change, govern, and operate private code
 with an external identity provider and CI. This order reflects workflow
 criticality and adoption dependencies.
+
+Repository-scoped SARIF uploads now create exact-commit check runs with
+visible findings, source-line links, and required-check enforcement. PR Checks
+compare fingerprinted findings against the exact base scan. Repository
+Security browses scans by branch and commit. Per-finding lifecycle history
+and audited policy exceptions remain separate delivery work.
+
+Branch-scoped review and check searches narrow fork-head discovery before
+object reads. Repository and workspace queries still use the same verified
+commit and review context for counts and continuation.
 
 | Priority | Remaining delivery | Acceptance evidence |
 | --- | --- | --- |

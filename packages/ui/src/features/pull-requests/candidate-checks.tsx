@@ -457,6 +457,7 @@ function ActiveChecks({
           repo={repo}
           pull={pull.number}
           oid={focused?.commit ?? pull.head_oid}
+          baseOid={focused?.base_oid ?? pull.base_oid}
           selected={selected}
           before={before}
           scopeToPull={!showCandidate && Boolean(pull.head_repository)}
@@ -569,6 +570,7 @@ function MergedChecks({
         pull={pull.number}
         oid={oid}
         selected={selected}
+        baseOid={pull.base_oid}
         before={before}
         scopeToPull
         candidate={candidate}

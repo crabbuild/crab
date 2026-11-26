@@ -67,7 +67,34 @@ interface CheckRun {
   created_at: number;
   updated_at: number;
   output?: CheckOutput;
+  scan_comparison?: ScanComparison;
 }
+
+type FindingState = "introduced" | "existing" | "unclassified";
+
+type ScanComparison = { baseline_sha: string } & (
+  | {
+      state: "ready";
+      introduced: number;
+      existing: number;
+      unclassified: number;
+      annotations: FindingState[];
+    }
+  | { state: "missing" | "incomplete" | "tools_changed" | "unreachable" }
+);
+
+const findingLabels: Record<FindingState, string> = {
+  introduced: "New",
+  existing: "Existing",
+  unclassified: "Unclassified",
+};
+
+const comparisonMessages = {
+  missing: "No matching scan has been reported for this base commit.",
+  incomplete: "At least one scan did not finish successfully.",
+  tools_changed: "The scans used different tools.",
+  unreachable: "This base commit is unavailable.",
+};
 
 interface CheckPage {
   sha: string;
@@ -112,29 +139,35 @@ export function CheckRuns({
   repo,
   pull,
   oid,
+  baseOid,
   selected,
   before,
   scopeToPull,
   githubActionsRef,
   candidate = false,
   live = false,
+  scanHref,
 }: {
   repo: Repository;
-  pull: number;
   oid: string;
+  baseOid?: string;
   selected?: number;
   before?: number;
   scopeToPull?: boolean;
   githubActionsRef?: string | null;
   candidate?: boolean;
   live?: boolean;
-}) {
-  const scope = scopeToPull ? String(pull) : undefined;
+} & (
+  | { pull: number; scanHref?: never }
+  | { pull?: never; scanHref: (filters?: Record<string, string>) => string }
+)) {
+  const scope = scopeToPull && pull !== undefined ? String(pull) : undefined;
   const page = useRequest<CheckPage>(
     endpoint(repo, `commits/${oid}/check-runs`, {
       limit: "50",
       before: before ? String(before) : undefined,
       pull: scope,
+      scans_only: scanHref ? "true" : undefined,
     }),
     repo.id,
     undefined,
@@ -146,30 +179,44 @@ export function CheckRuns({
       : undefined,
   );
   const active = page.data && (selected ?? page.data.items[0]?.id);
+  const activeRun = page.data?.items.find((run) => run.id === active);
+  const baseline =
+    activeRun && !activeRun.name.startsWith("Code scanning / ")
+      ? undefined
+      : baseOid;
   const detail = useRequest<CheckRun>(
     active
-      ? endpoint(repo, `commits/${oid}/check-runs/${active}`, { pull: scope })
+      ? endpoint(repo, `commits/${oid}/check-runs/${active}`, {
+          pull: scope,
+          baseline,
+          scans_only: scanHref ? "true" : undefined,
+        })
       : null,
     repo.id,
     undefined,
     live
-      ? { revision: page.data?.items.find((run) => run.id === active)?.version }
+      ? {
+          revision: activeRun?.version,
+          interval: baseline ? () => 15_000 : undefined,
+        }
       : undefined,
   );
-  const checkHref = (filters: Record<string, string> = {}) =>
-    repoHref(repo, {
-      view: "pulls",
-      pull: String(pull),
-      pull_tab: "checks",
-      candidate: candidate ? "1" : undefined,
-      ...filters,
-    });
+  const checkHref =
+    scanHref ??
+    ((filters: Record<string, string> = {}) =>
+      repoHref(repo, {
+        view: "pulls",
+        pull: String(pull),
+        pull_tab: "checks",
+        candidate: candidate ? "1" : undefined,
+        ...filters,
+      }));
   return (
     <section
       className={
         githubActionsRef ? "check-runs grid-rows-[auto_1fr]" : "check-runs"
       }
-      aria-label="Checks"
+      aria-label={scanHref ? "Scan reports" : "Checks"}
     >
       {githubActionsRef && (
         <MirrorRefspec key={oid} refspec={`${oid}:${githubActionsRef}`} />
@@ -178,9 +225,14 @@ export function CheckRuns({
         {(data) =>
           data.items.length ? (
             <>
-              <aside className="check-run-list" aria-label="Check runs">
+              <aside
+                className="check-run-list"
+                aria-label={scanHref ? "Reports for this commit" : "Check runs"}
+              >
                 <header>
-                  <strong>All checks</strong>
+                  <strong>
+                    {scanHref ? "Reports for this commit" : "All checks"}
+                  </strong>
                   <code>{short(data.sha)}</code>
                 </header>
                 <nav>
@@ -204,12 +256,16 @@ export function CheckRuns({
                 </nav>
                 {(before || data.next) && (
                   <footer>
-                    {before && <Link href={checkHref()}>Newest checks</Link>}
+                    {before && (
+                      <Link href={checkHref()}>
+                        {scanHref ? "Newest reports" : "Newest checks"}
+                      </Link>
+                    )}
                     {data.next && (
                       <Link
                         href={checkHref({ check_before: String(data.next) })}
                       >
-                        Older checks
+                        {scanHref ? "Older reports" : "Older checks"}
                       </Link>
                     )}
                   </footer>
@@ -217,15 +273,26 @@ export function CheckRuns({
               </aside>
               <div className="check-run-detail">
                 <Result state={detail} timingLabel="Check details">
-                  {(run) => <CheckRunDetail run={run} />}
+                  {(run) => (
+                    <CheckRunDetail
+                      run={run}
+                      sourceRepo={scopeToPull || candidate ? undefined : repo}
+                    />
+                  )}
                 </Result>
               </div>
             </>
           ) : (
             <div className="notice check-empty">
               <ClockIcon size={32} />
-              <h3>No checks have been reported</h3>
-              <p>CI check runs for this commit will appear here.</p>
+              <h3>
+                {scanHref
+                  ? "No scan reports for this commit"
+                  : "No checks have been reported"}
+              </h3>
+              {!scanHref && (
+                <p>CI check runs for this commit will appear here.</p>
+              )}
             </div>
           )
         }
@@ -278,9 +345,16 @@ function MirrorRefspec({ refspec }: { refspec: string }) {
   );
 }
 
-function CheckRunDetail({ run }: { run: CheckRun }) {
+function CheckRunDetail({
+  run,
+  sourceRepo,
+}: {
+  run: CheckRun;
+  sourceRepo?: Repository;
+}) {
   const output = run.output;
   if (!output) return null;
+  const comparison = run.scan_comparison;
   return (
     <article className="check-run-content">
       <header className={`check-run-heading ${outcome(run)}`}>
@@ -302,29 +376,74 @@ function CheckRunDetail({ run }: { run: CheckRun }) {
           </a>
         )}
       </header>
+      {comparison && (
+        <section
+          aria-label="Scan comparison"
+          className="grid gap-1 rounded-md border p-3 text-sm"
+        >
+          <p>
+            Compared with base{" "}
+            <code title={comparison.baseline_sha}>
+              {short(comparison.baseline_sha)}
+            </code>
+          </p>
+          <p className="text-muted-foreground">
+            {comparison.state === "ready"
+              ? `${comparison.introduced} new · ${comparison.existing} existing · ${comparison.unclassified} unclassified`
+              : comparisonMessages[comparison.state]}
+          </p>
+        </section>
+      )}
       {output.annotations.length > 0 && (
         <section className="check-annotations" aria-label="Annotations">
           <h4>Annotations</h4>
           <ul>
-            {output.annotations.map((annotation, index) => (
-              <li
-                className={annotation.level}
-                key={`${annotation.path}:${annotation.start_line}:${index}`}
-              >
-                <DotFillIcon />
-                <div>
-                  <strong>
-                    {annotation.title ?? annotation.message.split("\n")[0]}
-                  </strong>
-                  <code>
-                    {annotation.path}:{annotation.start_line}
-                    {annotation.end_line !== annotation.start_line &&
-                      `–${annotation.end_line}`}
-                  </code>
-                  {annotation.title && <p>{annotation.message}</p>}
-                </div>
-              </li>
-            ))}
+            {output.annotations.map((annotation, index) => {
+              const finding =
+                comparison?.state === "ready"
+                  ? comparison.annotations[index]
+                  : undefined;
+              const severity = {
+                failure: "Error",
+                warning: "Warning",
+                notice: "Notice",
+              }[annotation.level];
+              const location =
+                `${annotation.path}:${annotation.start_line}` +
+                (annotation.end_line === annotation.start_line
+                  ? ""
+                  : `–${annotation.end_line}`);
+              const href =
+                sourceRepo &&
+                sourceLocation(sourceRepo, run.head_sha, annotation);
+              return (
+                <li
+                  className={annotation.level}
+                  key={`${annotation.path}:${annotation.start_line}:${index}`}
+                >
+                  <DotFillIcon aria-hidden="true" />
+                  <div>
+                    <strong className="wrap-anywhere">
+                      {severity}
+                      {annotation.title && ` · ${annotation.title}`}
+                    </strong>
+                    {finding && (
+                      <span className="text-xs text-muted-foreground">
+                        {findingLabels[finding]}
+                      </span>
+                    )}
+                    {href ? (
+                      <Link className="wrap-anywhere underline" href={href}>
+                        <code>{location}</code>
+                      </Link>
+                    ) : (
+                      <code className="wrap-anywhere">{location}</code>
+                    )}
+                    <p className="whitespace-pre-wrap">{annotation.message}</p>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         </section>
       )}
@@ -359,4 +478,27 @@ function CheckRunDetail({ run }: { run: CheckRun }) {
       </section>
     </article>
   );
+}
+
+function sourceLocation(
+  repo: Repository,
+  sha: string,
+  annotation: CheckAnnotation,
+) {
+  const path = annotation.path;
+  if (
+    path.includes("\\") ||
+    path.split("/").some((part) => !part || part === "." || part === "..")
+  )
+    return undefined;
+  const hex = Array.from(new TextEncoder().encode(path), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  const href = repoHref(repo, {
+    rev: sha,
+    path: hex,
+    kind: "Blob",
+    repository_id: repo.id,
+  });
+  return `${href}#L${annotation.start_line}`;
 }

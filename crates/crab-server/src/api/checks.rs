@@ -21,10 +21,12 @@ use crate::{
         CheckRunRecord, CheckStepRecord, CheckSubmissionKey, CreateCheckRun, CreateCheckRunInput,
         CreateCheckRunOutcome, GetCheckCreateSubmission, GetCheckRun, GetCheckUpdateSubmission,
         ListCheckRuns, ListCheckRunsInput, UpdateCheckRun, UpdateCheckRunInput,
-        UpdateCheckRunOutcome,
+        UpdateCheckRunOutcome, check_scans,
     },
     server::Server,
 };
+
+mod sarif;
 
 const MAX_STEPS: usize = 50;
 const MAX_ANNOTATIONS: usize = 50;
@@ -120,6 +122,8 @@ struct NewCheckRun {
     conclusion: Option<CheckConclusion>,
     details_url: Option<String>,
     output: CheckOutput,
+    #[serde(skip)]
+    scan: Option<check_scans::Scan>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -139,6 +143,16 @@ struct ListParams {
     limit: Option<usize>,
     before: Option<u64>,
     pull: Option<u64>,
+    #[serde(default)]
+    scans_only: bool,
+}
+
+#[derive(Deserialize)]
+struct DetailScope {
+    pull: Option<u64>,
+    baseline: Option<String>,
+    #[serde(default)]
+    scans_only: bool,
 }
 
 pub(crate) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
@@ -153,6 +167,7 @@ pub(crate) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             get(detail).patch(edit),
         )
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
+        .merge(sarif::routes())
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
 
@@ -290,11 +305,20 @@ async fn create(
     input: std::result::Result<Json<NewCheckRun>, JsonRejection>,
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &key)?;
-    let repo = repo.as_ref();
     if !principal.can_write(repo.id) {
         return Err(Error::CheckPermission);
     }
-    let Json(mut input) = input?;
+    let Json(input) = input?;
+    create_run(&server, &principal, &repo, scope, input).await
+}
+
+async fn create_run(
+    server: &Server,
+    principal: &Principal,
+    repo: &crate::repository::Repository,
+    scope: statuses::CommitScope,
+    mut input: NewCheckRun,
+) -> Result<(StatusCode, Json<Value>)> {
     let submission_id = app::submission_id(&input.request_id)?;
     validate_plain(
         &input.name,
@@ -310,8 +334,8 @@ async fn create(
     let parsed_oid = statuses::parse_oid(&input.head_sha)?;
     input.request_id = Uuid::from_bytes(submission_id).to_string();
     input.head_sha = parsed_oid.to_string();
-    let actor = app::actor(&principal)?;
-    let read = crate::app::repository_cell(&server, repo)?;
+    let actor = app::actor(principal)?;
+    let read = crate::app::repository_cell(server, repo)?;
     if let Some(saved) = crate::app::query_output(
         read.client
             .query::<GetCheckCreateSubmission>(
@@ -324,7 +348,7 @@ async fn create(
         if !same_create(&saved, &actor, &input)? {
             return Err(Error::RequestConflict);
         }
-        let routed = crate::app::repository_cell(&server, repo)?;
+        let routed = crate::app::repository_cell(server, repo)?;
         let detail = created_check(crate::app::command_output(
             routed
                 .client
@@ -340,12 +364,12 @@ async fn create(
     }
 
     input.head_sha = scope
-        .require_commit(&server, repo, parsed_oid, statuses::CommitAccess::Write)
+        .require_commit(server, repo, parsed_oid, statuses::CommitAccess::Write)
         .await?;
     if !principal.can_write(repo.id) {
         return Err(Error::CheckPermission);
     }
-    let routed = crate::app::repository_cell(&server, repo)?;
+    let routed = crate::app::repository_cell(server, repo)?;
     let detail = created_check(crate::app::command_output(
         routed
             .client
@@ -399,6 +423,7 @@ async fn list(
                     before: params.before,
                     limit: u8::try_from(limit)
                         .map_err(|_| Error::CellContract("check page limit overflowed"))?,
+                    scans_only: params.scans_only,
                 },
             )
             .await,
@@ -419,11 +444,11 @@ async fn detail(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path((owner, name, oid, number)): Path<(String, String, String, u64)>,
-    Query(scope): Query<statuses::CommitScope>,
+    Query(scope): Query<DetailScope>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
-    let oid = scope
+    let oid = statuses::CommitScope { pull: scope.pull }
         .require_commit(
             &server,
             repo,
@@ -432,8 +457,19 @@ async fn detail(
         )
         .await?;
     app::actor(&principal)?;
+    let baseline = if let Some(baseline) = scope.baseline.as_deref() {
+        let commit = statuses::parse_oid(baseline)?;
+        let reachable = match statuses::require_commit(&server, repo, commit).await {
+            Ok(_) => true,
+            Err(Error::CommitNotFound) => false,
+            Err(error) => return Err(error),
+        };
+        Some((commit.to_string(), reachable))
+    } else {
+        None
+    };
     let routed = crate::app::repository_cell(&server, repo)?;
-    let detail = crate::app::query_output(
+    let mut detail = crate::app::query_output(
         routed
             .client
             .query::<GetCheckRun>(
@@ -442,13 +478,40 @@ async fn detail(
                 CheckRunKey {
                     oid,
                     number: app::number(number)?,
+                    baseline: baseline
+                        .as_ref()
+                        .and_then(|(sha, reachable)| reachable.then(|| sha.clone())),
                 },
             )
             .await,
     )?
     .ok_or(Error::CheckNotFound)?;
+    if scope.scans_only && detail.scan.is_none() {
+        return Err(Error::CheckNotFound);
+    }
+    let scan_comparison = if let Some((sha, reachable)) = baseline.filter(|_| detail.scan.is_some())
+    {
+        app::membership(&server, &principal, repo).await?;
+        let comparison = if reachable {
+            detail
+                .scan_comparison
+                .take()
+                .ok_or(Error::CellContract("Scan comparison is missing"))?
+        } else {
+            check_scans::Comparison::Unreachable
+        };
+        let mut comparison = serde_json::to_value(comparison)?;
+        comparison["baseline_sha"] = json!(sha);
+        Some(comparison)
+    } else {
+        None
+    };
     let (run, output) = check_detail(detail)?;
-    Ok(Json(detail_view(&run, &output)?))
+    let mut value = detail_view(&run, &output)?;
+    if let Some(comparison) = scan_comparison {
+        value["scan_comparison"] = comparison;
+    }
+    Ok(Json(value))
 }
 
 async fn edit(
@@ -568,6 +631,7 @@ fn create_input(
             input.details_url,
             input.output,
         ),
+        scan: input.scan,
     }
 }
 
@@ -707,7 +771,8 @@ fn same_create(saved: &CheckRunDetail, actor: &Identity, input: &NewCheckRun) ->
         && run.status == input.status
         && run.conclusion == input.conclusion
         && run.details_url == input.details_url
-        && output == input.output)
+        && output == input.output
+        && saved.scan == input.scan)
 }
 
 fn same_update(

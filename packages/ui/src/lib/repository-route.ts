@@ -373,6 +373,7 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
         "forks",
         "labels",
         "activity",
+        "security",
         "code-search",
         "rulesets",
         "properties",
