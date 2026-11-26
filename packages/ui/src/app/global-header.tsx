@@ -18,6 +18,7 @@ import {
   ListTodoIcon,
   LogOutIcon,
   MenuIcon,
+  SettingsIcon,
   UserRoundIcon,
   XIcon,
 } from "lucide-react";
@@ -228,6 +229,13 @@ export function GlobalHeader({
       href: "/-/discussion-search",
       Icon: SearchIcon,
       active: url.pathname === "/-/discussion-search",
+    },
+    {
+      label: "Settings",
+      href: "/-/settings",
+      Icon: SettingsIcon,
+      active:
+        url.pathname === "/-/profile" || url.pathname.startsWith("/-/settings"),
     },
   ];
 
@@ -524,6 +532,12 @@ export function GlobalHeader({
                   <DropdownMenuItem asChild>
                     <Link href="/-/discussion-search">
                       <SearchIcon aria-hidden="true" /> Search issues and PRs
+                    </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem asChild>
+                    <Link href="/-/settings">
+                      <SettingsIcon aria-hidden="true" /> Settings
                     </Link>
                   </DropdownMenuItem>
                 </DropdownMenuGroup>

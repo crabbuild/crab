@@ -45,7 +45,7 @@ export function EmailNotifications({ csrf }: { csrf: string }) {
   );
 }
 
-function EmailSettings({ csrf }: { csrf: string }) {
+export function EmailSettings({ csrf }: { csrf: string }) {
   const checkboxId = useId();
   const settings = useRequest<Preference>(path);
   const mutation = useMutation(csrf, null);
