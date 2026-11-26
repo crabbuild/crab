@@ -198,10 +198,7 @@ async fn personal_transfer_requires_consent_and_preserves_repository_data() {
         .unwrap();
     assert_eq!(result["state"], "accepted");
     let owner = result["to"]["owner"].as_str().unwrap();
-    assert_eq!(
-        owner,
-        crate::catalog::personal_namespace(&h.provider.issuer, "bob-id")
-    );
+    assert_eq!(owner, "bob");
     let new = h.server.repositories.by_id(id).unwrap();
     assert_eq!(new.config.prefix, old.config.prefix);
     assert_eq!(new.config.name, "moved");

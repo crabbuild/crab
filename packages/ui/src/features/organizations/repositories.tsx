@@ -1,8 +1,8 @@
+import { RepoIcon } from "@primer/octicons-react";
 import { Button } from "@/components/ui/button";
 import { Link } from "@/components/navigation/link";
 import { GitImport } from "@/features/imports";
 import { BrowseRepositories } from "@/features/repository/catalog-browse";
-import { CreateRepository } from "@/features/repository/create";
 import { navigate } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 
@@ -39,12 +39,14 @@ export function OrganizationRepositories({
             </Link>
           </Button>
           {canCreate && (
-            <CreateRepository
-              key={`${id}:${actor}`}
-              organization={{ id, name, actor }}
-              csrf={csrf}
-              onCreated={(repo) => navigate(repoHref(repo))}
-            />
+            <Button asChild size="sm">
+              <Link
+                href={`/-/new?${new URLSearchParams({ organization: id })}`}
+              >
+                <RepoIcon data-icon="inline-start" />
+                New repository
+              </Link>
+            </Button>
           )}
           {(canCreate || requestedImport) && (
             <GitImport

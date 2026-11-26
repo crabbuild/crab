@@ -479,23 +479,10 @@ fn namespace(principal: &Principal) -> app::Result<String> {
 async fn personal_owner_name(server: &Server, principal: &Principal) -> app::Result<String> {
     let identity = app::account(principal)?;
     if principal.is_local() {
-        return Ok("local".into());
+        return Ok(crate::catalog::LOCAL_NAMESPACE.into());
     }
-    if let Some(cells) = server.cells()
-        && let Ok(Some(profile)) = app::query_output(
-            cells
-                .query::<crate::cells::directory::GetOwnProfile>(
-                    Address::Directory,
-                    None,
-                    identity.clone(),
-                )
-                .await,
-        )
-        && !crate::catalog::is_personal_namespace(&profile.handle)
-        && !crate::catalog::is_organization_namespace(&profile.handle)
-        && profile.handle != "local"
-    {
-        return Ok(profile.handle);
+    if let Some(username) = crate::repository::access::username(server, identity.clone()).await {
+        return Ok(username);
     }
     Ok(crate::catalog::personal_namespace(
         &identity.issuer,
@@ -1018,31 +1005,27 @@ mod tests {
             "demo"
         );
 
+        // The former username still addresses Alice's repository, so another
+        // account cannot claim it. Route names never become usernames.
         *h.provider.mode.lock().await = "member".into();
         let bob = h.login().await;
-        h.write(
-            Method::POST,
-            "/api/profile",
-            &bob,
-            json!({"request_id": Uuid::now_v7(), "handle": "forhappy", "name": "Bob"}),
-        )
-        .await
-        .error_for_status()
-        .unwrap();
+        for (handle, status) in [
+            ("forhappy", StatusCode::CONFLICT),
+            ("api", StatusCode::BAD_REQUEST),
+        ] {
+            let claimed = h
+                .write(
+                    Method::POST,
+                    "/api/profile",
+                    &bob,
+                    json!({"request_id": Uuid::now_v7(), "handle": handle, "name": "Bob"}),
+                )
+                .await;
+            assert_eq!(claimed.status(), status, "{handle}");
+        }
         assert_eq!(
             h.json("/api/repos/personal", &bob).await["repositories"],
             json!([])
-        );
-        assert_eq!(
-            h.write(
-                Method::POST,
-                "/api/repos/creation",
-                &bob,
-                json!({"request_id": Uuid::now_v7(), "name": "demo", "description": ""}),
-            )
-            .await
-            .status(),
-            StatusCode::CONFLICT
         );
         h.close().await;
     }

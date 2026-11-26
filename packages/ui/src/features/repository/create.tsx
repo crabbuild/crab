@@ -1,36 +1,55 @@
-import { useState, type ReactNode } from "react";
-import { RepoIcon } from "@primer/octicons-react";
+import { useEffect, useState, type ReactNode } from "react";
+import {
+  CheckIcon,
+  GlobeIcon,
+  InfoIcon,
+  LockIcon,
+  OrganizationIcon,
+  TriangleDownIcon,
+  XIcon,
+} from "@primer/octicons-react";
 import { useMutation } from "@/components/discussion/mutations";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Field,
-  FieldContent,
   FieldDescription,
   FieldError,
   FieldGroup,
   FieldLabel,
   FieldLegend,
+  FieldSeparator,
   FieldSet,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { UserAvatar } from "@/components/ui/user-avatar";
+import type { OrganizationMembershipEntry } from "@/features/organizations/choices";
+import { useOrganizationDirectory } from "@/features/organizations/directory";
 import {
   RepositoryPropertyFields,
   needsExplicitPropertyValues,
   type PropertyDefinition,
   type PropertyOverrides,
 } from "@/features/organizations/property-fields";
-import { useRequest, type RepositoryVisibility } from "@/lib/api";
+import {
+  navigate,
+  useRequest,
+  type Repository,
+  type RepositoryVisibility,
+} from "@/lib/api";
+import type { AvatarConfig, Session } from "@/lib/contracts";
+import { repoHref } from "@/lib/repository-route";
+import { cn } from "@/lib/utils";
 
 type Destination = {
   owner: string;
@@ -46,11 +65,39 @@ type Submission = {
   visibility: RepositoryVisibility;
   properties?: PropertyOverrides;
 };
+type Draft = { name: string; description: string };
+
+const DESCRIPTION_LIMIT = 350;
 
 const visibilityOptions = {
-  private: ["Private", "Only people with access can view this repository."],
-  public: ["Public", "Anyone can view and clone this repository."],
+  public: {
+    Icon: GlobeIcon,
+    label: "Public",
+    help: "Anyone can see and clone this repository. You choose who can commit.",
+  },
+  private: {
+    Icon: LockIcon,
+    label: "Private",
+    help: "You choose who can see and commit to this repository.",
+  },
 } as const;
+
+const flavors = ["brave", "bright", "cosmic", "crisp", "fuzzy", "lucky"];
+const places = ["harbor", "kelp", "lagoon", "pebble", "reef", "tide"];
+
+function suggestName() {
+  const [flavor, place] = crypto.getRandomValues(new Uint32Array(2));
+  return `${flavors[flavor % flavors.length]}-${places[place % places.length]}`;
+}
+
+// Like GitHub, replace characters the server rejects instead of refusing them.
+function repositoryName(value: string) {
+  return value.trim().replace(/[^A-Za-z0-9._-]+/g, "-");
+}
+
+function validName(name: string) {
+  return name.length > 0 && name.length <= 100 && name !== "." && name !== "..";
+}
 
 function recover(key: string): Submission | undefined {
   try {
@@ -74,27 +121,173 @@ function recover(key: string): Submission | undefined {
   }
 }
 
+function OrganizationAvatar({ size }: { size: number }) {
+  return (
+    <span
+      className="inline-flex shrink-0 items-center justify-center rounded-md border bg-muted text-muted-foreground"
+      style={{ width: size, height: size }}
+      aria-hidden="true"
+    >
+      <OrganizationIcon size={Math.round(size * 0.6)} />
+    </span>
+  );
+}
+
+function OwnerPicker({
+  personal,
+  avatar,
+  organizations,
+  selected,
+  onSelect,
+}: {
+  personal: string;
+  avatar: AvatarConfig | null;
+  organizations: OrganizationMembershipEntry[];
+  selected?: OrganizationMembershipEntry;
+  onSelect: (organization?: string) => void;
+}) {
+  const label = selected?.organization.name ?? personal;
+  return (
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          id="new-repository-owner"
+          type="button"
+          variant="outline"
+          className="h-9 max-w-64 justify-start gap-2 px-2.5"
+        >
+          {selected ? (
+            <OrganizationAvatar size={20} />
+          ) : (
+            <UserAvatar name={personal} avatar={avatar} size={20} />
+          )}
+          <span className="truncate">{label}</span>
+          <TriangleDownIcon aria-hidden="true" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-64">
+        <DropdownMenuLabel>Choose an owner</DropdownMenuLabel>
+        <DropdownMenuItem onSelect={() => onSelect(undefined)}>
+          <UserAvatar name={personal} avatar={avatar} size={20} />
+          <span className="min-w-0 flex-1 truncate">{personal}</span>
+          {!selected && <CheckIcon aria-label="Selected" />}
+        </DropdownMenuItem>
+        {organizations.length > 0 && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>Organizations</DropdownMenuLabel>
+            {organizations.map((entry) => (
+              <DropdownMenuItem
+                key={entry.organization.id}
+                onSelect={() => onSelect(entry.organization.id)}
+              >
+                <OrganizationAvatar size={20} />
+                <span className="min-w-0 flex-1 truncate">
+                  {entry.organization.name}
+                </span>
+                {selected?.organization.id === entry.organization.id && (
+                  <CheckIcon aria-label="Selected" />
+                )}
+              </DropdownMenuItem>
+            ))}
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function OwnerField({ children }: { children: ReactNode }) {
+  return (
+    <Field className="w-auto">
+      <FieldLabel htmlFor="new-repository-owner">
+        Owner <span aria-hidden="true">*</span>
+      </FieldLabel>
+      {children}
+    </Field>
+  );
+}
+
+function Availability({
+  owner,
+  label,
+  name,
+}: {
+  owner: string;
+  label: string;
+  name: string;
+}) {
+  const [checked, setChecked] = useState(name);
+  useEffect(() => {
+    const timer = setTimeout(() => setChecked(name), 300);
+    return () => clearTimeout(timer);
+  }, [name]);
+  const lookup = useRequest<{ repositories: Repository[] }>(
+    validName(checked)
+      ? `/api/repos?${new URLSearchParams({ owner, name: checked })}`
+      : null,
+  );
+  if (checked !== name || !lookup.data) return null;
+  const taken = lookup.data.repositories.length > 0;
+  return (
+    <p
+      role="status"
+      className={cn(
+        "flex items-center gap-1.5 text-sm",
+        taken ? "text-destructive" : "text-(--success)",
+      )}
+    >
+      {taken ? <XIcon aria-hidden="true" /> : <CheckIcon aria-hidden="true" />}
+      {taken ? (
+        <span>
+          The repository{" "}
+          <strong>
+            {label}/{name}
+          </strong>{" "}
+          already exists on this account.
+        </span>
+      ) : (
+        <span>
+          <strong>
+            {label}/{name}
+          </strong>{" "}
+          is available.
+        </span>
+      )}
+    </p>
+  );
+}
+
 function RepositoryForm({
   destination,
+  owner,
+  organization,
   endpoint,
   account,
   csrf,
-  onCreated,
+  draft,
+  onDraft,
 }: {
   destination: Destination;
+  owner: ReactNode;
+  organization?: string;
   endpoint: string;
-  account?: string;
+  account: string;
   csrf: string;
-  onCreated: (repository: RepositoryAddress) => void;
+  draft: Draft;
+  onDraft: (draft: Draft) => void;
 }) {
-  const key = `crab:repository-creation:${destination.owner}${account ? `:${account}` : ""}`;
+  const key = `crab:repository-creation:${destination.owner}:${account}`;
   const [attempt, setAttempt] = useState(() => recover(key));
-  const [name, setName] = useState(attempt?.name ?? "");
-  const [description, setDescription] = useState(attempt?.description ?? "");
+  const [name, setName] = useState(attempt?.name ?? draft.name);
+  const [description, setDescription] = useState(
+    attempt?.description ?? draft.description,
+  );
   const [visibility, setVisibility] = useState(
     attempt?.visibility ?? destination.visibilities[0],
   );
   const [properties, setProperties] = useState(attempt?.properties ?? {});
+  const [suggestion] = useState(suggestName);
   const definitions = destination.properties ?? [];
   const propertyIds = Object.keys(properties);
   const availableProperties = Object.fromEntries(
@@ -106,7 +299,7 @@ function RepositoryForm({
     propertyIds.length > Object.keys(availableProperties).length;
   const available = destination.visibilities.includes(visibility);
   const fields = {
-    name: name.trim(),
+    name: repositoryName(name),
     description: description.trim(),
     visibility,
   };
@@ -122,13 +315,20 @@ function RepositoryForm({
     );
   const incomplete =
     !retry && needsExplicitPropertyValues(definitions, availableProperties);
+  const named = validName(fields.name);
+  const label = organization ?? destination.owner;
   const mutation = useMutation(csrf, null);
+  const edit = (next: Draft) => {
+    setName(next.name);
+    setDescription(next.description);
+    onDraft(next);
+  };
   return (
     <form
+      className="mt-6"
       onSubmit={async (event) => {
         event.preventDefault();
-        if (!fields.name || !available || incomplete || mutation.pending)
-          return;
+        if (!named || !available || incomplete || mutation.pending) return;
         const next = retry
           ? attempt
           : {
@@ -156,65 +356,157 @@ function RepositoryForm({
           } catch {
             // Storage was already unavailable.
           }
-          onCreated(created);
+          navigate(repoHref(created));
         }
       }}
     >
       <FieldGroup>
-        <Field>
-          <FieldLabel htmlFor="new-repository-name">Repository name</FieldLabel>
-          <Input
-            id="new-repository-name"
-            required
-            autoComplete="off"
-            maxLength={100}
-            pattern={String.raw`[A-Za-z0-9._\-]+`}
-            value={name}
-            disabled={mutation.pending}
-            onChange={(event) => setName(event.target.value)}
-          />
-        </Field>
+        <div className="grid gap-2">
+          <div className="flex flex-wrap items-end gap-x-2 gap-y-3">
+            {owner}
+            <span
+              className="hidden pb-1.5 text-xl text-muted-foreground sm:block"
+              aria-hidden="true"
+            >
+              /
+            </span>
+            <Field className="min-w-56 flex-1">
+              <FieldLabel htmlFor="new-repository-name">
+                Repository name <span aria-hidden="true">*</span>
+              </FieldLabel>
+              <Input
+                id="new-repository-name"
+                required
+                autoComplete="off"
+                autoFocus
+                maxLength={100}
+                value={name}
+                disabled={mutation.pending}
+                aria-describedby="new-repository-name-help"
+                onChange={(event) =>
+                  edit({ name: event.target.value, description })
+                }
+              />
+            </Field>
+          </div>
+          {named && fields.name !== name.trim() && (
+            <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
+              <InfoIcon aria-hidden="true" />
+              <span>
+                Your new repository will be created as{" "}
+                <strong>{fields.name}</strong>.
+              </span>
+            </p>
+          )}
+          {named && (
+            <Availability
+              owner={destination.owner}
+              label={label}
+              name={fields.name}
+            />
+          )}
+          {/^user-[0-9a-f]{32}$/i.test(destination.owner) && (
+            <p className="flex items-start gap-1.5 text-sm text-muted-foreground">
+              <InfoIcon className="mt-0.5" aria-hidden="true" />
+              <span>
+                Set a username in{" "}
+                <Link
+                  href="/-/settings/profile"
+                  className="font-medium text-foreground underline underline-offset-4"
+                >
+                  Settings › Profile
+                </Link>{" "}
+                to create repositories under your username.
+              </span>
+            </p>
+          )}
+          <p
+            id="new-repository-name-help"
+            className="text-sm text-muted-foreground"
+          >
+            Great repository names are short and memorable. Need inspiration?
+            How about{" "}
+            <button
+              type="button"
+              className="font-semibold text-(--success) hover:underline"
+              disabled={mutation.pending}
+              onClick={() => edit({ name: suggestion, description })}
+            >
+              {suggestion}
+            </button>
+            ?
+          </p>
+        </div>
         <Field>
           <FieldLabel htmlFor="new-repository-description">
             Description (optional)
           </FieldLabel>
           <Input
             id="new-repository-description"
-            maxLength={350}
+            maxLength={DESCRIPTION_LIMIT}
             value={description}
             disabled={mutation.pending}
-            onChange={(event) => setDescription(event.target.value)}
+            aria-describedby="new-repository-description-count"
+            onChange={(event) =>
+              edit({ name, description: event.target.value })
+            }
           />
+          <FieldDescription id="new-repository-description-count">
+            {description.length}/{DESCRIPTION_LIMIT} characters
+          </FieldDescription>
         </Field>
+        <FieldSeparator />
         <FieldSet>
           <FieldLegend id="new-repository-visibility" variant="label">
-            Visibility
+            Visibility <span aria-hidden="true">*</span>
           </FieldLegend>
           <RadioGroup
             aria-labelledby="new-repository-visibility"
             value={visibility}
             disabled={mutation.pending}
+            className="gap-0 divide-y overflow-hidden rounded-md border"
             onValueChange={(value) => {
               setVisibility(value === "public" ? "public" : "private");
             }}
           >
             {destination.visibilities.map((value) => {
               const id = `new-repository-${value}`;
-              const [label, description] = visibilityOptions[value];
+              const { Icon, label, help } = visibilityOptions[value];
               return (
-                <Field key={value} orientation="horizontal">
+                <label
+                  key={value}
+                  htmlFor={id}
+                  className={cn(
+                    "flex cursor-pointer items-start gap-3 px-3 py-3 transition-colors",
+                    visibility === value
+                      ? "bg-accent/50"
+                      : "hover:bg-accent/30",
+                  )}
+                >
                   <RadioGroupItem
                     id={id}
                     value={value}
+                    className="mt-1"
+                    aria-labelledby={`${id}-label`}
                     aria-describedby={`${id}-help`}
                   />
-                  <FieldContent>
-                    <FieldLabel htmlFor={id}>{label}</FieldLabel>
-                    <FieldDescription id={`${id}-help`}>
-                      {description}
-                    </FieldDescription>
-                  </FieldContent>
-                </Field>
+                  <Icon
+                    size={24}
+                    className="shrink-0 text-muted-foreground"
+                    aria-hidden="true"
+                  />
+                  <span className="grid gap-0.5">
+                    <span id={`${id}-label`} className="text-sm font-semibold">
+                      {label}
+                    </span>
+                    <span
+                      id={`${id}-help`}
+                      className="text-sm text-muted-foreground"
+                    >
+                      {help}
+                    </span>
+                  </span>
+                </label>
               );
             })}
           </RadioGroup>
@@ -225,6 +517,7 @@ function RepositoryForm({
             </FieldError>
           )}
         </FieldSet>
+        {(definitions.length > 0 || hasUnavailable) && <FieldSeparator />}
         <RepositoryPropertyFields
           definitions={definitions}
           values={properties}
@@ -242,26 +535,27 @@ function RepositoryForm({
             Clear unavailable property values
           </Button>
         )}
-        <p className="text-sm wrap-anywhere text-muted-foreground">
-          <code>
-            {destination.owner}/{name || "repository"}
-          </code>{" "}
-          · Default branch <code>{destination.default_branch}</code>
+        <FieldSeparator />
+        <p className="flex items-start gap-2 text-sm text-muted-foreground">
+          <InfoIcon className="mt-0.5" aria-hidden="true" />
+          <span>
+            You are creating a {visibility} repository{" "}
+            {organization ? (
+              <>
+                in the <strong>{organization}</strong> organization
+              </>
+            ) : (
+              "in your personal account"
+            )}
+            . Its default branch will be{" "}
+            <code>{destination.default_branch}</code>.
+          </span>
         </p>
-        {/^user-[0-9a-f]{32}$/i.test(destination.owner) && (
-          <p className="m-0 text-xs text-muted-foreground">
-            Set a username in{" "}
-            <Link href="/-/profile">Public profile settings</Link> to create
-            repositories under your username.
-          </p>
-        )}
         {mutation.error && <FieldError>{mutation.error}</FieldError>}
         <div className="flex justify-end">
           <Button
             type="submit"
-            disabled={
-              !fields.name || !available || incomplete || mutation.pending
-            }
+            disabled={!named || !available || incomplete || mutation.pending}
           >
             {mutation.pending ? "Creating…" : "Create repository"}
           </Button>
@@ -271,64 +565,93 @@ function RepositoryForm({
   );
 }
 
-export function CreateRepository({
-  organization,
-  csrf,
-  onCreated,
-  open: controlledOpen,
-  onOpenChange: controlledOnOpenChange,
-  trigger,
+/** GitHub-style page for creating a repository owned by the viewer or an organization. */
+export function NewRepository({
+  session,
+  avatar,
+  url,
 }: {
-  organization?: { id: string; name: string; actor: string };
-  csrf: string;
-  onCreated: (repository: RepositoryAddress) => void;
-  open?: boolean;
-  onOpenChange?: (open: boolean) => void;
-  trigger?: ReactNode | null;
+  session: Session;
+  avatar: AvatarConfig | null;
+  url: URL;
 }) {
-  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
-  const open = controlledOpen ?? uncontrolledOpen;
-  const setOpen = controlledOnOpenChange ?? setUncontrolledOpen;
+  const directory = useOrganizationDirectory();
+  const organizations = (directory.data?.items ?? []).filter(
+    (entry): entry is OrganizationMembershipEntry =>
+      entry.kind === "member" && entry.can_create,
+  );
+  const [chosen, setChosen] = useState(
+    () => url.searchParams.get("organization") ?? undefined,
+  );
+  const organization = organizations.find(
+    (entry) => entry.organization.id === chosen,
+  );
+  // An organization from the URL waits for the directory. An ineligible
+  // one falls back to the personal account instead of a failing request.
+  const resolving = Boolean(chosen && !organization && directory.loading);
+  const personal = useRequest<Destination>("/api/repos/creation");
   const endpoint = organization
-    ? `/api/organizations/${organization.id}/repositories/creation`
+    ? `/api/organizations/${encodeURIComponent(organization.organization.id)}/repositories/creation`
     : "/api/repos/creation";
-  const destination = useRequest<Destination>(open ? endpoint : null);
+  const owned = useRequest<Destination>(
+    organization && !resolving ? endpoint : null,
+  );
+  const destination = organization ? owned : personal;
+  const [draft, setDraft] = useState<Draft>({ name: "", description: "" });
+  const personalName =
+    personal.data?.owner ?? session.user?.name ?? "Personal account";
+  const account =
+    organization?.actor ??
+    (session.user
+      ? JSON.stringify([session.user.issuer, session.user.subject])
+      : "local");
+  const picker = (
+    <OwnerField>
+      <OwnerPicker
+        personal={personalName}
+        avatar={avatar}
+        organizations={organizations}
+        selected={organization}
+        onSelect={setChosen}
+      />
+    </OwnerField>
+  );
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      {trigger !== null && (
-        <DialogTrigger asChild>
-          {trigger ?? (
-            <Button>
-              <RepoIcon data-icon="inline-start" />
-              New repository
-            </Button>
-          )}
-        </DialogTrigger>
-      )}
-      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Create a repository</DialogTitle>
-          <DialogDescription>
-            {organization
-              ? `Create an empty Git repository owned by ${organization.name}.`
-              : "Create an empty Git repository in your personal namespace."}
-          </DialogDescription>
-        </DialogHeader>
-        <Result state={destination}>
-          {(data) => (
-            <RepositoryForm
-              destination={data}
-              endpoint={endpoint}
-              account={organization?.actor}
-              csrf={csrf}
-              onCreated={(repository) => {
-                setOpen(false);
-                onCreated(repository);
-              }}
-            />
-          )}
-        </Result>
-      </DialogContent>
-    </Dialog>
+    <div className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-6">
+      <header className="border-b pb-4">
+        <h1 className="text-2xl font-semibold">Create a new repository</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          A repository contains all project files, including the revision
+          history. Already have a project repository elsewhere?{" "}
+          <Link
+            href="/-/repositories"
+            className="font-medium text-foreground underline underline-offset-4"
+          >
+            Import a repository.
+          </Link>
+        </p>
+      </header>
+      <p className="mt-4 text-xs text-muted-foreground italic">
+        Required fields are marked with an asterisk (*).
+      </p>
+      <Result
+        state={resolving ? { loading: true, retry: () => {} } : destination}
+        timingLabel="Repository owner"
+      >
+        {(data) => (
+          <RepositoryForm
+            key={`${data.owner}:${account}`}
+            destination={data}
+            owner={picker}
+            organization={organization?.organization.name}
+            endpoint={endpoint}
+            account={account}
+            csrf={session.csrf ?? ""}
+            draft={draft}
+            onDraft={setDraft}
+          />
+        )}
+      </Result>
+    </div>
   );
 }

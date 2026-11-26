@@ -350,7 +350,7 @@ async fn native_browser_creates_a_public_personal_repository() {
         .run(&[
             "find",
             "role",
-            "button",
+            "link",
             "click",
             "--name",
             "New repository",
@@ -381,6 +381,7 @@ async fn native_browser_creates_a_public_personal_repository() {
         .run(&["wait", "--text", "This repository is empty"])
         .await;
     let personal = h.json("/api/repos/personal", &alice).await;
+    assert_eq!(personal["repositories"][0]["owner"], "alice");
     assert_eq!(personal["repositories"][0]["name"], "alice-notes");
     assert_eq!(personal["repositories"][0]["visibility"], "public");
 

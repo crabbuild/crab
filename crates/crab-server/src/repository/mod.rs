@@ -102,9 +102,8 @@ impl Repository {
     pub(crate) fn owning_organization(&self) -> Option<Uuid> {
         // A personal fork uses its upstream organization's live authority
         // while its address belongs to the member's repository namespace.
-        self.organization.filter(|_| {
-            self.forked_from.is_none() || !crate::catalog::is_personal_namespace(&self.config.owner)
-        })
+        self.organization
+            .filter(|_| self.forked_from.is_none() || self.personal_namespace.is_none())
     }
 
     pub(crate) fn fork_source(&self, server: &Server) -> Option<Arc<Self>> {

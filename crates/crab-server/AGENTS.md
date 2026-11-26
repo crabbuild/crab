@@ -310,6 +310,10 @@ infer a historical organization from a repository's current placement.
 the durable catalog reservation and shared Git and Cell initializer.
 `cells/organization/repositories.rs` records owner-authorized submissions.
 The catalog's explicit organization UUID owns the repository relationship.
+A personal namespace is the account's Directory username, or its derived
+`user-<id>` namespace. The catalog's `personal_owner` or `fork_owner` binding
+owns it, and validation keeps one account per owner address. Never infer
+ownership from the address alone.
 `api/repository_transfer/` checks the current source and destination authorities.
 Its incoming view reads pending offers from the current catalog and applies
 recipient and organization-owner checks independently of source access.

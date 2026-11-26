@@ -17,7 +17,8 @@ use crate::{
     cells::{
         Address, CellClient,
         directory::{
-            IdentityKey, LookupAccounts, LookupIdentities, LookupRoutingIdentities, RoutingLookup,
+            GetOwnProfile, IdentityKey, LookupAccounts, LookupIdentities, LookupRoutingIdentities,
+            RoutingLookup,
         },
         organization::{
             Caller, GetOrganization, Role,
@@ -54,6 +55,24 @@ pub(crate) async fn actor_id(server: &Server, key: IdentityKey) -> Result<Option
             "Account lookup returned an invalid result count",
         )),
     }
+}
+
+/// The username that addresses an account's new personal repositories.
+///
+/// Returns `None` without a usable username; callers then use the account's
+/// derived namespace. Profiles can be renamed, so callers bind the result to
+/// the verified account instead of treating the address as ownership proof.
+pub(crate) async fn username(server: &Server, key: IdentityKey) -> Option<String> {
+    let cells = server.cells()?;
+    app::query_output(
+        cells
+            .query::<GetOwnProfile>(Address::Directory, None, key)
+            .await,
+    )
+    .ok()
+    .flatten()
+    .map(|profile| profile.handle)
+    .filter(|handle| crate::catalog::valid_account_namespace(handle))
 }
 
 pub(crate) async fn organization_role(

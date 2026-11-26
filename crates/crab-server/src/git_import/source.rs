@@ -333,9 +333,7 @@ fn normalize_github_source(value: &str) -> Result<String, ImportError> {
 
 pub(super) fn identifier(value: String, field: &'static str) -> Result<String, ImportError> {
     let value = value.trim().to_owned();
-    if !valid_identifier(&value)
-        || (field == "owner" && matches!(value.as_str(), "api" | "assets" | "auth" | "git"))
-    {
+    if !valid_identifier(&value) || (field == "owner" && crate::config::reserved_owner(&value)) {
         return Err(ImportError::Invalid(
             "owner and name must be URL-safe identifiers",
         ));
