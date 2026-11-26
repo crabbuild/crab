@@ -505,8 +505,11 @@ pub(super) async fn reserve_destination(
     namespace: BrowserNamespace,
     reservation: GitImportReservation,
 ) -> Result<CatalogRecord, ImportError> {
-    let personal_admin =
-        server.auth.is_some() && matches!(&namespace, BrowserNamespace::Personal(_));
+    let personal_admin = server.auth.is_some()
+        && matches!(
+            &namespace,
+            BrowserNamespace::Personal(_) | BrowserNamespace::ManagedPersonal { .. }
+        );
     let reserve = |creator: Option<crate::auth::Identity>| async move {
         job.verify().await?;
         account.check(server).await?;

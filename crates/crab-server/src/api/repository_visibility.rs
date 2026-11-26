@@ -55,8 +55,7 @@ async fn access(
     actor: &MembershipActor,
 ) -> Result<SourceAccess> {
     if record.forked_from.is_some()
-        || (record.organization_id().is_none()
-            && !crate::catalog::is_personal_namespace(&record.owner))
+        || (record.organization_id().is_none() && !record.is_personal_repository())
     {
         return Err(Error::NotFound);
     }

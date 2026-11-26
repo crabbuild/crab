@@ -199,6 +199,7 @@ pub(crate) async fn materialize_record(
         )?,
     );
     repository.organization = record.organization_id();
+    repository.personal_namespace = record.personal_namespace();
     repository.created_at_ms = record.created_at_ms;
     repository.ownership_epoch = record.ownership_epoch;
     repository.property_seed = record.property_seed;

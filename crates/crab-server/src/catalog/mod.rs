@@ -76,6 +76,8 @@ pub struct CatalogRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) fork_owner: Option<MembershipActor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) personal_owner: Option<MembershipActor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) fork_creator: Option<MembershipActor>,
     pub name: String,
     pub prefix: String,
@@ -396,6 +398,15 @@ impl CatalogDocument {
             {
                 return Err(CatalogError::Invalid("personal fork owner is invalid"));
             }
+            if let Some(owner) = &record.personal_owner
+                && (record.organization.is_some()
+                    || !valid_actor(owner)
+                    || is_organization_namespace(&record.owner))
+            {
+                return Err(CatalogError::Invalid(
+                    "personal repository owner is invalid",
+                ));
+            }
             if record
                 .description_edit
                 .as_ref()
@@ -505,6 +516,10 @@ pub(crate) fn is_organization_namespace(owner: &str) -> bool {
 
 pub(crate) enum BrowserNamespace {
     Personal(String),
+    ManagedPersonal {
+        owner: String,
+        actor: MembershipActor,
+    },
     Organization(Uuid),
     PersonalFork {
         organization: Uuid,
@@ -513,6 +528,13 @@ pub(crate) enum BrowserNamespace {
 }
 
 impl BrowserNamespace {
+    fn personal_owner(&self) -> Option<MembershipActor> {
+        match self {
+            Self::ManagedPersonal { actor, .. } => Some(actor.clone()),
+            _ => None,
+        }
+    }
+
     fn reservation_owner(
         self,
         actor: &MembershipActor,
@@ -538,7 +560,7 @@ impl BrowserNamespace {
         members: &[RepositoryMember],
     ) -> Result<(String, Option<OrganizationAccess>), CatalogError> {
         match self {
-            Self::Personal(owner) => Ok((owner, None)),
+            Self::Personal(owner) | Self::ManagedPersonal { owner, .. } => Ok((owner, None)),
             Self::PersonalFork {
                 organization,
                 owner,
@@ -604,6 +626,21 @@ fn membership_digest(
 }
 
 impl CatalogRecord {
+    pub(crate) fn personal_namespace(&self) -> Option<String> {
+        self.personal_owner
+            .as_ref()
+            .or(self.fork_owner.as_ref())
+            .map(|actor| personal_namespace(&actor.issuer, &actor.subject))
+            .or_else(|| {
+                (self.organization.is_none() && is_personal_namespace(&self.owner))
+                    .then(|| self.owner.clone())
+            })
+    }
+
+    pub(crate) fn is_personal_repository(&self) -> bool {
+        self.personal_namespace().is_some()
+    }
+
     fn fork_creator_valid(&self) -> bool {
         self.fork_creator.as_ref().is_none_or(|creator| {
             self.forked_from.is_some()
@@ -863,6 +900,7 @@ impl CatalogStore {
             forked_from: None,
             fork_baseline: RepositoryBaseline::Organization,
             fork_owner: None,
+            personal_owner: None,
             fork_creator: None,
             name,
             prefix,
@@ -894,6 +932,7 @@ impl CatalogStore {
         actor: MembershipActor,
         members: Vec<RepositoryMember>,
     ) -> Result<CatalogRecord, CatalogError> {
+        let personal_owner = namespace.personal_owner();
         let (owner, organization) = namespace.reservation_owner(&actor, &members)?;
         let id = browser_repository_id(&owner, input.request_id);
         self.insert_with_mode(
@@ -906,6 +945,7 @@ impl CatalogStore {
                 forked_from: None,
                 fork_baseline: RepositoryBaseline::Organization,
                 fork_owner: None,
+                personal_owner,
                 fork_creator: None,
                 name: input.name,
                 prefix: format!("browser-repositories/{id}"),
@@ -955,6 +995,7 @@ impl CatalogStore {
             }
             _ => None,
         };
+        let personal_owner = namespace.personal_owner();
         let (owner, organization) = namespace.reservation_owner(&actor, &members)?;
         // The creator's write grant is conditional on destination membership
         // and access to the source. Never install it as a direct Admin grant.
@@ -977,6 +1018,7 @@ impl CatalogStore {
                 forked_from,
                 fork_baseline: RepositoryBaseline::Organization,
                 fork_owner,
+                personal_owner,
                 fork_creator,
                 name,
                 prefix: format!("git-imports/{id}"),
@@ -1043,6 +1085,7 @@ impl CatalogStore {
             forked_from: None,
             fork_baseline: RepositoryBaseline::Organization,
             fork_owner: None,
+            personal_owner: None,
             fork_creator: None,
             name,
             prefix,
@@ -1463,6 +1506,7 @@ impl CatalogStore {
                 let same = existing.organization_id() == record.organization_id()
                     && existing.forked_from == record.forked_from
                     && existing.fork_owner == record.fork_owner
+                    && existing.personal_owner == record.personal_owner
                     && existing.fork_creator == record.fork_creator
                     && match &mode {
                         InsertMode::ExistingPrefix => existing.prefix == record.prefix,

@@ -305,11 +305,15 @@ impl CatalogStore {
             new.ownership_epoch = new.name_version();
             new.property_seed = property_seed;
             new.organization = match offer.recipient {
-                Recipient::Organization { id } => Some(OrganizationAccess {
-                    id,
-                    teams: Vec::new(),
-                }),
+                Recipient::Organization { id } => {
+                    new.personal_owner = None;
+                    Some(OrganizationAccess {
+                        id,
+                        teams: Vec::new(),
+                    })
+                }
                 Recipient::Account { identity } => {
+                    new.personal_owner = Some(identity.clone());
                     if let Some(entry) = new
                         .members
                         .iter_mut()
