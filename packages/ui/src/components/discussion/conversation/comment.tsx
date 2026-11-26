@@ -45,7 +45,7 @@ export function CommentCard({
     >
       <header>
         <strong>
-          <Author author={comment.author} />
+          <Author author={comment.author} showAvatar />
         </strong>
         <Link
           className="muted"

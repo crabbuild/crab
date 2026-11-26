@@ -20,7 +20,7 @@ import {
 } from "@/features/organizations";
 import { OrganizationDirectory } from "@/features/organizations/directory";
 import { matchOrganizationRoute } from "@/lib/organization-route";
-import type { OrganizationView } from "@/lib/contracts";
+import type { AvatarConfig, OrganizationView, Session } from "@/lib/contracts";
 import {
   TeamFeedback,
   useTeamCommands,
@@ -38,7 +38,6 @@ import {
   DiscussionCsrf,
   DiscussionRepository,
 } from "@/components/discussion/repository-context";
-import type { Session } from "@/lib/contracts";
 import { navigate, useLocation, useRequest, type Repository } from "@/lib/api";
 import {
   codeThemeChoices,
@@ -208,6 +207,14 @@ export function App() {
   const teamCommands = useTeamCommands(session.data?.csrf ?? "", teamAccount);
   const [signingOut, setSigningOut] = useState(false);
   const [sessionError, setSessionError] = useState<string>();
+  const [avatarState, setAvatarState] = useState<{
+    account: string | null;
+    avatar: AvatarConfig | null;
+  }>();
+  const currentAvatar =
+    avatarState && avatarState.account === teamAccount
+      ? avatarState.avatar
+      : (session.data?.avatar ?? null);
   useEffect(() => {
     const expired = () => session.retry();
     window.addEventListener("crab-session-expired", expired);
@@ -384,6 +391,7 @@ export function App() {
           </a>
           <GlobalHeader
             session={session.data}
+            avatar={currentAvatar}
             url={url}
             repo={repo}
             repositoryOrganization={repositoryOrganization}
@@ -438,6 +446,7 @@ export function App() {
               <HomeDashboard
                 key={teamAccount}
                 session={session.data}
+                avatar={currentAvatar}
                 url={url}
                 onRepositoryCreated={() => catalog.retry()}
               />
@@ -517,6 +526,10 @@ export function App() {
             ) : profileSettings ? (
               <ProfileSettings
                 session={session.data}
+                avatar={currentAvatar}
+                onAvatarSaved={(next) =>
+                  setAvatarState({ account: teamAccount, avatar: next })
+                }
                 csrf={session.data.csrf ?? ""}
                 suggestedName={session.data.user?.name ?? ""}
                 section={settingsSection}

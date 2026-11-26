@@ -8,7 +8,7 @@ export type SessionIdentity = { issuer: string, subject: string, name: string, }
 export type SessionMode = "local" | "oidc" | "github";
 
 // prettier-ignore
-export type Session = { authenticated: boolean, mode: SessionMode, user: SessionIdentity | null, csrf: string | null, can_sign_up: boolean, };
+export type Session = { authenticated: boolean, mode: SessionMode, user: SessionIdentity | null, csrf: string | null, can_sign_up: boolean, avatar?: AvatarConfig, };
 
 // prettier-ignore
 export type MergeQueueState = "waiting" | "preparing" | "candidate_scheduled" | "publishing";
@@ -59,13 +59,22 @@ export type TeamAccessUpdate = { expected_revision: number, teams: Array<TeamGra
 export type RepositoryAssignee = { id: string, name: string, profile: ActorSummary | null, };
 
 // prettier-ignore
-export type ActorProfile = { id: string, handle: string, name: string, version: number, created_at_ms: number, updated_at_ms: number, };
+export type AvatarVariant = "beam" | "marble" | "pixel" | "sunset" | "ring" | "bauhaus" | "geometric" | "abstract";
 
 // prettier-ignore
-export type ActorSummary = { id: string, handle: string, name: string, };
+export type AvatarConfig = { variant: AvatarVariant, seed: string, colors: Array<string>, };
 
 // prettier-ignore
-export type OwnProfile = { profile: ActorProfile | null, };
+export type ActorProfile = { id: string, handle: string, name: string, version: number, created_at_ms: number, updated_at_ms: number, avatar?: AvatarConfig, };
+
+// prettier-ignore
+export type ActorSummary = { id: string, handle: string, name: string, avatar?: AvatarConfig, };
+
+// prettier-ignore
+export type OwnProfile = { profile: ActorProfile | null, avatar?: AvatarConfig, };
+
+// prettier-ignore
+export type AvatarResponse = { avatar: AvatarConfig | null, };
 
 // prettier-ignore
 export type ReviewAvailability = { version: number, busy: boolean, expires_at_ms: number | null, };

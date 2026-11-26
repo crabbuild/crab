@@ -31,6 +31,7 @@
     "@primer/octicons-react": "19.22.0",
     "@radix-ui/react-roving-focus": "1.2.1",
     "apache-arrow": "21.2.0",
+    "boring-avatars": "2.0.4",
     "class-variance-authority": "0.7.1",
     "cn": "0.5.0",
     "date-fns": "4.4.0",

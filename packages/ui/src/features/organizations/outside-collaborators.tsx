@@ -8,7 +8,7 @@ import {
 import { useMutation } from "@/components/discussion/mutations";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { UserAvatar } from "@/components/ui/user-avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -171,11 +171,11 @@ export function OutsideCollaborators({
                             )
                           }
                         />
-                        <Avatar aria-hidden="true">
-                          <AvatarFallback>
-                            <UserRoundIcon className="size-4" />
-                          </AvatarFallback>
-                        </Avatar>
+                        <UserAvatar
+                          name={person.profile?.handle || person.name}
+                          avatar={person.profile?.avatar}
+                          size={32}
+                        />
                         <div className="min-w-0 flex-1 basis-32">
                           {person.profile ? (
                             <>

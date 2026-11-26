@@ -16,6 +16,8 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { Link } from "@/components/navigation/link";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { UserAvatar } from "@/components/ui/user-avatar";
+import type { AvatarConfig } from "@/lib/contracts";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -46,6 +48,7 @@ const INITIAL_REPO_COUNT = 10;
 export function HomeSidebar({
   accountName,
   accountHandle,
+  accountAvatar,
   activeTab,
   pinnedTab,
   onSelectTab,
@@ -62,6 +65,7 @@ export function HomeSidebar({
 }: {
   accountName: string;
   accountHandle?: string;
+  accountAvatar?: AvatarConfig | null;
   activeTab: HomeTab;
   pinnedTab: HomeTab;
   onSelectTab: (tab: HomeTab) => void;
@@ -124,7 +128,6 @@ export function HomeSidebar({
     context.kind === "organization"
       ? `Organization · ${context.entry.role === "owner" ? "Owner" : "Member"}`
       : "Your personal account";
-  const initial = Array.from(primaryLabel.trim())[0]?.toUpperCase();
 
   return (
     <aside className="home-sidebar" aria-label="Dashboard sidebar">
@@ -136,15 +139,19 @@ export function HomeSidebar({
               className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors hover:bg-accent/70 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
               aria-label="Switch dashboard context"
             >
-              <Avatar className="size-8 shrink-0 border border-border">
-                <AvatarFallback className="text-xs font-semibold">
-                  {context.kind === "organization" ? (
+              {context.kind === "organization" ? (
+                <Avatar className="size-8 shrink-0 border border-border">
+                  <AvatarFallback className="text-xs font-semibold">
                     <Building2Icon className="size-4" aria-hidden="true" />
-                  ) : (
-                    initial || <UserRoundIcon className="size-4" />
-                  )}
-                </AvatarFallback>
-              </Avatar>
+                  </AvatarFallback>
+                </Avatar>
+              ) : (
+                <UserAvatar
+                  name={primaryLabel}
+                  avatar={accountAvatar}
+                  size={32}
+                />
+              )}
               <div className="min-w-0 flex-1">
                 <span className="block truncate text-sm font-semibold text-foreground">
                   {primaryLabel}

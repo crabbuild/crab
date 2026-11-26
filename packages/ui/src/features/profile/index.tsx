@@ -5,7 +5,6 @@ import {
   Building2Icon,
   CheckIcon,
   ChevronDownIcon,
-  CircleUserRoundIcon,
   ClockIcon,
   ExternalLinkIcon,
   MessageSquareTextIcon,
@@ -18,8 +17,8 @@ import type { Theme } from "@/app/theme/control";
 import { timestamp } from "@/components/discussion/time";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { UserAvatar } from "@/components/ui/user-avatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -34,9 +33,15 @@ import { useOrganizationDirectory } from "@/features/organizations/directory";
 import { BrowseRepositories } from "@/features/repository/catalog-browse";
 import { useRequest } from "@/lib/api";
 import type { CodeTheme } from "@/lib/code-theme";
-import type { ActorProfile, OwnProfile, Session } from "@/lib/contracts";
+import type {
+  ActorProfile,
+  AvatarConfig,
+  OwnProfile,
+  Session,
+} from "@/lib/contracts";
 import { organizationHref } from "@/lib/organization-route";
 import { cn } from "@/lib/utils";
+import { ProfileAvatarPicker } from "./avatar-picker";
 import { ProfileForm } from "./form";
 import { ReviewAvailabilitySettings } from "./review-availability";
 import { SavedReplies } from "./saved-replies";
@@ -74,6 +79,8 @@ type NavGroup = {
 
 export function ProfileSettings({
   session,
+  avatar,
+  onAvatarSaved,
   csrf,
   suggestedName,
   section = "profile",
@@ -86,6 +93,8 @@ export function ProfileSettings({
   onSignOut,
 }: {
   session: Session;
+  avatar?: AvatarConfig | null;
+  onAvatarSaved?: (next: AvatarConfig | null) => void;
   csrf: string;
   suggestedName: string;
   section?: SettingsSection;
@@ -99,6 +108,9 @@ export function ProfileSettings({
 }) {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [savedProfile, setSavedProfile] = useState<ActorProfile>();
+  const [savedAvatar, setSavedAvatar] = useState<
+    AvatarConfig | null | undefined
+  >(undefined);
   const own = useRequest<OwnProfile>(
     section === "profile" ? "/api/profile" : null,
   );
@@ -109,6 +121,15 @@ export function ProfileSettings({
     (entry): entry is OrganizationMembershipEntry => entry.kind === "member",
   );
   const activeProfile = savedProfile ?? own.data?.profile ?? undefined;
+  const activeAvatar =
+    savedAvatar !== undefined
+      ? savedAvatar
+      : (own.data?.avatar ?? activeProfile?.avatar ?? avatar ?? null);
+
+  function handleAvatarSaved(next: AvatarConfig | null) {
+    setSavedAvatar(next);
+    onAvatarSaved?.(next);
+  }
 
   const navGroups: NavGroup[] = [
     {
@@ -187,17 +208,16 @@ export function ProfileSettings({
 
   const displayName = activeProfile?.name ?? (suggestedName || "Local session");
   const displayHandle = activeProfile?.handle;
-  const initial = Array.from(displayName.trim())[0]?.toUpperCase();
 
   return (
     <div className="account-settings">
       <header className="account-settings-header">
         <div className="flex min-w-0 items-center gap-3.5">
-          <Avatar className="size-12 shrink-0 border border-border">
-            <AvatarFallback className="text-base font-semibold">
-              {initial || <UserRoundIcon className="size-5" />}
-            </AvatarFallback>
-          </Avatar>
+          <UserAvatar
+            name={displayHandle || displayName}
+            avatar={activeAvatar}
+            size={48}
+          />
           <div className="min-w-0">
             <p className="m-0 flex flex-wrap items-baseline gap-x-1.5 text-lg leading-tight font-semibold text-foreground">
               <span className="truncate">{displayName}</span>
@@ -357,7 +377,9 @@ export function ProfileSettings({
               csrf={csrf}
               suggestedName={suggestedName}
               saved={savedProfile}
+              avatar={activeAvatar}
               onSaved={setSavedProfile}
+              onAvatarSaved={handleAvatarSaved}
             />
           )}
         </div>
@@ -371,17 +393,23 @@ function PublicProfileSettings({
   csrf,
   suggestedName,
   saved,
+  avatar,
   onSaved,
+  onAvatarSaved,
 }: {
   own: ReturnType<typeof useRequest<OwnProfile>>;
   csrf: string;
   suggestedName: string;
   saved?: ActorProfile;
+  avatar?: AvatarConfig | null;
   onSaved: (profile: ActorProfile) => void;
+  onAvatarSaved: (next: AvatarConfig | null) => void;
 }) {
   const activeProfile = saved ?? own.data?.profile ?? null;
-  const previewName = activeProfile?.name ?? (suggestedName || "Local session");
-  const previewInitial = Array.from(previewName.trim())[0]?.toUpperCase();
+  const previewName =
+    activeProfile?.handle ??
+    activeProfile?.name ??
+    (suggestedName || "Local session");
 
   return (
     <section className="min-w-0">
@@ -406,20 +434,12 @@ function PublicProfileSettings({
           </Result>
         </div>
 
-        <div className="grid justify-items-start gap-3">
-          <h2 className="m-0 text-sm font-semibold text-foreground">
-            Profile picture
-          </h2>
-          <Avatar className="size-44 border border-border">
-            <AvatarFallback className="text-5xl font-semibold text-muted-foreground">
-              {previewInitial || <UserRoundIcon className="size-16" />}
-            </AvatarFallback>
-          </Avatar>
-          <p className="m-0 text-xs leading-relaxed text-muted-foreground">
-            Generated from your display name initial across issues, pull
-            requests, and activity feeds.
-          </p>
-        </div>
+        <ProfileAvatarPicker
+          fallbackName={previewName}
+          avatar={avatar}
+          csrf={csrf}
+          onSaved={onAvatarSaved}
+        />
       </div>
     </section>
   );
@@ -443,10 +463,12 @@ export function UserProfile({
       <Result state={actor} timingLabel="Actor profile">
         {(profile) => (
           <>
-            <header className="mb-5 flex min-w-0 items-start gap-4">
-              <CircleUserRoundIcon
-                className="size-12 shrink-0 rounded-lg border p-2 text-muted-foreground"
-                aria-hidden="true"
+            <header className="mb-5 flex min-w-0 items-center gap-4">
+              <UserAvatar
+                name={profile.handle || profile.name}
+                avatar={profile.avatar}
+                size={64}
+                className="border-2 border-border shadow-xs"
               />
               <div className="min-w-0 wrap-anywhere">
                 <h1
