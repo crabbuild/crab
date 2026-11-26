@@ -161,7 +161,9 @@ changes, invitation decisions, and ref publication share the organization
 policy lease with this write.
 `catalog/membership_changes.rs` commits departure grant edits and their recovery
 record together. `api/organizations/membership_changes.rs` finalizes the exact
-member incarnation under the organization policy lease. Rejoining consumes the
+member incarnation under the organization policy lease. Owners remove or convert
+members. A member may remove only themselves (`Departure::is_self_removal`) and
+read only their own member record. Rejoining consumes the
 archived grants after exact invitation consent. Compare repository ownership
 epochs and preserve newer direct grants. Team commands and provider projection
 share the lease so conversion captures current team roles.

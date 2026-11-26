@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { PlusIcon } from "@primer/octicons-react";
 import { timestamp } from "@/components/discussion/time";
 import { Link } from "@/components/navigation/link";
@@ -9,6 +9,7 @@ import { OrganizationAvatar } from "@/components/ui/user-avatar";
 import { useRequest } from "@/lib/api";
 import { organizationHref } from "@/lib/organization-route";
 import { cn } from "@/lib/utils";
+import { LeaveOrganizationDialog } from "./leave";
 import type {
   Invitation,
   Organization,
@@ -41,12 +42,18 @@ export const organizationInvitationsHref =
 export function OrganizationDirectory({
   invitations = false,
   title = true,
+  csrf,
 }: {
   invitations?: boolean;
   title?: boolean;
+  csrf?: string;
 }) {
   const [after, setAfter] = useState<string>();
   const state = useOrganizationDirectory(after);
+  const leaveTrigger = useRef<HTMLButtonElement>(null);
+  const [leaving, setLeaving] =
+    useState<Extract<OrganizationEntry, { kind: "member" }>>();
+  const [left, setLeft] = useState<string>();
   const label = invitations ? "Organization invitations" : "Your organizations";
   return (
     <section
@@ -67,6 +74,11 @@ export function OrganizationDirectory({
             <NewOrganizationButton />
           </div>
         )
+      )}
+      {left && (
+        <p role="status" className="m-0 text-sm text-muted-foreground">
+          You left {left}.
+        </p>
       )}
       <Result state={state} timingLabel={label}>
         {({ items, next }) => {
@@ -134,6 +146,20 @@ export function OrganizationDirectory({
                             </Link>
                           </Button>
                         )}
+                        {entry.kind === "member" && csrf !== undefined && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            aria-label={`Leave ${organization.name}`}
+                            onClick={(event) => {
+                              leaveTrigger.current = event.currentTarget;
+                              setLeft(undefined);
+                              setLeaving(entry);
+                            }}
+                          >
+                            Leave
+                          </Button>
+                        )}
                       </li>
                     );
                   })}
@@ -174,6 +200,21 @@ export function OrganizationDirectory({
           );
         }}
       </Result>
+      {leaving && csrf !== undefined && (
+        <LeaveOrganizationDialog
+          open
+          organization={leaving.organization}
+          actor={leaving.actor}
+          csrf={csrf}
+          returnFocus={leaveTrigger}
+          onClose={() => setLeaving(undefined)}
+          onLeft={() => {
+            setLeft(leaving.organization.name);
+            setLeaving(undefined);
+            state.retry();
+          }}
+        />
+      )}
     </section>
   );
 }

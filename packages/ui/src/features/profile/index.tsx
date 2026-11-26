@@ -324,7 +324,7 @@ export function ProfileSettings({
           ) : section === "git-access" ? (
             <GitAccessSettingsPanel session={session} />
           ) : section === "organizations" ? (
-            <OrganizationsSettingsPanel />
+            <OrganizationsSettingsPanel csrf={csrf} />
           ) : section === "repositories" ? (
             <RepositoriesSettingsPanel url={url} />
           ) : section === "saved-replies" ? (

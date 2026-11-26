@@ -618,7 +618,7 @@ export function GitAccessSettingsPanel({ session }: { session: Session }) {
   );
 }
 
-export function OrganizationsSettingsPanel() {
+export function OrganizationsSettingsPanel({ csrf }: { csrf: string }) {
   return (
     <section className="grid min-w-0 gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-4">
@@ -632,7 +632,7 @@ export function OrganizationsSettingsPanel() {
         </div>
         <NewOrganizationButton />
       </div>
-      <OrganizationDirectory title={false} />
+      <OrganizationDirectory title={false} csrf={csrf} />
     </section>
   );
 }

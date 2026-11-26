@@ -87,7 +87,10 @@ pub(super) async fn depart(
     }
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     let address = target(organization)?;
-    require_owner(&cells, address, owner).await?;
+    // The Cell check admits a leaving member; anyone else must own the organization.
+    if !decision.is_self_removal() {
+        require_owner(&cells, address, owner).await?;
+    }
     let worker = Arc::clone(server);
     with_org_policy(server, organization, move |cancel| async move {
         applied(

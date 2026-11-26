@@ -163,3 +163,87 @@ async fn offboarding_cancels_the_departing_senders_outstanding_invitations() {
         h.close().await;
     }
 }
+
+async fn status(h: &Harness, path: &str, cookie: &str) -> StatusCode {
+    h.http
+        .get(format!("{}{path}", h.origin))
+        .header(header::COOKIE, cookie)
+        .send()
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn members_leave_on_their_own_but_cannot_remove_anyone_else() {
+    let h = Harness::new(false).await;
+    let (id, alice_id, bob_id) = crate::test_support::http::organizations::bootstrap(&h).await;
+    let root = format!("/api/organizations/{id}");
+    let removal = format!("{root}/members/removal");
+    let alice = h.login().await;
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    invite(&h, &root, &alice, bob_id, 0, "member").await;
+    h.write(
+        Method::POST,
+        &format!("{root}/invitation"),
+        &bob,
+        json!({"accept":true,"version":1}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    let own = h.json(&format!("{root}/members/{bob_id}"), &bob).await;
+    assert_eq!(own["member"]["role"], "member");
+    let version = own["member"]["version"].as_u64().unwrap();
+    assert_eq!(
+        status(&h, &format!("{root}/members/{alice_id}"), &bob).await,
+        StatusCode::NOT_FOUND,
+    );
+    for (path, members) in [
+        (&removal, json!([{"actor":alice_id,"version":1}])),
+        (
+            &removal,
+            json!([{"actor":alice_id,"version":1},{"actor":bob_id,"version":version}]),
+        ),
+        (
+            &format!("{root}/members/conversion"),
+            json!([{"actor":bob_id,"version":version}]),
+        ),
+    ] {
+        let response = h
+            .write(Method::POST, path, &bob, json!({ "members": members }))
+            .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+    let last_owner = h
+        .write(
+            Method::POST,
+            &removal,
+            &alice,
+            json!({"members":[{"actor":alice_id,"version":1}]}),
+        )
+        .await;
+    assert_eq!(last_owner.status(), StatusCode::BAD_REQUEST);
+
+    let left: Value = h
+        .write(
+            Method::POST,
+            &removal,
+            &bob,
+            json!({"members":[{"actor":bob_id,"version":version}]}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(left["removed"], 1);
+    assert_eq!(status(&h, &root, &bob).await, StatusCode::NOT_FOUND);
+    assert_eq!(h.json("/api/organizations", &bob).await["items"], json!([]));
+    let members = h.json(&format!("{root}/members"), &alice).await;
+    assert_eq!(members["items"].as_array().unwrap().len(), 1);
+    h.close().await;
+}

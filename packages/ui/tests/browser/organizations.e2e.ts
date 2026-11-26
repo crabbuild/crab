@@ -180,6 +180,12 @@ async function fixture(page: Page) {
           can_manage: state.role === "owner",
         },
       });
+    if (path === `${base}/members/${alice}` && method === "GET") {
+      const { role, version } = state.members[0];
+      return route.fulfill({
+        json: { member: { actor: alice, role, active: true, version } },
+      });
+    }
     if (path === `${base}/members/removal` && method === "POST")
       return route.fulfill({
         status: 400,
@@ -1082,11 +1088,9 @@ test("owners invite by stable account, preserve a conflicted form, and cancel wi
   expect(state.invitation?.state).toBe("cancelled");
   await page.goto(`${root}?tab=people`);
   await page.getByRole("button", { name: "Actions for Alice" }).click();
+  await page.getByRole("menuitem", { name: "Leave organization…" }).click();
   await page
-    .getByRole("menuitem", { name: "Remove from organization" })
-    .click();
-  await page
-    .getByRole("button", { name: "Remove member", exact: true })
+    .getByRole("button", { name: "Leave organization", exact: true })
     .click();
   await expect(page.getByRole("alert").last()).toContainText(
     "retain at least one owner",
@@ -1227,9 +1231,9 @@ test("organization settings and read-only people remain accessible at mobile wid
   await expect(
     page.getByRole("link", { name: "Settings", exact: true }),
   ).toHaveCount(0);
-  await expect(
-    page.getByRole("button", { name: "Actions for Alice" }),
-  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Actions for Alice" }).click();
+  await expect(page.getByRole("menuitem")).toHaveText(["Leave organization…"]);
+  await page.keyboard.press("Escape");
   await expect(
     page.getByRole("link", { name: "Alice", exact: true }),
   ).toBeVisible();
@@ -1238,6 +1242,72 @@ test("organization settings and read-only people remain accessible at mobile wid
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
   ).toBe(true);
+});
+
+test("members leave from their own People row or from Your organizations", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  state.role = "member";
+  state.members = [{ ...state.members[0], role: "member", version: 3 }];
+  let member = true;
+  const removals: unknown[] = [];
+  await page.route(
+    (url) => url.pathname === `/api/organizations/${id}/members/removal`,
+    (route) => {
+      removals.push(route.request().postDataJSON());
+      member = false;
+      return route.fulfill({ json: { removed: 1 } });
+    },
+  );
+  await page.route(
+    (url) => url.pathname === "/api/organizations",
+    (route) =>
+      route.fulfill({
+        json: {
+          items: member
+            ? [
+                {
+                  kind: "member",
+                  organization: state.organization,
+                  actor: alice,
+                  role: "member",
+                  can_create: false,
+                  can_create_private: false,
+                  can_create_public: false,
+                },
+              ]
+            : [],
+          next: null,
+        },
+      }),
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${root}?tab=people`);
+  const actions = page.getByRole("button", { name: "Actions for Alice" });
+  await actions.click();
+  await page.getByRole("menuitem", { name: "Leave organization…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Leave Crab engineering?" });
+  await expect(dialog).toContainText("private forks");
+  await expectNoAccessibilityViolations(page);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(actions).toBeFocused();
+  expect(removals).toEqual([]);
+
+  await page.goto("/-/organizations");
+  await page
+    .getByRole("button", { name: "Leave Crab engineering", exact: true })
+    .click();
+  await dialog
+    .getByRole("button", { name: "Leave organization", exact: true })
+    .click();
+  await expect(
+    page.getByRole("status").filter({ hasText: "You left Crab engineering." }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Crab engineering", exact: true }),
+  ).toHaveCount(0);
+  expect(removals).toEqual([{ members: [{ actor: alice, version: 3 }] }]);
 });
 
 test("a former member can inspect their old decision without current metadata or an access link", async ({

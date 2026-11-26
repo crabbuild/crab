@@ -6154,6 +6154,13 @@ accepts `{members: [{actor, version}]}` for 1–50 distinct current members and
 returns `{removed}`. Crab validates the whole selection and requires a surviving
 owner before committing any repository or membership changes.
 
+Any member can leave with **Leave** in **Your organizations** or **Leave
+organization…** in their own People row. Leaving is that removal naming only the
+requester, with the same grant, fork and invitation effects. A member who is not
+an owner can name only themselves, and can read only their own
+`/members/{actor}` record for its version. Conversion and removing anyone else
+remain owner-only, and the last owner cannot leave.
+
 For 90 days after a member is removed or converted to an outside collaborator,
 an owner can invite them from **People → Invite member** and choose **Restore
 previous access** or **Start fresh**. Restoring access uses the former

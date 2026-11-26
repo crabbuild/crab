@@ -52,6 +52,7 @@ import type {
 import { organizationHref } from "@/lib/organization-route";
 import { MutationError } from "./feedback";
 import { Invitations, InviteDialog } from "./invitations";
+import { LeaveOrganizationDialog } from "./leave";
 import {
   MemberActions,
   MemberChangeDialog,
@@ -105,7 +106,7 @@ export function OrganizationPeople({
     ) : (
       <People
         key={view}
-        id={organization.id}
+        organization={organization}
         actor={actor}
         endpoint={endpoint}
         csrf={csrf}
@@ -161,7 +162,7 @@ export function OrganizationPeople({
 }
 
 function People({
-  id,
+  organization,
   actor,
   endpoint,
   csrf,
@@ -170,7 +171,7 @@ function People({
   onInvited,
   onChanged,
 }: {
-  id: string;
+  organization: Organization;
   actor: string;
   endpoint: string;
   csrf: string;
@@ -179,6 +180,7 @@ function People({
   onInvited: () => void;
   onChanged: (message: string) => void;
 }) {
+  const id = organization.id;
   const [after, setAfter] = useState<string>();
   const [checks, setChecks] = useState<Record<string, number>>({});
   const changePage = (cursor?: string) => {
@@ -392,7 +394,8 @@ function People({
                           member={member}
                           checked={checks[member.actor] === member.version}
                           onSelect={(checked) => select(member, checked)}
-                          organization={id}
+                          organization={organization}
+                          viewer={actor}
                           canManage={data.can_manage}
                           endpoint={endpoint}
                           csrf={csrf}
@@ -450,6 +453,7 @@ function MemberRow({
   checked,
   onSelect,
   organization,
+  viewer,
   canManage,
   endpoint,
   csrf,
@@ -460,7 +464,8 @@ function MemberRow({
   member: OrganizationMembership;
   checked: boolean;
   onSelect: (checked: boolean) => void;
-  organization: string;
+  organization: Organization;
+  viewer: string;
   canManage: boolean;
   endpoint: string;
   csrf: string;
@@ -469,7 +474,10 @@ function MemberRow({
   onReload: () => void;
 }) {
   const menu = useRef<HTMLButtonElement>(null);
-  const [dialog, setDialog] = useState<"role" | "access" | MemberChange>();
+  const [dialog, setDialog] = useState<
+    "role" | "access" | "leave" | MemberChange
+  >();
+  const self = member.actor === viewer;
   const name = member.profile?.name || "Member without a public profile";
   const close = () => setDialog(undefined);
   return (
@@ -504,7 +512,7 @@ function MemberRow({
       <span className="shrink-0 text-sm text-muted-foreground">
         {roles[member.role][0]}
       </span>
-      {canManage && (
+      {(canManage || self) && (
         <>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -524,24 +532,43 @@ function MemberRow({
                 if (dialog) event.preventDefault();
               }}
             >
-              <DropdownMenuItem onSelect={() => setDialog("role")}>
-                Change role…
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => setDialog("access")}>
-                View repository access
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={() => setDialog("conversion")}>
-                Convert to outside collaborator…
-              </DropdownMenuItem>
+              {canManage && (
+                <>
+                  <DropdownMenuItem onSelect={() => setDialog("role")}>
+                    Change role…
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => setDialog("access")}>
+                    View repository access
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={() => setDialog("conversion")}>
+                    Convert to outside collaborator…
+                  </DropdownMenuItem>
+                </>
+              )}
               <DropdownMenuItem
                 variant="destructive"
-                onSelect={() => setDialog("removal")}
+                onSelect={() => setDialog(self ? "leave" : "removal")}
               >
-                Remove from organization…
+                {self ? "Leave organization…" : "Remove from organization…"}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+          {self && (
+            <LeaveOrganizationDialog
+              open={dialog === "leave"}
+              organization={organization}
+              actor={member.actor}
+              csrf={csrf}
+              returnFocus={menu}
+              onClose={close}
+              onLeft={() => navigate("/-/organizations")}
+            />
+          )}
+        </>
+      )}
+      {canManage && (
+        <>
           <ChangeRole
             member={member}
             name={name}
@@ -553,7 +580,7 @@ function MemberRow({
             onChanged={onRoleChanged}
           />
           <MemberAccess
-            organization={organization}
+            organization={organization.id}
             actor={member.actor}
             name={member.profile?.name ?? member.actor}
             open={dialog === "access"}

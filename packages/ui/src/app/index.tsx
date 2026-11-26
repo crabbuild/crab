@@ -543,7 +543,10 @@ export function App() {
               />
             ) : organizations ? (
               <div className="px-4 py-6 sm:px-8">
-                <OrganizationDirectory key={teamAccount} />
+                <OrganizationDirectory
+                  key={teamAccount}
+                  csrf={session.data.csrf ?? ""}
+                />
               </div>
             ) : newRepository ? (
               <NewRepository
