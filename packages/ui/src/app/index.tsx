@@ -20,7 +20,11 @@ import {
   OrganizationInvitation,
 } from "@/features/organizations";
 import { OrganizationDirectory } from "@/features/organizations/directory";
-import { matchOrganizationRoute } from "@/lib/organization-route";
+import { NewOrganization } from "@/features/organizations/new";
+import {
+  matchOrganizationRoute,
+  organizationHref,
+} from "@/lib/organization-route";
 import type { AvatarConfig, OrganizationView, Session } from "@/lib/contracts";
 import {
   TeamFeedback,
@@ -160,6 +164,7 @@ export function App() {
   const personalRepositories = url.pathname === "/-/repositories/personal";
   const publicRepositories = url.pathname === "/-/public";
   const organizations = url.pathname === "/-/organizations";
+  const newOrganization = url.pathname === "/-/organizations/new";
   const newRepository = url.pathname === "/-/new";
   const homeDashboard =
     url.pathname === "/" &&
@@ -183,6 +188,7 @@ export function App() {
     transferId ||
     organizationRoute ||
     organizations ||
+    newOrganization ||
     newRepository ||
     notifications ||
     myWork ||
@@ -195,6 +201,18 @@ export function App() {
     : undefined;
   const session = useRequest<Session>("/api/session");
   const authenticated = session.data?.authenticated;
+  // The organization page and the global header share one read of the
+  // organization, so the header can name it like GitHub's breadcrumb.
+  const organizationPage =
+    organizationRoute && !organizationRoute[2]
+      ? organizationRoute[1]
+      : undefined;
+  const organizationView = useRequest<OrganizationView>(
+    authenticated && organizationPage
+      ? `/api/organizations/${organizationPage}`
+      : null,
+  );
+  const viewedOrganization = organizationView.data?.organization;
   useLayoutEffect(() => {
     if (document.activeElement === document.body)
       document.getElementById("main")?.focus();
@@ -294,29 +312,35 @@ export function App() {
     }
     document.title = repo
       ? `${repositoryOrganization?.name ?? repo.owner}/${repo.name} · Crab`
-      : homeDashboard
-        ? "Dashboard · Crab"
-        : newRepository
-          ? "New repository · Crab"
-          : profileSettings
-            ? "Settings · Crab"
-            : subscriptions
-              ? "Subscriptions · Crab"
-              : watched
-                ? "Watched repositories · Crab"
-                : inbox
-                  ? "Notifications · Crab"
-                  : transferId
-                    ? "Repository transfer · Crab"
-                    : projectWorkspace
-                      ? "Projects · Crab"
-                      : codeSearch
-                        ? "Search code · Crab"
-                        : myWork
-                          ? "My work · Crab"
-                          : workSearch
-                            ? "Search issues and pull requests · Crab"
-                            : "Repositories · Crab";
+      : viewedOrganization
+        ? `${viewedOrganization.name} · Crab`
+        : newOrganization
+          ? "New organization · Crab"
+          : organizations
+            ? "Your organizations · Crab"
+            : homeDashboard
+              ? "Dashboard · Crab"
+              : newRepository
+                ? "New repository · Crab"
+                : profileSettings
+                  ? "Settings · Crab"
+                  : subscriptions
+                    ? "Subscriptions · Crab"
+                    : watched
+                      ? "Watched repositories · Crab"
+                      : inbox
+                        ? "Notifications · Crab"
+                        : transferId
+                          ? "Repository transfer · Crab"
+                          : projectWorkspace
+                            ? "Projects · Crab"
+                            : codeSearch
+                              ? "Search code · Crab"
+                              : myWork
+                                ? "My work · Crab"
+                                : workSearch
+                                  ? "Search issues and pull requests · Crab"
+                                  : "Repositories · Crab";
   }, [
     authenticated,
     publicView,
@@ -333,6 +357,9 @@ export function App() {
     codeSearch,
     myWork,
     workSearch,
+    viewedOrganization,
+    newOrganization,
+    organizations,
   ]);
   useEffect(() => {
     if (!importedRepository || url.pathname !== "/") return;
@@ -402,30 +429,38 @@ export function App() {
             repo={repo}
             repositoryOrganization={repositoryOrganization}
             contextLabel={
-              homeDashboard
-                ? "Dashboard"
-                : profileSettings
-                  ? "Settings"
-                  : projectWorkspace
-                    ? "Projects"
-                    : allRepositories ||
-                        personalRepositories ||
-                        publicRepositories
-                      ? "Repositories"
-                      : "Dashboard"
+              viewedOrganization
+                ? viewedOrganization.name
+                : organizations || newOrganization
+                  ? "Organizations"
+                  : homeDashboard
+                    ? "Dashboard"
+                    : profileSettings
+                      ? "Settings"
+                      : projectWorkspace
+                        ? "Projects"
+                        : allRepositories ||
+                            personalRepositories ||
+                            publicRepositories
+                          ? "Repositories"
+                          : "Dashboard"
             }
             contextHref={
-              homeDashboard
-                ? "/"
-                : profileSettings
-                  ? "/-/settings"
-                  : projectWorkspace
-                    ? `/-/organizations/${projectWorkspace}/projects`
-                    : allRepositories ||
-                        personalRepositories ||
-                        publicRepositories
-                      ? "/-/repositories"
-                      : "/"
+              viewedOrganization
+                ? organizationHref(viewedOrganization)
+                : organizations || newOrganization
+                  ? "/-/organizations"
+                  : homeDashboard
+                    ? "/"
+                    : profileSettings
+                      ? "/-/settings"
+                      : projectWorkspace
+                        ? `/-/organizations/${projectWorkspace}/projects`
+                        : allRepositories ||
+                            personalRepositories ||
+                            publicRepositories
+                          ? "/-/repositories"
+                          : "/"
             }
             notificationsActive={notifications}
             theme={theme}
@@ -501,6 +536,11 @@ export function App() {
                 id={transferId}
                 csrf={session.data.csrf ?? ""}
               />
+            ) : newOrganization ? (
+              <NewOrganization
+                key={teamAccount}
+                csrf={session.data.csrf ?? ""}
+              />
             ) : organizations ? (
               <div className="px-4 py-6 sm:px-8">
                 <OrganizationDirectory key={teamAccount} />
@@ -530,6 +570,7 @@ export function App() {
                   commands={teamCommands}
                   key={organizationRoute[1]}
                   id={organizationRoute[1]}
+                  own={organizationView}
                   url={url}
                   csrf={session.data.csrf ?? ""}
                 />

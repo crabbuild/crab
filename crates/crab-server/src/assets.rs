@@ -32,6 +32,7 @@ pub(crate) async fn serve(request: Request) -> Response {
         ]
         | ["-", "notifications", "watched" | "subscriptions"]
         | ["-", "repositories", "personal"]
+        | ["-", "organizations", "new"]
         | ["-", "settings", "saved-replies" | "review-availability"] => true,
         ["-", "users" | "repository-transfers", id] | ["-", "users", id, "repositories"] => {
             valid_id(id)
@@ -207,6 +208,8 @@ mod tests {
             ("/-/public?q=open-library", StatusCode::OK),
             ("/-/public/unknown", StatusCode::NOT_FOUND),
             ("/-/organizations", StatusCode::OK),
+            ("/-/organizations/new", StatusCode::OK),
+            ("/-/organizations/new/unknown", StatusCode::NOT_FOUND),
             (
                 "/-/users/01900000-0000-7000-8000-000000000001/repositories",
                 StatusCode::OK,

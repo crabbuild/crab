@@ -6112,8 +6112,19 @@ The `Organization` native class uses schema 3 under `cells/organization/` and
 shares the Cellar transaction, receipt and output gate. Explicit private
 `cells bootstrap-organization --organization UUID --input-file JSON` resolves the
 first owner's exact `{issuer, subject}` through Directory without profile
-enrollment. It returns `/-/organizations/UUID`. Public HTTP has no bootstrap route.
-Use fresh Organization Cell UUIDs for schema 3.
+enrollment. It returns `/-/organizations/UUID`. Use fresh Organization Cell
+UUIDs for schema 3.
+
+Signed-in accounts with a public profile can also create an organization from
+**New organization** at `/-/organizations/new`, or from the **+** menu.
+`POST /api/organizations` accepts `{id, name, description}` and returns the
+organization. The browser generates the fresh `id`, and the caller becomes the
+first owner. Retrying with the same `id` and details returns the same
+organization. Different details for that `id` conflict, and another account
+cannot use it.
+Signed-out sessions, repository Git tokens and automation identities cannot
+create organizations. After creation, the browser offers **Add organization
+members**, which sends ordinary invitations.
 
 `/api/organizations/{id}` reads/edits metadata; `/members` lists bounded current
 members, and `/members/{actor}` changes/removes active grants with expected

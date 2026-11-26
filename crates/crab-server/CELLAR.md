@@ -202,7 +202,10 @@ Metadata is validated before account registration or schema creation. Bootstrap
 registers that stable account without enrolling a public profile. Retry with
 the same inputs and UUID after interruption. An outdated Directory requires an
 explicit `cells migrate-directory` before bootstrap can register accounts.
-Different bootstrap intent conflicts.
+Different bootstrap intent conflicts. Once the Directory is initialized,
+signed-in accounts with a public profile can also create organizations from the
+browser. That path runs the same Bootstrap with the caller as first owner and
+never initializes the Directory.
 Neither a catalog owner string nor a public handle creates authority. Upgrade
 all peers before bootstrapping this new class; existing Repository/Directory
 schemas and identities do not change, and no rebuild is required.

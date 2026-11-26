@@ -378,9 +378,9 @@ export function GlobalHeader({
                   asChild
                   className="h-8.5 gap-2 rounded-md px-2"
                 >
-                  <Link href="/-/organizations">
-                    <Building2Icon aria-hidden="true" />
-                    Your organizations
+                  <Link href="/-/organizations/new">
+                    <OrganizationIcon size={15} aria-hidden="true" />
+                    New organization
                   </Link>
                 </DropdownMenuItem>
               </DropdownMenuContent>

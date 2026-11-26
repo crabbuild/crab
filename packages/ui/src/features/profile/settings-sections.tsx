@@ -19,7 +19,10 @@ import { Disclosure } from "@/components/ui/collapsible";
 import { FieldSelect } from "@/components/ui/field-select";
 import { Input } from "@/components/ui/input";
 import { EmailSettings } from "@/features/notifications/email";
-import { OrganizationDirectory } from "@/features/organizations/directory";
+import {
+  NewOrganizationButton,
+  OrganizationDirectory,
+} from "@/features/organizations/directory";
 import { BrowseRepositories } from "@/features/repository/catalog-browse";
 import { useRequest, type Repository } from "@/lib/api";
 import { codeThemeChoices, type CodeTheme } from "@/lib/code-theme";
@@ -618,15 +621,18 @@ export function GitAccessSettingsPanel({ session }: { session: Session }) {
 export function OrganizationsSettingsPanel() {
   return (
     <section className="grid min-w-0 gap-4">
-      <div className="border-b pb-4">
-        <h1 className="mb-3 text-2xl font-semibold tracking-tight">
-          Organizations
-        </h1>
-        <p className="m-0 text-sm text-muted-foreground">
-          Manage your organization memberships and pending invitations.
-        </p>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-4">
+        <div>
+          <h1 className="mb-3 text-2xl font-semibold tracking-tight">
+            Organizations
+          </h1>
+          <p className="m-0 text-sm text-muted-foreground">
+            Manage your organization memberships and pending invitations.
+          </p>
+        </div>
+        <NewOrganizationButton />
       </div>
-      <OrganizationDirectory />
+      <OrganizationDirectory title={false} />
     </section>
   );
 }

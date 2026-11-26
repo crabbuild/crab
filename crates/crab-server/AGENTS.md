@@ -440,10 +440,14 @@ Directory candidates and rechecks review authority in each Organization Cell.
 Schema 3 requires fresh Organization Cell UUIDs. Ordinary serving never installs
 feature DDL.
 `api/organizations/` owns account-to-actor resolution, late permission checks after
-Directory enrichment and browser routes. Explicit first-owner bootstrap belongs
-to `server/management/organizations.rs` and `cells bootstrap-organization`.
+Directory enrichment and browser routes. Its `POST /api/organizations` lets a
+registered signed-in account found an organization as first owner, recording the
+Directory candidate before Bootstrap. Operator bootstrap for an exact qualified
+account belongs to `server/management/organizations.rs` and
+`cells bootstrap-organization`.
 Membership checks run inside the shared native transaction before receipt replay;
-repository grants stay catalog-owned. Public sessions cannot bootstrap authority.
+repository grants stay catalog-owned. Public sessions and Git tokens cannot
+bootstrap authority.
 `catalog/` binds repository and organization UUIDs and audits grant replacements.
 `api/catalog.rs` reserves browser-created organization repositories under the
 organization policy lease. `catalog/mod.rs` applies the reserved visibility at

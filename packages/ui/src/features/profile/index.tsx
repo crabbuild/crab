@@ -12,13 +12,17 @@ import {
   SettingsIcon,
   UserRoundIcon,
 } from "lucide-react";
-import { useState, type ComponentType } from "react";
+import { useState } from "react";
 import type { Theme } from "@/app/theme/control";
 import { timestamp } from "@/components/discussion/time";
 import { Link } from "@/components/navigation/link";
+import {
+  SettingsNav,
+  type SettingsNavGroup,
+} from "@/components/navigation/settings-nav";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
-import { UserAvatar } from "@/components/ui/user-avatar";
+import { OrganizationAvatar, UserAvatar } from "@/components/ui/user-avatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -27,7 +31,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Separator } from "@/components/ui/separator";
 import type { OrganizationMembershipEntry } from "@/features/organizations/choices";
 import { useOrganizationDirectory } from "@/features/organizations/directory";
 import { BrowseRepositories } from "@/features/repository/catalog-browse";
@@ -40,7 +43,6 @@ import type {
   Session,
 } from "@/lib/contracts";
 import { organizationHref } from "@/lib/organization-route";
-import { cn } from "@/lib/utils";
 import { ProfileAvatarPicker } from "./avatar-picker";
 import { ProfileForm } from "./form";
 import { ReviewAvailabilitySettings } from "./review-availability";
@@ -64,18 +66,6 @@ export type SettingsSection =
   | "repositories"
   | "review-availability"
   | "saved-replies";
-
-type NavItem = {
-  id: SettingsSection;
-  href: string;
-  label: string;
-  Icon: ComponentType<{ className?: string; size?: number }>;
-};
-
-type NavGroup = {
-  label?: string;
-  items: NavItem[];
-};
 
 export function ProfileSettings({
   session,
@@ -117,8 +107,10 @@ export function ProfileSettings({
   // Only load organizations when the context switcher dropdown is opened so
   // initial settings page loads stay lean and focused on the active panel.
   const orgDirectory = useOrganizationDirectory(undefined, switcherOpen);
+  // Only owners have organization settings to switch into.
   const organizations = (orgDirectory.data?.items ?? []).filter(
-    (entry): entry is OrganizationMembershipEntry => entry.kind === "member",
+    (entry): entry is OrganizationMembershipEntry =>
+      entry.kind === "member" && entry.role === "owner",
   );
   const activeProfile = savedProfile ?? own.data?.profile ?? undefined;
   const activeAvatar =
@@ -131,7 +123,7 @@ export function ProfileSettings({
     onAvatarSaved?.(next);
   }
 
-  const navGroups: NavGroup[] = [
+  const navGroups: SettingsNavGroup<SettingsSection>[] = [
     {
       items: [
         {
@@ -273,7 +265,10 @@ export function ProfileSettings({
                           "?tab=settings",
                         )}
                       >
-                        <Building2Icon className="size-4" aria-hidden="true" />
+                        <OrganizationAvatar
+                          id={entry.organization.id}
+                          size={16}
+                        />
                         <span className="truncate">
                           {entry.organization.name}
                         </span>
@@ -304,46 +299,11 @@ export function ProfileSettings({
       </header>
 
       <div className="account-settings-body">
-        <aside aria-label="Account settings" className="account-settings-nav">
-          {navGroups.map((group, groupIndex) => (
-            <div key={group.label ?? "general"} className="grid gap-0.5">
-              {groupIndex > 0 && <Separator className="my-2.5" />}
-              {group.label && (
-                <p className="m-0 px-2.5 py-1 text-xs font-semibold text-muted-foreground">
-                  {group.label}
-                </p>
-              )}
-              {group.items.map(({ id, href, label, Icon }) => {
-                const active = id === section;
-                return (
-                  <Link
-                    key={id}
-                    href={href}
-                    aria-current={active ? "page" : undefined}
-                    className={cn(
-                      "relative flex min-h-8 items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm transition-colors hover:bg-muted hover:no-underline",
-                      active
-                        ? "bg-muted font-semibold text-foreground"
-                        : "text-foreground/85 hover:text-foreground",
-                    )}
-                  >
-                    {active && (
-                      <span
-                        className="absolute top-1.5 bottom-1.5 left-0 w-0.5 rounded-full bg-(--info)"
-                        aria-hidden="true"
-                      />
-                    )}
-                    <Icon
-                      size={16}
-                      className="size-4 shrink-0 text-muted-foreground"
-                    />
-                    <span className="truncate">{label}</span>
-                  </Link>
-                );
-              })}
-            </div>
-          ))}
-        </aside>
+        <SettingsNav
+          label="Account settings"
+          groups={navGroups}
+          active={section}
+        />
 
         <div className="min-w-0">
           {section === "account" ? (

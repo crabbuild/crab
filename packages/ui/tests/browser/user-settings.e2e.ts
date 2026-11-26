@@ -167,7 +167,7 @@ test("unified GitHub-style settings lets users configure profile, account, appea
   await page.keyboard.press("Escape");
 
   // Account section
-  const nav = page.getByRole("complementary", { name: "Account settings" });
+  const nav = page.getByRole("navigation", { name: "Account settings" });
   await nav.getByRole("link", { name: "Account", exact: true }).click();
   await expect(page).toHaveURL(/\/-\/settings\/account$/);
   await expect(
@@ -200,7 +200,9 @@ test("unified GitHub-style settings lets users configure profile, account, appea
   // Organizations & Repositories sections
   await nav.getByRole("link", { name: "Organizations", exact: true }).click();
   await expect(page).toHaveURL(/\/-\/settings\/organizations$/);
-  await expect(page.getByRole("link", { name: "crabbuild" })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "crabbuild", exact: true }),
+  ).toBeVisible();
 
   await nav.getByRole("link", { name: "Repositories", exact: true }).click();
   await expect(page).toHaveURL(/\/-\/settings\/repositories$/);
