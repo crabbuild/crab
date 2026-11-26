@@ -1,6 +1,6 @@
 import { FieldSelect } from "@/components/ui/field-select";
+import { InboxIcon } from "@primer/octicons-react";
 import { useEffect, useRef, useState } from "react";
-import { BellIcon } from "lucide-react";
 import { useMutation } from "@/components/discussion/mutations";
 import { RelativeTime } from "@/components/discussion/time";
 import { Link } from "@/components/navigation/link";
@@ -93,17 +93,22 @@ export function NotificationLink({ current }: { current: boolean }) {
       ? "Notifications, pending repository transfers"
       : "Notifications";
   return (
-    <Button variant="ghost" size="icon-lg" className="relative" asChild>
+    <Button
+      variant="outline"
+      size="icon-sm"
+      className="relative bg-background/60 text-muted-foreground hover:text-foreground"
+      asChild
+    >
       <Link
         href={transfers ? transfersHref() : "/-/notifications"}
         aria-label={label}
         aria-current={current ? "page" : undefined}
         title={label}
       >
-        <BellIcon aria-hidden="true" />
+        <InboxIcon size={15} aria-hidden="true" />
         {(unread || transfers) && (
           <span
-            className="absolute top-1 right-1 size-2 rounded-full bg-primary"
+            className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-(--info) ring-2 ring-muted"
             aria-hidden="true"
           />
         )}

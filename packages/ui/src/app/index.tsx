@@ -213,9 +213,8 @@ export function App() {
     window.addEventListener("crab-session-expired", expired);
     return () => window.removeEventListener("crab-session-expired", expired);
   });
-  const [gitAccessOpen, setGitAccessOpen] = useState(false);
   const catalog = useRequest<{ repositories: Repository[] }>(
-    session.data?.authenticated && (inbox || subscriptions || gitAccessOpen)
+    session.data?.authenticated && (inbox || subscriptions)
       ? "/api/repos"
       : null,
   );
@@ -417,12 +416,9 @@ export function App() {
             notificationsActive={notifications}
             theme={theme}
             setTheme={setTheme}
-            codeTheme={codeTheme}
-            setCodeTheme={selectCodeTheme}
             signingOut={signingOut}
             onSignOut={() => void signOut()}
             catalogRepositories={catalog.data?.repositories ?? []}
-            onGitAccessOpenChange={setGitAccessOpen}
             onRepositoryCreated={() => catalog.retry()}
           />
           <main id="main" tabIndex={-1}>

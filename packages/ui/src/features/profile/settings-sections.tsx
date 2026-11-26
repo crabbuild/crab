@@ -490,10 +490,11 @@ export function GitAccessSettingsPanel({ session }: { session: Session }) {
           </Disclosure>
 
           <div className="grid gap-3 sm:grid-cols-2">
-            <label className="grid gap-1.5 text-sm font-medium">
-              Repository
+            <div className="grid gap-1.5 text-sm font-medium">
+              <label htmlFor="settings-git-token-repository">Repository</label>
               <FieldSelect
                 id="settings-git-token-repository"
+                label="Repository"
                 value={selected}
                 onValueChange={(value) => {
                   setSelected(value);
@@ -509,11 +510,12 @@ export function GitAccessSettingsPanel({ session }: { session: Session }) {
                   })),
                 ]}
               />
-            </label>
-            <label className="grid gap-1.5 text-sm font-medium">
-              Access level
+            </div>
+            <div className="grid gap-1.5 text-sm font-medium">
+              <label htmlFor="git-token-access">Access</label>
               <FieldSelect
-                id="settings-git-token-access"
+                id="git-token-access"
+                label="Access"
                 value={requestedAccess}
                 disabled={!repository}
                 onValueChange={(value) => {
@@ -528,7 +530,7 @@ export function GitAccessSettingsPanel({ session }: { session: Session }) {
                     : []),
                 ]}
               />
-            </label>
+            </div>
           </div>
 
           {canCloseRelatedIssues && (
@@ -558,7 +560,7 @@ export function GitAccessSettingsPanel({ session }: { session: Session }) {
               disabled={pending}
               onClick={() => void updateToken("DELETE")}
             >
-              Revoke session tokens
+              Revoke tokens
             </Button>
           </div>
 

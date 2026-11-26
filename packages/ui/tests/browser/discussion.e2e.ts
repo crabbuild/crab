@@ -5,6 +5,7 @@ import { expect, test, type Page } from "@playwright/test";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
+  selectTheme,
 } from "./accessibility";
 
 async function openDiscussion(page: Page) {
@@ -432,11 +433,12 @@ test("header controls remain reachable on narrow screens in both themes", async 
 }) => {
   await openDiscussion(page);
   const header = page.locator(".global-header");
-  const gitAccess = header.getByLabel("Git access", { exact: true });
-  for (const theme of ["light", "dark"]) {
-    await header
-      .locator(`[aria-label="${theme === "light" ? "Light" : "Dark"}"]`)
-      .click();
+  const userMenu = header.getByRole("button", {
+    name: "Open user menu",
+    exact: true,
+  });
+  for (const theme of ["light", "dark"] as const) {
+    await selectTheme(page, theme);
     for (const width of [320, 390, 640, 900, 1280]) {
       await page.setViewportSize({ width, height: 900 });
       const obscured = await header
@@ -459,14 +461,15 @@ test("header controls remain reachable on narrow screens in both themes", async 
             .map((control) => control.textContent?.trim()),
         );
       expect(obscured, `${theme} at ${width}px`).toEqual([]);
-      await gitAccess.click();
-      const popover = header.locator(".git-popover");
-      await expect(popover.getByRole("heading")).toBeVisible();
-      const bounds = await popover.boundingBox();
+      await userMenu.click();
+      const menu = page.getByRole("menu");
+      await expect(menu).toBeVisible();
+      const bounds = await menu.boundingBox();
       expect(bounds).not.toBeNull();
       expect(bounds!.x).toBeGreaterThanOrEqual(0);
       expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
-      await gitAccess.click();
+      await page.keyboard.press("Escape");
+      await expect(menu).toHaveCount(0);
     }
   }
 });

@@ -4,6 +4,7 @@ import {
   GlobeIcon,
   HomeIcon,
   IssueOpenedIcon,
+  KeyIcon,
   LockIcon,
   OrganizationIcon,
   PlusIcon,
@@ -18,12 +19,17 @@ import {
   ListTodoIcon,
   LogOutIcon,
   MenuIcon,
+  MonitorIcon,
+  MoonIcon,
+  PaintbrushIcon,
   SettingsIcon,
+  SmileIcon,
+  SunIcon,
   UserRoundIcon,
   XIcon,
 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { ThemeControl, type Theme } from "@/app/theme/control";
+import { AppearanceControl, type Theme } from "@/app/theme/control";
 import { Link } from "@/components/navigation/link";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -41,6 +47,8 @@ import {
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -53,11 +61,9 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { signInHref } from "@/features/auth/sign-in";
-import { GitAccess } from "@/features/git-access";
 import { NotificationLink } from "@/features/notifications";
 import { CreateRepository } from "@/features/repository/create";
 import { navigate, useRequest, type Repository } from "@/lib/api";
-import type { CodeTheme } from "@/lib/code-theme";
 import type { Organization, Session } from "@/lib/contracts";
 import { organizationHref } from "@/lib/organization-route";
 import { repoHref } from "@/lib/repository-route";
@@ -81,12 +87,9 @@ export function GlobalHeader({
   notificationsActive,
   theme,
   setTheme,
-  codeTheme,
-  setCodeTheme,
   signingOut,
   onSignOut,
   catalogRepositories,
-  onGitAccessOpenChange,
   onRepositoryCreated,
 }: {
   session: Session;
@@ -98,12 +101,9 @@ export function GlobalHeader({
   notificationsActive: boolean;
   theme: Theme;
   setTheme: (theme: Theme) => void;
-  codeTheme: CodeTheme;
-  setCodeTheme: (theme: CodeTheme) => void;
   signingOut: boolean;
   onSignOut: () => void;
   catalogRepositories: Repository[];
-  onGitAccessOpenChange: (open: boolean) => void;
   onRepositoryCreated?: () => void;
 }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -113,6 +113,7 @@ export function GlobalHeader({
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   const authenticated = session.authenticated;
+  const userName = session.user?.name ?? "Local session";
   const userInitial = Array.from(
     session.user?.name.trim() ?? "",
   )[0]?.toUpperCase();
@@ -310,12 +311,12 @@ export function GlobalHeader({
               type="button"
               onClick={() => setSearchOpen(true)}
               aria-label="Search Crab"
-              className="hidden h-8 w-52 items-center gap-2 rounded-md border border-border bg-background px-2.5 text-xs text-muted-foreground transition-colors hover:border-input-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none md:flex lg:w-64"
+              className="hidden h-8 w-44 items-center justify-start gap-2 rounded-md border border-border bg-background/80 px-2.5 text-left text-xs text-muted-foreground transition-colors hover:border-input-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none md:inline-flex lg:w-52"
             >
               <SearchIcon size={14} className="shrink-0" aria-hidden="true" />
               <span className="truncate">
                 Type{" "}
-                <kbd className="mx-0.5 rounded border border-border bg-muted px-1 py-0.5 font-mono text-[10px] text-foreground">
+                <kbd className="mx-0.5 inline-flex h-4 min-w-4 items-center justify-center rounded border border-border bg-muted px-1 font-mono text-[10px] leading-none text-foreground">
                   /
                 </kbd>{" "}
                 to search
@@ -358,19 +359,28 @@ export function GlobalHeader({
                   <TriangleDownIcon size={14} aria-hidden="true" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-52">
-                <DropdownMenuItem onSelect={() => setCreateOpen(true)}>
+              <DropdownMenuContent align="end" className="w-52 p-1.5">
+                <DropdownMenuItem
+                  className="h-8.5 gap-2 rounded-md px-2"
+                  onSelect={() => setCreateOpen(true)}
+                >
                   <RepoIcon size={15} aria-hidden="true" />
                   New repository
                 </DropdownMenuItem>
-                <DropdownMenuItem asChild>
+                <DropdownMenuItem
+                  asChild
+                  className="h-8.5 gap-2 rounded-md px-2"
+                >
                   <Link href="/-/repositories">
                     <RepoCloneIcon size={15} aria-hidden="true" />
                     Import repository
                   </Link>
                 </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem asChild>
+                <DropdownMenuSeparator className="my-1" />
+                <DropdownMenuItem
+                  asChild
+                  className="h-8.5 gap-2 rounded-md px-2"
+                >
                   <Link href="/-/organizations">
                     <Building2Icon aria-hidden="true" />
                     Your organizations
@@ -431,28 +441,38 @@ export function GlobalHeader({
                 </TooltipTrigger>
                 <TooltipContent>Pull requests</TooltipContent>
               </Tooltip>
+
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    asChild
+                    variant="outline"
+                    size="icon-sm"
+                    className="bg-background/60 text-muted-foreground hover:text-foreground"
+                  >
+                    <Link
+                      href="/-/repositories"
+                      aria-label="Repositories"
+                      aria-current={
+                        url.pathname === "/-/repositories" ? "page" : undefined
+                      }
+                    >
+                      <RepoIcon size={15} aria-hidden="true" />
+                    </Link>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Repositories</TooltipContent>
+              </Tooltip>
             </div>
           )}
 
-          {session.user && (
-            <GitAccess
-              session={session}
-              repositories={catalogRepositories}
-              onOpenChange={onGitAccessOpenChange}
-            />
-          )}
-
-          <ThemeControl
-            theme={theme}
-            setTheme={setTheme}
-            codeTheme={codeTheme}
-            setCodeTheme={setCodeTheme}
-          />
-
           {!authenticated && (
-            <Button asChild variant="outline" size="sm">
-              <a href={signInHref(url)}>Sign in</a>
-            </Button>
+            <>
+              <AppearanceControl theme={theme} setTheme={setTheme} />
+              <Button asChild variant="outline" size="sm">
+                <a href={signInHref(url)}>Sign in</a>
+              </Button>
+            </>
           )}
 
           {session.user && <NotificationLink current={notificationsActive} />}
@@ -462,18 +482,18 @@ export function GlobalHeader({
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="ghost"
-                  size="icon-lg"
-                  className="rounded-full"
+                  size="icon-sm"
+                  className="size-8 rounded-full border border-border p-0 hover:ring-2 hover:ring-ring/25"
                   aria-label={signingOut ? "Signing out…" : "Open user menu"}
-                  title={session.user?.name ?? "User menu"}
+                  title={userName}
                   disabled={signingOut}
                 >
                   {signingOut ? (
                     <Spinner />
                   ) : (
-                    <Avatar aria-hidden="true">
-                      <AvatarFallback>
-                        {userInitial || <UserRoundIcon />}
+                    <Avatar className="size-8" aria-hidden="true">
+                      <AvatarFallback className="text-xs font-semibold">
+                        {userInitial || <UserRoundIcon className="size-4" />}
                       </AvatarFallback>
                     </Avatar>
                   )}
@@ -481,73 +501,182 @@ export function GlobalHeader({
               </DropdownMenuTrigger>
               <DropdownMenuContent
                 align="end"
+                sideOffset={8}
                 collisionPadding={16}
-                className="w-56 max-w-[calc(100vw-2rem)]"
+                className="w-64 max-w-[calc(100vw-2rem)] rounded-xl border border-border bg-popover p-1.5 shadow-lg"
               >
-                <DropdownMenuGroup>
-                  <DropdownMenuLabel>
-                    {session.user ? (
-                      <>
-                        <span className="block font-normal">Signed in as</span>
-                        <span className="block truncate">
-                          {session.user.name}
+                <DropdownMenuLabel className="p-0 font-normal">
+                  <div className="flex items-center gap-2.5 px-2.5 py-2">
+                    <Avatar
+                      className="size-9 shrink-0 border border-border"
+                      aria-hidden="true"
+                    >
+                      <AvatarFallback className="text-sm font-semibold">
+                        {userInitial || <UserRoundIcon className="size-4" />}
+                      </AvatarFallback>
+                    </Avatar>
+                    <div className="min-w-0 flex-1">
+                      {session.user ? (
+                        <>
+                          <span className="block truncate text-sm leading-tight font-semibold text-foreground">
+                            {session.user.name}
+                          </span>
+                          <span className="block truncate text-[11px] text-muted-foreground">
+                            Signed in as
+                          </span>
+                        </>
+                      ) : (
+                        <span className="block truncate text-sm font-semibold text-foreground">
+                          Local session
                         </span>
-                      </>
-                    ) : (
-                      "Local session"
-                    )}
-                  </DropdownMenuLabel>
-                  <DropdownMenuItem asChild>
+                      )}
+                    </div>
+                  </div>
+                </DropdownMenuLabel>
+
+                <DropdownMenuSeparator className="my-1" />
+
+                <DropdownMenuGroup className="grid gap-0.5">
+                  <DropdownMenuItem
+                    asChild
+                    className="h-9 gap-2.5 rounded-lg px-2.5 text-sm"
+                  >
                     <Link href="/-/profile">
                       <UserRoundIcon aria-hidden="true" />
                       Your profile
                     </Link>
                   </DropdownMenuItem>
-                  <DropdownMenuItem asChild>
+                  <DropdownMenuItem
+                    asChild
+                    className="h-9 gap-2.5 rounded-lg px-2.5 text-sm"
+                  >
+                    <Link href="/-/settings/review-availability">
+                      <SmileIcon aria-hidden="true" />
+                      Set status
+                    </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    asChild
+                    className="h-9 gap-2.5 rounded-lg px-2.5 text-sm"
+                  >
                     <Link href="/-/repositories/personal">
                       <RepoIcon aria-hidden="true" />
                       Your repositories
                     </Link>
                   </DropdownMenuItem>
-                  <DropdownMenuItem asChild>
+                  <DropdownMenuItem
+                    asChild
+                    className="h-9 gap-2.5 rounded-lg px-2.5 text-sm"
+                  >
                     <Link href="/-/organizations">
-                      <Building2Icon aria-hidden="true" /> Your organizations
+                      <Building2Icon aria-hidden="true" />
+                      Your organizations
                     </Link>
                   </DropdownMenuItem>
-                  <DropdownMenuItem asChild>
+                  <DropdownMenuItem
+                    asChild
+                    className="h-9 gap-2.5 rounded-lg px-2.5 text-sm"
+                  >
                     <Link href="/-/work">
-                      <ListTodoIcon aria-hidden="true" /> My work
+                      <ListTodoIcon aria-hidden="true" />
+                      My work
                     </Link>
                   </DropdownMenuItem>
-                  <DropdownMenuItem asChild>
+                  <DropdownMenuItem
+                    asChild
+                    className="h-9 gap-2.5 rounded-lg px-2.5 text-sm"
+                  >
                     <Link href="/-/notifications/watched">
-                      <EyeIcon aria-hidden="true" /> Watched repositories
-                    </Link>
-                  </DropdownMenuItem>
-                  <DropdownMenuItem asChild>
-                    <Link href="/-/code-search">
-                      <CodeIcon aria-hidden="true" /> Search code
-                    </Link>
-                  </DropdownMenuItem>
-                  <DropdownMenuItem asChild>
-                    <Link href="/-/discussion-search">
-                      <SearchIcon aria-hidden="true" /> Search issues and PRs
-                    </Link>
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem asChild>
-                    <Link href="/-/settings">
-                      <SettingsIcon aria-hidden="true" /> Settings
+                      <EyeIcon aria-hidden="true" />
+                      Watched repositories
                     </Link>
                   </DropdownMenuItem>
                 </DropdownMenuGroup>
+
+                <DropdownMenuSeparator className="my-1" />
+
+                <DropdownMenuGroup className="grid gap-0.5">
+                  <DropdownMenuItem
+                    asChild
+                    className="h-9 gap-2.5 rounded-lg px-2.5 text-sm"
+                  >
+                    <Link href="/-/settings">
+                      <SettingsIcon aria-hidden="true" />
+                      Settings
+                    </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    asChild
+                    className="h-9 gap-2.5 rounded-lg px-2.5 text-sm"
+                  >
+                    <Link href="/-/settings/appearance">
+                      <PaintbrushIcon aria-hidden="true" />
+                      Appearance
+                    </Link>
+                  </DropdownMenuItem>
+                  {session.user && (
+                    <DropdownMenuItem
+                      asChild
+                      className="h-9 gap-2.5 rounded-lg px-2.5 text-sm"
+                    >
+                      <Link href="/-/settings/git-access">
+                        <KeyIcon aria-hidden="true" />
+                        Git access
+                      </Link>
+                    </DropdownMenuItem>
+                  )}
+                </DropdownMenuGroup>
+
+                <DropdownMenuSeparator className="my-1" />
+
+                <DropdownMenuLabel className="px-2.5 pt-1 pb-1.5 text-[11px] font-medium text-muted-foreground">
+                  Theme
+                </DropdownMenuLabel>
+                <DropdownMenuRadioGroup
+                  value={theme}
+                  onValueChange={(value) => {
+                    if (
+                      value === "auto" ||
+                      value === "light" ||
+                      value === "dark"
+                    ) {
+                      setTheme(value);
+                    }
+                  }}
+                  className="grid grid-cols-3 gap-1 rounded-lg bg-muted/50 p-1"
+                >
+                  <DropdownMenuRadioItem
+                    value="auto"
+                    className="h-7.5 justify-center gap-1 rounded-md px-1.5 py-0 text-xs font-medium text-muted-foreground data-[state=checked]:bg-background data-[state=checked]:text-foreground data-[state=checked]:shadow-xs [&_[data-slot=dropdown-menu-radio-item-indicator]]:hidden"
+                  >
+                    <MonitorIcon className="size-3.5" aria-hidden="true" />
+                    System
+                  </DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem
+                    value="light"
+                    className="h-7.5 justify-center gap-1 rounded-md px-1.5 py-0 text-xs font-medium text-muted-foreground data-[state=checked]:bg-background data-[state=checked]:text-foreground data-[state=checked]:shadow-xs [&_[data-slot=dropdown-menu-radio-item-indicator]]:hidden"
+                  >
+                    <SunIcon className="size-3.5" aria-hidden="true" />
+                    Light
+                  </DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem
+                    value="dark"
+                    className="h-7.5 justify-center gap-1 rounded-md px-1.5 py-0 text-xs font-medium text-muted-foreground data-[state=checked]:bg-background data-[state=checked]:text-foreground data-[state=checked]:shadow-xs [&_[data-slot=dropdown-menu-radio-item-indicator]]:hidden"
+                  >
+                    <MoonIcon className="size-3.5" aria-hidden="true" />
+                    Dark
+                  </DropdownMenuRadioItem>
+                </DropdownMenuRadioGroup>
+
                 {session.user && (
                   <>
-                    <DropdownMenuSeparator />
+                    <DropdownMenuSeparator className="my-1" />
                     <DropdownMenuGroup>
                       <DropdownMenuItem
+                        variant="destructive"
                         disabled={signingOut}
                         onSelect={onSignOut}
+                        className="h-9 gap-2.5 rounded-lg px-2.5 text-sm"
                       >
                         <LogOutIcon aria-hidden="true" />
                         Sign out

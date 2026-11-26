@@ -4,6 +4,7 @@ import { mockPullRequest } from "./pulls/fixture";
 import {
   expectNoAccessibilityViolations,
   contrastRatio,
+  selectTheme,
 } from "./accessibility";
 import type { RepositoryGroup } from "@/lib/contracts";
 
@@ -82,8 +83,8 @@ test("SSO group access edits are revisioned, persist after reload and preserve g
     name: "Add member",
     exact: true,
   });
-  for (const theme of ["Light", "Dark"]) {
-    await page.getByRole("button", { name: theme, exact: true }).click();
+  for (const theme of ["light", "dark"] as const) {
+    await selectTheme(page, theme);
     await expect(addMember).toHaveCSS("font-size", "13px");
     const colors = await addMember.evaluate((node) => ({
       foreground: getComputedStyle(node).color,

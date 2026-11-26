@@ -3,6 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
+  selectTheme,
   contrastRatio,
 } from "./accessibility";
 
@@ -230,8 +231,8 @@ test("shared form tokens align controls, preserve contrast in both themes and fo
     "24px",
   );
 
-  for (const theme of ["Light", "Dark"]) {
-    await page.getByRole("button", { name: theme, exact: true }).click();
+  for (const theme of ["light", "dark"] as const) {
+    await selectTheme(page, theme);
     const background = await page
       .locator("body")
       .evaluate((node) => getComputedStyle(node).backgroundColor);

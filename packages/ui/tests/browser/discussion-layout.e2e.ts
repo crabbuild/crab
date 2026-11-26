@@ -4,6 +4,7 @@ import { mockPullRequest } from "./pulls/fixture";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
+  selectTheme,
   contrastRatio,
 } from "./accessibility";
 
@@ -101,8 +102,8 @@ test("discussion groups keep one frame on hover and row controls align with the 
     }
   }
 
-  for (const theme of ["Light", "Dark"]) {
-    await page.getByRole("button", { name: theme, exact: true }).click();
+  for (const theme of ["light", "dark"] as const) {
+    await selectTheme(page, theme);
     const stateGroup = state.getByRole("group");
     const closed = stateGroup.getByRole("link", { name: "Closed 0" });
     for (const { group, segment } of [
@@ -147,8 +148,8 @@ test("link buttons retain the same readable control colors and geometry as nativ
     name: "New pull request",
     exact: true,
   });
-  for (const theme of ["Light", "Dark"]) {
-    await page.getByRole("button", { name: theme, exact: true }).click();
+  for (const theme of ["light", "dark"] as const) {
+    await selectTheme(page, theme);
     const colors = await labels.evaluate((node) => ({
       foreground: getComputedStyle(node).color,
       background: getComputedStyle(node).backgroundColor,
