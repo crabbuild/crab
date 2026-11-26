@@ -684,7 +684,7 @@ export function GlobalHeader({
                 onChange={(event) => setSearchText(event.target.value)}
                 placeholder="Search code, issues, PRs, or jump to a repository…"
                 aria-label="Search Crab"
-                className="border-0 bg-transparent shadow-none focus-visible:ring-0"
+                className="border-0 bg-transparent shadow-none focus-visible:border-transparent focus-visible:ring-0"
               />
             </div>
           </form>

@@ -213,6 +213,24 @@ test("home dashboard renders GitHub-style layout, filters, feed, drawer, and com
   await expect(page).toHaveTitle("Dashboard · Crab");
   await expect(page.getByRole("heading", { name: /forhappy!/ })).toBeVisible();
 
+  // Workspace search composer keeps a single outer focus boundary with no inner box
+  const composerInput = page.getByLabel("Workspace search query");
+  await composerInput.focus();
+  expect(
+    await composerInput.evaluate((el) => {
+      const style = getComputedStyle(el);
+      return {
+        borderWidth: style.borderTopWidth,
+        boxShadow: style.boxShadow,
+        outlineStyle: style.outlineStyle,
+      };
+    }),
+  ).toEqual({
+    borderWidth: "0px",
+    boxShadow: "none",
+    outlineStyle: "none",
+  });
+
   // Left sidebar: top repositories, Show more, and live filter
   const topRepos = page.getByRole("list", { name: "Top repositories" });
   await expect(topRepos.getByRole("listitem")).toHaveCount(10);

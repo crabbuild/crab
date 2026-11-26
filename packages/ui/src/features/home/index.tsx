@@ -307,10 +307,11 @@ function HomeCommandHero({
         role="search"
         aria-label="Workspace quick search"
         onSubmit={submit}
-        className="overflow-hidden rounded-xl border border-border bg-card shadow-xs transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20"
+        className="home-composer overflow-hidden rounded-xl border border-border bg-card shadow-xs transition-colors"
       >
-        <div className="px-4 pt-3.5 pb-2">
+        <div className="px-4 pt-3.5 pb-1.5">
           <textarea
+            data-slot="home-composer-input"
             rows={2}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -328,10 +329,10 @@ function HomeCommandHero({
                   : "Find repositories by name, topic, or description"
             }
             aria-label="Workspace search query"
-            className="w-full resize-none border-0 bg-transparent p-0 text-sm text-foreground placeholder:text-muted-foreground focus:ring-0 focus:outline-none"
+            className="block w-full resize-none border-0 bg-transparent p-0 text-sm leading-relaxed text-foreground shadow-none outline-none placeholder:text-muted-foreground"
           />
         </div>
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/60 bg-muted/30 px-3 py-2">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-3 pt-1 pb-2.5">
           <div className="flex flex-wrap items-center gap-1.5">
             <DropdownMenu modal={false}>
               <DropdownMenuTrigger asChild>

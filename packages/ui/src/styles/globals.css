@@ -8258,6 +8258,19 @@ main {
   gap: --spacing(6);
   min-width: 0;
 }
+/* Outer composer owns focus so the borderless textarea never draws a nested box. */
+.home-composer:focus-within {
+  @apply border-ring ring-2 ring-ring/20;
+}
+.home-composer textarea,
+.home-composer textarea:hover,
+.home-composer textarea:focus,
+.home-composer textarea:focus-visible {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  outline: none;
+}
 .home-rail {
   display: grid;
   gap: --spacing(4);
