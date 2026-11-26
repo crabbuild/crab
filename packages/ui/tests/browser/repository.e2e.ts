@@ -9,6 +9,7 @@ import { emptyIssueTemplates } from "./fixtures";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
+  selectTheme,
 } from "./accessibility";
 
 const oid = "a".repeat(40);
@@ -195,12 +196,6 @@ async function routePreviewFiles(
       },
     });
   });
-}
-
-async function selectTheme(page: Page, theme: "light" | "dark") {
-  await page
-    .locator(`[aria-label="${theme === "light" ? "Light" : "Dark"}"]`)
-    .click();
 }
 
 test.beforeEach(async ({ page }) => {
@@ -1424,11 +1419,11 @@ test("code palette persists and follows light and dark appearance", async ({
   const highlighted = page.locator(".markdown-code-block");
   await expect(highlighted).toContainText('const project: string = "Crab";');
 
-  await page.getByRole("button", { name: "Code theme: GitHub" }).click();
-  await page.getByRole("menuitemradio", { name: /^VS Code/ }).click();
-  await expect(
-    page.getByRole("button", { name: "Code theme: VS Code" }),
-  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Open user menu", exact: true })
+    .click();
+  await page.getByRole("menuitem", { name: "Appearance", exact: true }).click();
+  await page.getByRole("radio", { name: /^VS Code/ }).click();
   await expect(page.locator("html")).toHaveAttribute(
     "data-code-theme",
     "vscode",
@@ -1436,6 +1431,10 @@ test("code palette persists and follows light and dark appearance", async ({
   await expect
     .poll(() => page.evaluate(() => localStorage.getItem("crab-code-theme")))
     .toBe("vscode");
+
+  await page.goBack();
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
+  await expect(highlighted).toContainText('const project: string = "Crab";');
 
   const codeColors = () =>
     highlighted.evaluate((container) => {
@@ -1451,9 +1450,6 @@ test("code palette persists and follows light and dark appearance", async ({
   await expect.poll(codeColors).not.toEqual(lightColors);
 
   await page.reload();
-  await expect(
-    page.getByRole("button", { name: "Code theme: VS Code" }),
-  ).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute(
     "data-code-theme",
     "vscode",
@@ -3749,10 +3745,7 @@ test("mobile Code menu stays within the viewport and theme selection persists", 
     await page.locator(".clone-menu [data-slot=collapsible-trigger]").click();
   }
   await page.reload();
-  await expect(page.locator('[aria-label="Light"]')).toHaveAttribute(
-    "aria-pressed",
-    "true",
-  );
+  await expect(page.locator("html")).toHaveCSS("color-scheme", "light");
 });
 
 test("issues follow the GitHub list hierarchy in both themes and on mobile", async ({

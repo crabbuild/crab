@@ -18,6 +18,8 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
     const path = new URL(request.url()).pathname;
     if (path === "/api/notifications/unread")
       return route.fulfill({ json: { unread: false } });
+    if (path === "/api/profile")
+      return route.fulfill({ json: { profile: null } });
     if (path === "/api/session")
       return route.fulfill({
         json: {
@@ -70,7 +72,11 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
     });
   });
   await page.goto("/-/repositories");
-  await page.getByText("Git access", { exact: true }).click();
+  await page
+    .getByRole("button", { name: "Open user menu", exact: true })
+    .click();
+  await page.getByRole("menuitem", { name: "Git access", exact: true }).click();
+  await expect(page).toHaveURL(/\/-\/settings\/git-access$/);
   await expectNoAccessibilityViolations(page);
   await selectDarkTheme(page);
   await page.getByText("Credential manager setup", { exact: true }).click();
