@@ -513,6 +513,7 @@ async fn publication_replays_a_retired_issue_with_its_comments_and_moderation() 
     else {
         panic!("source did not commit the issue move")
     };
+    let decision = *decision;
     assert!(
         origin
             .client
@@ -534,7 +535,7 @@ async fn publication_replays_a_retired_issue_with_its_comments_and_moderation() 
     assert_eq!(
         mutate::<Retire>(&origin, reservation.clone()).await,
         RetireOutcome::Committed {
-            decision: decision.clone()
+            decision: Box::new(decision.clone())
         }
     );
     assert_eq!(

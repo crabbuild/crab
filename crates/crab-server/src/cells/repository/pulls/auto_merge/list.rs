@@ -203,7 +203,7 @@ mod tests {
                     crate::app::mutation_identity().unwrap(),
                     Change::Arm {
                         version: 1,
-                        job: Job {
+                        job: Box::new(Job {
                             pull,
                             id,
                             actor: actor.clone(),
@@ -221,7 +221,7 @@ mod tests {
                             message: String::new(),
                             when_ready: false,
                             queue: None,
-                        },
+                        }),
                         queue: true,
                         configured_queue_required: true,
                         ruleset_queue_required: false,

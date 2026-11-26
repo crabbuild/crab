@@ -365,7 +365,7 @@ async fn enable(
             configured_queue_required: settings::configured_queue_required(&repo, &pull.base_ref),
             ruleset_queue_required: queue_policy.ruleset,
             version: input.version,
-            job: Job {
+            job: Box::new(Job {
                 pull: number,
                 id: input.request_id,
                 actor: (&actor).into(),
@@ -396,7 +396,7 @@ async fn enable(
                 message: message(&pull.head_ref)?,
                 when_ready: input.when_ready,
                 queue: None,
-            },
+            }),
         },
     )
     .await?;

@@ -521,10 +521,10 @@ impl Read for List {
                     continue;
                 }
                 let id = entry.notice.thread_id();
-                if let Some(filed) = filing::load(context, actor, id)? {
-                    if filed.done_at.is_some() || filed.entry.notice.position() != position {
-                        continue;
-                    }
+                if let Some(filed) = filing::load(context, actor, id)?
+                    && (filed.done_at.is_some() || filed.entry.notice.position() != position)
+                {
+                    continue;
                 }
                 threads
                     .entry(id)

@@ -1817,10 +1817,6 @@ impl RemoteGitReader {
         })
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the existing materializer shares one optional edge attempt with dependency reads"
-    )]
     async fn materialize_packed_entries_with_edge(
         self: &Arc<Self>,
         session: &GitObjectLocatorSession,
@@ -2166,10 +2162,6 @@ impl RemoteGitReader {
         .await
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "shared edge and origin delta resolution state"
-    )]
     async fn read_from_locator(
         self: &Arc<Self>,
         session: &GitObjectLocatorSession,
@@ -3898,10 +3890,6 @@ async fn read_lazy_range_from_store(
     .await
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "range transport and caller's verifier"
-)]
 async fn read_index_window_from_store<T: Send + 'static>(
     store: &Store,
     runtime: &Arc<RemoteGitRuntime>,
@@ -3947,7 +3935,7 @@ async fn read_index_window_from_store<T: Send + 'static>(
     let transfer = async {
         if let Some(source_size) = source_size {
             store
-                .read_verified(path, source_size, Some(range), &verify)
+                .read_verified(path, source_size, Some(range), verify)
                 .await
         } else {
             verify(store.range_get(path, range).await?).await

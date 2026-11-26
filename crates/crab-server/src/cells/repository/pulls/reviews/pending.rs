@@ -56,7 +56,7 @@ impl Read for Get {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Edit {
     Save {
-        comment: review_threads::CreatePullReviewThreadInput,
+        comment: Box<review_threads::CreatePullReviewThreadInput>,
         replace: Option<Uuid>,
     },
     Remove(Uuid),
@@ -143,7 +143,7 @@ impl Mutation for Change {
                         return Ok(MutationResult::Rejected(Outcome::Conflict));
                     };
                     comment.submission_id = previous.submission_id;
-                    *previous = comment;
+                    *previous = *comment;
                 } else {
                     if draft.comments.len() >= MAX_COMMENTS {
                         return Ok(MutationResult::Rejected(Outcome::AtCapacity));
@@ -156,7 +156,7 @@ impl Mutation for Change {
                         return Ok(MutationResult::Rejected(Outcome::Conflict));
                     }
                     comment.submission_id = *input.request_id.as_bytes();
-                    draft.comments.push(comment);
+                    draft.comments.push(*comment);
                 }
             }
             Edit::Remove(id) => draft

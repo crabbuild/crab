@@ -381,7 +381,7 @@ impl Transfer<'_> {
                 .await,
         )?;
         let decision = match retired {
-            RetireOutcome::Committed { decision } => decision,
+            RetireOutcome::Committed { decision } => *decision,
             RetireOutcome::Archived => return Err(Error::Archived),
             RetireOutcome::Conflict => return Err(Error::RequestConflict),
             RetireOutcome::Changed => return Err(Error::Conflict),

@@ -61,7 +61,7 @@ impl Rules {
     }
 
     pub fn matching(&self, path: &[u8]) -> Option<usize> {
-        self.matcher.matches(path).iter().last()
+        self.matcher.matches(path).iter().next_back()
     }
 }
 

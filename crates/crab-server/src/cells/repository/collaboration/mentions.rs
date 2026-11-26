@@ -571,7 +571,7 @@ fn raw_mentions<'a>(
             // escaped punctuation and entities from turning into notifications.
             let prefix = &body[..start];
             let before = prefix.trim_end_matches('\\');
-            if (prefix.len() - before.len()) % 2 != 0
+            if !(prefix.len() - before.len()).is_multiple_of(2)
                 || before.chars().next_back().is_some_and(|ch| {
                     !(ch.is_whitespace() || matches!(ch, '(' | '[' | '{' | '"' | '\'' | '*' | '~'))
                 })

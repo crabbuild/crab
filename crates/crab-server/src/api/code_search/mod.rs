@@ -1,3 +1,8 @@
+#![expect(
+    clippy::result_large_err,
+    reason = "handlers and their helpers return rejections as ready axum responses"
+)]
+
 use super::{ApiError, display_path, encode_hex, query, read_admission};
 use crate::{
     app,

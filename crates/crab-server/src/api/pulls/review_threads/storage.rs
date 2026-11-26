@@ -311,6 +311,10 @@ pub(super) async fn create_reply(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the reply update carries the caller, thread identity and new content"
+)]
 pub(super) async fn update_reply(
     server: &Server,
     repo: &Repository,
