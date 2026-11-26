@@ -86,8 +86,10 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
 - Git imports keep their job and repository identity across worker restarts.
   Crab checks the recorded ref tips before exposing the destination. A resumed
   job can finish from committed refs or clone the same snapshot again. Source
-  tokens stay in memory. Organization imports use current owner authority and
-  support recovery by another owner from the shared job link.
+  tokens stay in memory. Organization imports follow current repository
+  creation and visibility policy. The creator and current owners can view the
+  job. An owner can resume it from the shared link while retaining the original
+  member's creator grant.
 - Organization owners can fork a private repository inside the same organization.
   The fork links to its source UUID, inherits current source ACLs, and supports
   independent native Git pushes. Creation uses the durable Git intake job,

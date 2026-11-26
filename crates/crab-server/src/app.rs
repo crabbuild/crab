@@ -1014,6 +1014,7 @@ pub(crate) struct Membership {
     pub principal: Principal,
     pub organization: Option<uuid::Uuid>,
     pub(crate) fork_destination: Option<uuid::Uuid>,
+    fork_creator: Option<crate::catalog::ForkCreatorAccess>,
     baseline: crate::catalog::RepositoryBaseline,
     pub(crate) teams: Vec<crate::catalog::TeamGrant>,
     pub(crate) review_teams: Vec<uuid::Uuid>,
@@ -1077,6 +1078,26 @@ impl Membership {
                 )
                 .await?,
             );
+        }
+        if let (Some(source), Some(creator)) = (self.organization, &self.fork_creator)
+            && let Some((_, crate::repository::access::ForkCreatorGrant::Durable)) =
+                crate::repository::access::fork_creator_grant(
+                    server,
+                    creator,
+                    source,
+                    &self.teams,
+                    self.fork_destination,
+                )
+                .await?
+        {
+            inherited.push(crate::RepositoryMember {
+                subject: creator.actor.subject.clone(),
+                name: creator
+                    .source_member
+                    .as_ref()
+                    .map_or_else(|| "Fork creator".into(), |member| member.name.clone()),
+                access: crate::RepositoryAccess::Write,
+            });
         }
         for inherited in inherited {
             if let Some(member) = members
@@ -1194,10 +1215,7 @@ pub(crate) async fn membership(
             }
         }
         let organization_owner = if let Some(grant) = principal.import_grant() {
-            if !grant.active(server).await {
-                return Err(Error::NotFound);
-            }
-            grant.has_organization_owner()
+            grant.current_owner(server).await.ok_or(Error::NotFound)?
         } else {
             false
         };
@@ -1207,6 +1225,7 @@ pub(crate) async fn membership(
             principal: principal.clone(),
             organization: repo.organization,
             fork_destination: None,
+            fork_creator: None,
             baseline: Default::default(),
             teams: Vec::new(),
             review_teams: Vec::new(),
@@ -1277,10 +1296,15 @@ pub(crate) async fn require_related_read(
     related: &Repository,
 ) -> Result<()> {
     let current = membership(server, principal, origin).await?;
-    let reader = current
+    let mut reader = current
         .principal
         .related_read(origin.id, related.id)
         .ok_or(Error::NotFound)?;
+    if (origin.public_fork && origin.forked_from == Some(related.id))
+        || (related.public_fork && related.forked_from == Some(origin.id))
+    {
+        reader.allow_public_reads();
+    }
     membership(server, &reader, related).await.map(drop)
 }
 
@@ -1298,6 +1322,7 @@ pub(crate) async fn membership_for_config(
             principal: principal.clone(),
             organization: None,
             fork_destination: None,
+            fork_creator: None,
             baseline: snapshot.baseline,
             teams: Vec::new(),
             review_teams: Vec::new(),
@@ -1321,7 +1346,9 @@ pub(crate) async fn membership_for_config(
     }
     let mut grants =
         crate::repository::access::organization_grants(server, principal, organizations).await?;
-    let inherited = crate::repository::access::snapshot_organization_access(&snapshot, &grants);
+    let inherited = crate::repository::access::snapshot_organization_access(
+        &snapshot, &grants, principal, config, issuer,
+    );
     let teams = snapshot
         .organization
         .map_or_else(Vec::new, |access| access.teams);
@@ -1370,6 +1397,7 @@ pub(crate) async fn membership_for_config(
         principal,
         organization,
         fork_destination: snapshot.fork_destination,
+        fork_creator: snapshot.fork_creator,
         baseline: snapshot.baseline,
         teams,
         review_teams,

@@ -10,7 +10,10 @@ use crate::{
     RepositoryAccess, RepositoryMember,
     app::{self, Error, Result},
     auth::Principal,
-    catalog::{MembershipSnapshot, RepositoryApplicationState, RepositoryBaseline, TeamGrant},
+    catalog::{
+        ForkCreatorAccess, MembershipSnapshot, RepositoryApplicationState, RepositoryBaseline,
+        TeamGrant,
+    },
     cells::{
         Address, CellClient,
         directory::{
@@ -117,6 +120,9 @@ pub(crate) fn organization_access_with_owner(
 pub(crate) fn snapshot_organization_access(
     snapshot: &MembershipSnapshot,
     grants: &HashMap<Uuid, ActorTeams>,
+    principal: &Principal,
+    config: &crate::RepositoryConfig,
+    issuer: &str,
 ) -> Option<RepositoryAccess> {
     if snapshot
         .fork_destination
@@ -132,7 +138,90 @@ pub(crate) fn snapshot_organization_access(
     } else {
         RepositoryAccess::Admin
     };
-    organization_access_with_owner(grant, &source.teams, snapshot.baseline, owner_access)
+    let inherited =
+        organization_access_with_owner(grant, &source.teams, snapshot.baseline, owner_access);
+    let Some(creator) = &snapshot.fork_creator else {
+        return inherited;
+    };
+    let destination = snapshot.fork_destination.unwrap_or(source.id);
+    if !grants.get(&destination).is_some_and(|grant| grant.member)
+        || !principal.identity().is_some_and(|identity| {
+            identity.issuer == creator.actor.issuer && identity.subject == creator.actor.subject
+        })
+    {
+        return inherited;
+    }
+    // Evaluate upstream ACLs for the creator without widening a fork-scoped Git
+    // credential. Only the resulting Write grant belongs to the fork.
+    let upstream = organization_access(grant, &source.teams, creator.source_baseline);
+    let mut source_acl = config.clone();
+    source_acl.members = creator.source_member.clone().into_iter().collect();
+    source_acl.groups = creator.source_groups.clone();
+    let can_read_source = principal
+        .with_catalog_membership(
+            snapshot.repository_id,
+            &source_acl,
+            issuer,
+            upstream,
+            snapshot.renamed,
+            None,
+        )
+        .can_read(snapshot.repository_id);
+    inherited.max(can_read_source.then_some(RepositoryAccess::Write))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForkCreatorGrant {
+    Durable,
+    Group,
+}
+
+pub(crate) async fn fork_creator_grant(
+    server: &Server,
+    creator: &ForkCreatorAccess,
+    source: Uuid,
+    teams: &[TeamGrant],
+    destination: Option<Uuid>,
+) -> Result<Option<(Uuid, ForkCreatorGrant)>> {
+    let Some(auth) = server
+        .auth
+        .as_ref()
+        .filter(|auth| auth.issuer() == creator.actor.issuer)
+    else {
+        return Ok(None);
+    };
+    let key = IdentityKey {
+        issuer: creator.actor.issuer.clone(),
+        subject: creator.actor.subject.clone(),
+    };
+    let Some(actor) = actor_id(server, key).await? else {
+        return Ok(None);
+    };
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let destination = destination.unwrap_or(source);
+    let grant = organization_grant(
+        &cells,
+        destination,
+        actor,
+        destination == source && !teams.is_empty(),
+    )
+    .await?;
+    if !grant.member {
+        return Ok(None);
+    }
+    if creator.source_member.is_some() {
+        return Ok(Some((actor, ForkCreatorGrant::Durable)));
+    }
+    let source_grant = if destination == source {
+        grant
+    } else {
+        organization_grant(&cells, source, actor, !teams.is_empty()).await?
+    };
+    if organization_access(&source_grant, teams, creator.source_baseline).is_some() {
+        return Ok(Some((actor, ForkCreatorGrant::Durable)));
+    }
+    Ok((auth.is_oidc() && !creator.source_groups.is_empty())
+        .then_some((actor, ForkCreatorGrant::Group)))
 }
 
 pub(crate) async fn organization_grants(

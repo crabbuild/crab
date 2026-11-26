@@ -42,6 +42,36 @@ impl Setting {
     }
 }
 
+impl CatalogDocument {
+    pub(super) fn separate_public_forks(&mut self, source: Uuid, now_ms: u64) {
+        // A queued public job must not prevent its upstream from going private.
+        // Publication requires both the live source and its catalog reservation.
+        self.repositories.retain(|fork| {
+            fork.forked_from != Some(source)
+                || fork.application == RepositoryApplicationState::CellReady
+        });
+        let forks = self
+            .repositories
+            .iter()
+            .filter(|fork| fork.forked_from == Some(source));
+        let Some(upstream) = forks
+            .min_by_key(|fork| (fork.created_at_ms, fork.id))
+            .map(|fork| fork.id)
+        else {
+            return;
+        };
+        // Preserve the public network and every surviving repository UUID.
+        for fork in self
+            .repositories
+            .iter_mut()
+            .filter(|fork| fork.forked_from == Some(source))
+        {
+            fork.forked_from = (fork.id != upstream).then_some(upstream);
+            fork.record_metadata_update(now_ms);
+        }
+    }
+}
+
 impl CatalogStore {
     pub(crate) async fn change_visibility(
         &self,
@@ -71,7 +101,9 @@ impl CatalogStore {
         }
         let root = root.clone();
         let now_ms = super::catalog_time_ms()?;
-        if expected.value.is_public() {
+        if root.visibility.value.is_public() {
+            document.separate_public_forks(repository, now_ms);
+        } else if expected.value.is_public() {
             // Forks must stay private with their existing grants. In-flight jobs
             // still depend on lineage and must settle before an atomic detach.
             for fork in document
@@ -87,6 +119,7 @@ impl CatalogStore {
                 let external = fork.external_fork_destination(&root).is_some();
                 fork.fork_baseline = fork.baseline();
                 fork.forked_from = None;
+                fork.fork_creator = None;
                 fork.record_metadata_update(now_ms);
                 if let Some(owner) = fork.fork_owner.take() {
                     fork.members = vec![crate::RepositoryMember {

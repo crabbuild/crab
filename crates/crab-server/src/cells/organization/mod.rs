@@ -361,6 +361,21 @@ pub(in crate::cells) fn authorize(
     if mutation && operation == properties::SetValues::ID {
         return properties::authorize_save(context, input);
     }
+    if mutation
+        && matches!(
+            operation,
+            repositories::AuthorizeImportPublication::ID | properties::InitializeImportValues::ID
+        )
+    {
+        #[derive(Deserialize)]
+        struct ImportCaller {
+            actor: Uuid,
+            visibility: crate::catalog::visibility::Visibility,
+        }
+        let caller: ImportCaller = serde_json::from_value(input.clone())?;
+        actor(caller.actor)?;
+        return repositories::require_import(context, caller.actor, caller.visibility);
+    }
     let owner = match (operation, mutation) {
         // The private repository reads use catalog-bound team IDs. The public
         // repository boundary authorizes their callers before it returns data.
@@ -424,12 +439,10 @@ pub(in crate::cells) fn authorize(
             | ChangeMember::ID
             | Invite::ID
             | CancelInvitation::ID
-            | repositories::AuthorizeImportPublication::ID
             | repository_policy::Set::ID
             | rulesets::Replace::ID
             | properties::SetSchema::ID
             | properties::SetSelection::ID
-            | properties::InitializeImportValues::ID
             | properties::PrepareTransferValues::ID
             | issue_types::Replace::ID
             | automation::Change::ID,

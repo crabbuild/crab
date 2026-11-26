@@ -212,13 +212,22 @@ impl CatalogStore {
                     .filter(|_| !conversion)
                     .map(|entry| &mut entry.repository),
             )
-            .filter(|repo| repo.holds_organization_grants(input.organization))
+            .filter(|repo| {
+                repo.holds_organization_grants(input.organization)
+                    || (repo.organization_id() == Some(input.organization)
+                        && repo.fork_creator.is_some())
+            })
         {
             let mut changed = 0;
             for (requested, member) in input.decision.members.iter().zip(&input.members) {
                 let Some(identity) = &member.identity else {
                     continue;
                 };
+                if repo.fork_creator.as_ref() == Some(identity) {
+                    repo.fork_creator = None;
+                    changed += 1;
+                    continue;
+                }
                 let subject = &identity.subject;
                 let direct = repo
                     .members

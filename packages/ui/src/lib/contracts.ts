@@ -161,7 +161,7 @@ export type MemberAccessAccount = "active" | "suspended" | "provider_unavailable
 export type MemberAccessTeam = { id: string, name: string, access: RepositoryAccess, };
 
 // prettier-ignore
-export type AccessRepository = { id: string, owner: string, name: string, access: RepositoryAccess | null, direct: RepositoryAccess | null, teams: Array<MemberAccessTeam>, organization_owner: boolean, baseline: RepositoryAccess | null, sso_group_ceiling: RepositoryAccess | null, inherited_from: string | null, };
+export type AccessRepository = { id: string, owner: string, name: string, access: RepositoryAccess | null, direct: RepositoryAccess | null, fork_creator: RepositoryAccess | null, teams: Array<MemberAccessTeam>, organization_owner: boolean, baseline: RepositoryAccess | null, sso_group_ceiling: RepositoryAccess | null, inherited_from: string | null, };
 
 // prettier-ignore
 export type MemberRepositoryAccess = { account: MemberAccessAccount, managed: boolean, items: Array<AccessRepository>, next: string | null, };

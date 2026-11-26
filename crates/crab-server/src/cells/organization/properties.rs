@@ -567,6 +567,7 @@ pub(crate) struct ImportValues {
     pub actor: Uuid,
     pub repository: Uuid,
     pub overrides: BTreeMap<Uuid, PropertyValue>,
+    pub visibility: crate::catalog::visibility::Visibility,
 }
 
 pub(crate) struct InitializeImportValues;

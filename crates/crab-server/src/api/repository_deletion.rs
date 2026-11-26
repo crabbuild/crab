@@ -19,7 +19,8 @@ use crate::{
     app::{self, Error, Result},
     auth::Principal,
     catalog::{
-        CatalogDocument, CatalogError, CatalogRecord, MembershipActor, RepositoryBaseline,
+        CatalogDocument, CatalogError, CatalogRecord, MembershipActor, RepositoryApplicationState,
+        RepositoryBaseline,
         deletion::{Delete, RESTORE_WINDOW_MS, Restore},
     },
     repository::settings::{self, RulesetScope},
@@ -49,6 +50,7 @@ struct Status {
     version: u32,
     can_delete: bool,
     forks: usize,
+    public_forks: usize,
 }
 
 #[derive(Deserialize)]
@@ -158,14 +160,25 @@ async fn status(
         .repository_by_id(repository)
         .ok_or(Error::NotFound)?;
     let access = access(&server, &document, record, &actor).await?;
+    let forks = document
+        .repositories
+        .iter()
+        .filter(|fork| {
+            fork.forked_from == Some(repository)
+                && (!record.visibility.value.is_public()
+                    || fork.application == RepositoryApplicationState::CellReady)
+        })
+        .count();
+    let (forks, public_forks) = if record.visibility.value.is_public() {
+        (0, forks)
+    } else {
+        (forks, 0)
+    };
     Ok(Json(Status {
         version: record.name_version(),
         can_delete: access == SourceAccess::Allowed,
-        forks: document
-            .repositories
-            .iter()
-            .filter(|fork| fork.forked_from == Some(repository))
-            .count(),
+        forks,
+        public_forks,
     }))
 }
 
@@ -214,11 +227,13 @@ async fn delete(
         require_deletion(access(service, document, record, &actor).await?)?;
         // Block deletion while an issue publication still owns any destination
         // in this fork network. Foreign fork writes also take the upstream lease.
-        for record in &document.repositories {
-            if record.id != repository && record.forked_from != Some(repository) {
+        for related in &document.repositories {
+            if related.id != repository
+                && (record.visibility.value.is_public() || related.forked_from != Some(repository))
+            {
                 continue;
             }
-            let repository = source_repository(service, document, record).await?;
+            let repository = source_repository(service, document, related).await?;
             settings::require_no_issue_reservations(service, &repository).await?;
         }
         account(&principal)?;

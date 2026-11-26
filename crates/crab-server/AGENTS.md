@@ -142,9 +142,11 @@ to repositories without an override.
 `cells/organization/repositories.rs` binds initial property values to the
 creation ticket. Browser creation holds the organization policy lease through
 catalog reservation and value initialization. Publication follows.
-Organization Git imports bind property values to the saved job request.
-`git_import/authority.rs` initializes them under the policy lease before
-Git receive can evaluate property-targeted rulesets.
+Organization Git imports bind the submitter and property values to the saved
+job. `git_import/authority.rs` applies current creation visibility policy to
+the acting member and initializes values under the policy lease before Git
+receive evaluates property-targeted rulesets. Owners can recover a job for
+another member without replacing the original creator grant.
 `api/repository_transfer/` prepares selected destination property values in
 the receiving Organization Cell. The catalog's ownership CAS selects the
 prepared key. A failed transfer attempt cannot change live values.
@@ -170,6 +172,13 @@ Foreign organization forks use the destination catalog owner and source UUID
 independently. Admission checks both authorities and final ref publication
 holds both organizations' policy leases in UUID order. This keeps upstream
 deletion and detachment serialized with fork writes.
+Organization members can fork when the destination allows private repository
+creation. `repository/access.rs` grants the creator Write through current
+destination membership and upstream read access. Membership departure
+clears the grant, and organization fork job status requires upstream read.
+Public forks use their destination's own grants and rulesets. Source
+visibility changes and deletion atomically move ready forks to a separate
+public network and release pending reservations.
 Later policy edits leave that grant intact while current membership and team
 grants still apply. `app::require_related_read` checks the upstream grant
 separately before fork actions read or publish upstream data. Member removal

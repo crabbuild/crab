@@ -192,20 +192,23 @@ async fn a_foreign_private_fork_keeps_destination_ownership_and_inherits_source_
         .error_for_status()
         .unwrap();
     let job_path = format!("{destination_path}/repositories/imports/git/{request_id}");
-    let job = tokio::time::timeout(std::time::Duration::from_secs(60), async {
-        loop {
-            let status = h.json(&job_path, &bob).await;
-            match status["state"].as_str() {
-                Some("succeeded") => break status,
-                Some("queued" | "running") => {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await
+    let completed = async |path: &str, cookie: &str| {
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                let status = h.json(path, cookie).await;
+                match status["state"].as_str() {
+                    Some("succeeded") => break status,
+                    Some("queued" | "running") => {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await
+                    }
+                    _ => panic!("External fork failed: {status}"),
                 }
-                _ => panic!("External fork failed: {status}"),
             }
-        }
-    })
-    .await
-    .unwrap();
+        })
+        .await
+        .unwrap()
+    };
+    let job = completed(&job_path, &bob).await;
     let namespace = crate::catalog::organization_namespace(destination);
     assert_eq!(job["repository"]["owner"], namespace);
     let detail = format!("/api/repos?owner={namespace}&name=library");
@@ -249,13 +252,148 @@ async fn a_foreign_private_fork_keeps_destination_ownership_and_inherits_source_
     ).await.error_for_status().unwrap().json().await.unwrap();
     assert_eq!(copied["commit"], feature);
 
+    let mut policy = h.json(&destination_policy, &bob).await;
+    policy["member_creation"] = json!(true);
+    policy["member_creation_visibility"] = json!("public");
+    h.write(Method::PUT, &destination_policy, &bob, policy)
+        .await
+        .error_for_status()
+        .unwrap();
+    let member_job = Uuid::now_v7();
+    let member_request = json!({
+        "request_id": member_job, "name":"member-library", "organization":destination,
+        "default_branch_only":true,
+    });
+    assert_eq!(
+        repository_write(
+            &h,
+            Method::POST,
+            &fork_route,
+            &outsider,
+            source_id,
+            member_request.clone()
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    let mut policy = h.json(&destination_policy, &bob).await;
+    policy["member_creation_visibility"] = json!("private");
+    h.write(Method::PUT, &destination_policy, &bob, policy)
+        .await
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        h.json("/api/organizations", &outsider).await["items"][0]["can_create_private"],
+        true
+    );
+    repository_write(
+        &h,
+        Method::POST,
+        &fork_route,
+        &outsider,
+        source_id,
+        member_request,
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let member_job_path = format!("{destination_path}/repositories/imports/git/{member_job}");
+    let member_fork = completed(&member_job_path, &outsider).await;
+    assert_eq!(member_fork["repository"]["owner"], namespace);
+    let member_detail = format!("/api/repos?owner={namespace}&name=member-library");
+    let visible = &h.json(&member_detail, &outsider).await["repositories"][0];
+    assert_eq!(visible["access"], "write");
+    assert_eq!(visible["can_admin"], false);
+    let member_fork_id: Uuid = serde_json::from_value(visible["id"].clone()).unwrap();
+    repository_write(
+        &h, Method::POST, &format!("/api/repos/{namespace}/member-library/fork-sync"), &outsider, member_fork_id,
+        json!({"branch":"refs/heads/feature","fork_oid":null,"upstream_oid":feature,"request_id":Uuid::now_v7()}),
+    ).await.error_for_status().unwrap();
+    let inspector = h
+        .json(
+            &format!("{destination_path}/members/{outsider_actor}/repository-access"),
+            &bob,
+        )
+        .await;
+    let row = inspector["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == json!(member_fork_id))
+        .unwrap();
+    assert_eq!(row["fork_creator"], "write");
+    let imported = h.server.repositories.by_id(member_fork_id).unwrap();
+    let issues = format!("/api/repos/{namespace}/member-library/issues");
+    let mention_creator = async |title: &str| {
+        let issue: Value = repository_write(
+            &h,
+            Method::POST,
+            &issues,
+            &bob,
+            member_fork_id,
+            json!({"request_id":Uuid::now_v7(),"title":title,
+                "body":format!("Review this, [@creator](/-/users/{outsider_actor}).")}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        crate::server::mentions::drain_repository(&h.server, &imported)
+            .await
+            .unwrap();
+        issue["number"].as_u64().unwrap()
+    };
+    let mentions = "/api/notifications?reason=mention";
+    let first_issue = mention_creator("Fork creator review").await;
+    let inbox = h.json(mentions, &outsider).await;
+    let [notice] = inbox["items"].as_array().unwrap().as_slice() else {
+        panic!("the fork creator must receive one mention");
+    };
+    assert_eq!(notice["repository"]["id"], json!(member_fork_id));
+    assert_eq!(notice["title"], "Fork creator review");
+    assert_eq!(
+        h.json(&format!("{issues}/{first_issue}/subscription"), &outsider)
+            .await["mode"],
+        "follow"
+    );
+    let token: Value = h
+        .write(
+            Method::POST,
+            "/api/git-token",
+            &outsider,
+            json!({"owner":namespace,"repository":"member-library","access":"write"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut member_remote =
+        url::Url::parse(&format!("{}/git/{namespace}/member-library.git", h.origin)).unwrap();
+    member_remote.set_username("crab").unwrap();
+    member_remote.set_password(token["token"].as_str()).unwrap();
+    let list_refs = async || git::git(local.path(), &["ls-remote", member_remote.as_str()]).await;
+    assert!(list_refs().await.status.success());
+
     catalog
-        .set_members(source_namespace, "library", vec![guest], true)
+        .set_members(source_namespace, "library", vec![], true)
         .await
         .unwrap();
     let fork = &h.json(&detail, &bob).await["repositories"][0];
     assert_eq!(fork["can_admin"], true);
     assert!(fork.get("forked_from").is_none());
+    assert_eq!(
+        h.json(&member_detail, &outsider).await["repositories"],
+        json!([])
+    );
+    assert_eq!(
+        h.json(&member_detail, &bob).await["repositories"][0]["can_admin"],
+        true
+    );
     let hidden_job = h
         .http
         .get(format!("{}{job_path}", h.origin))
@@ -270,6 +408,78 @@ async fn a_foreign_private_fork_keeps_destination_ownership_and_inherits_source_
             .status(),
         StatusCode::NOT_FOUND
     );
+    assert!(!list_refs().await.status.success());
+    mention_creator("Mention after access removal").await;
+    assert_eq!(h.json(mentions, &outsider).await["items"], json!([]));
+
+    // Upstream group access can qualify this creator only. The inbox still
+    // requires a current signed group before exposing the queued mention.
+    let source_acl = format!("{source_route}/members");
+    let current = h.json(&source_acl, &alice).await;
+    repository_write(
+        &h,
+        Method::PUT,
+        &source_acl,
+        &alice,
+        source_id,
+        json!({"expected_revision":current["revision"],"members":[],
+            "groups":[{"group":"release-reviewers","access":"read"}]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    mention_creator("Fork creator group review").await;
+    assert_eq!(h.json(mentions, &outsider).await["items"], json!([]));
+    h.provider
+        .claims
+        .lock()
+        .await
+        .insert("groups".into(), json!(["release-reviewers"]));
+    let signed_outsider = h.login().await;
+    let inbox = h.json(mentions, &signed_outsider).await;
+    let titles: Vec<_> = inbox["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["Fork creator group review", "Fork creator review"]);
+    let issue = mention_creator("Verified fork creator review").await;
+    assert_eq!(
+        h.json(&format!("{issues}/{issue}/subscription"), &signed_outsider)
+            .await["mode"],
+        "follow"
+    );
+    let current = h.json(&source_acl, &alice).await;
+    repository_write(
+        &h,
+        Method::PUT,
+        &source_acl,
+        &alice,
+        source_id,
+        json!({"expected_revision":current["revision"],"members":[guest],"groups":[]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        h.json(&member_detail, &outsider).await["repositories"][0]["access"],
+        "write"
+    );
+    h.write(
+        Method::DELETE,
+        &format!("{destination_path}/members/{outsider_actor}"),
+        &bob,
+        json!({"version":1}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        h.json(&member_detail, &outsider).await["repositories"],
+        json!([])
+    );
+    assert!(!list_refs().await.status.success());
     let root_deletion = format!("/api/repositories/{source_id}/deletion");
     let deletion_id = Uuid::now_v7();
     h.write(
@@ -284,7 +494,7 @@ async fn a_foreign_private_fork_keeps_destination_ownership_and_inherits_source_
     .unwrap();
     assert_eq!(h.json(&detail, &bob).await["repositories"], json!([]));
     let deleted = format!("{source_org_path}/deleted-repositories");
-    assert_eq!(h.json(&deleted, &alice).await["items"][0]["forks"], 1);
+    assert_eq!(h.json(&deleted, &alice).await["items"][0]["forks"], 2);
     h.write(
         Method::PUT,
         &format!("{deleted}/{source_id}"),

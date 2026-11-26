@@ -14,7 +14,12 @@ import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { navigate, useRequest, type Repository } from "@/lib/api";
 
-type Eligibility = { version: number; can_delete: boolean; forks: number };
+type Eligibility = {
+  version: number;
+  can_delete: boolean;
+  forks: number;
+  public_forks: number;
+};
 
 export function DeleteRepositorySettings({
   repo,
@@ -121,6 +126,8 @@ function DeleteForm({
         <p className="text-sm">
           {eligibility.forks > 0 &&
             `This also deletes ${eligibility.forks} private ${eligibility.forks === 1 ? "fork" : "forks"}. `}
+          {eligibility.public_forks > 0 &&
+            "This repository’s forks will stay public. The oldest will become their upstream. "}
           Organization owners can restore the repository for 90 days.
         </p>
       )}

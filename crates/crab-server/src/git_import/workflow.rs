@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use super::{
     FetchGrant, ForkSource, ImportAccount, ImportContext, ImportError, InternalGit,
-    OrganizationOwner,
+    OrganizationDestination,
     git::{configure_git, default_branch, mirror_refs, mirror_size, push_mirror, run_git},
     jobs, repository_route,
     source::ValidatedImport,
@@ -14,12 +14,13 @@ use super::{
 use crate::{
     RepositoryAccess, RepositoryMember,
     catalog::{
-        CatalogRecord, CatalogStore, MembershipActor, RepositoryApplicationState,
-        RepositoryBaseline,
+        BrowserNamespace, CatalogRecord, CatalogStore, GitImportReservation, MembershipActor,
+        RepositoryApplicationState, RepositoryBaseline,
     },
     repository::{
         MaintenanceTrigger, Repository,
-        settings::{RulesetScope, with_destination_ruleset_leases},
+        access::organization_role,
+        settings::{RulesetScope, with_destination_ruleset_leases, with_ruleset_lease},
     },
     server::Server,
 };
@@ -111,6 +112,9 @@ pub(super) async fn run_import(
                 ImportError::ForkingDisabled | ImportError::ExternalForkingDisabled => {
                     "The organization or source repository disabled private forks. Restore permission before resuming."
                 }
+                ImportError::CreationRestricted => {
+                    "The organization restricts repository creation at this visibility. An organization owner can resume this job."
+                }
                 ImportError::Organization(_) => {
                     "Organization permissions are unavailable. Resume this job to try again."
                 }
@@ -144,12 +148,14 @@ async fn import_repository(
     let organization = account.organization;
     let catalog = server.catalog().ok_or(ImportError::Unavailable)?;
     let fork = account
-        .fork_source(server, &catalog, request.fork_source)
+        .fork_source(server, &catalog, request.fork_source, request.visibility)
         .await?;
     let namespace = account.destination(&request.owner, request.visibility, fork.as_deref())?;
-    let authority = organization
-        .map(|owner| owner.id)
-        .or(fork.as_ref().map(|source| source.organization));
+    let authority = organization.map(|owner| owner.id).or_else(|| {
+        fork.as_ref()
+            .filter(|source| !source.visibility.is_public())
+            .and_then(|source| source.organization)
+    });
     let (document, _) = catalog.load().await.map_err(ImportError::Catalog)?;
     if let Some(record) = document.repositories.iter().find(|record| {
         record.owner.eq_ignore_ascii_case(&request.owner)
@@ -293,35 +299,21 @@ async fn import_repository(
     job.pin(&snapshot).await?;
     job.update(jobs::State::Running, "Preparing Crab repository")
         .await?;
-    account.check(server).await?;
-    let actor = &account.identity;
-    let members = if server.auth.is_some() && authority.is_none() {
-        vec![RepositoryMember {
-            subject: actor.subject.clone(),
-            name: actor.name.clone(),
-            access: RepositoryAccess::Admin,
-        }]
-    } else {
-        Vec::new()
-    };
-    let record = catalog
-        .reserve_git_import(
-            namespace,
-            crate::catalog::GitImportReservation {
-                id,
-                name: request.name.clone(),
-                description: request.description.clone(),
-                visibility: request.visibility,
-                forked_from: request.fork_source,
-            },
-            MembershipActor {
-                issuer: actor.issuer.clone(),
-                subject: actor.subject.clone(),
-            },
-            members,
-        )
-        .await
-        .map_err(ImportError::Catalog)?;
+    let record = reserve_destination(
+        server,
+        account,
+        job,
+        &catalog,
+        namespace,
+        GitImportReservation {
+            id,
+            name: request.name.clone(),
+            description: request.description.clone(),
+            visibility: request.visibility,
+            forked_from: request.fork_source,
+        },
+    )
+    .await?;
     if record.application == RepositoryApplicationState::GitImportPending
         && let Some(owner) = organization
     {
@@ -388,7 +380,7 @@ pub(super) async fn publish_snapshot(
     repository: Arc<Repository>,
     mirror: &Path,
     cancellation: &CancellationToken,
-    organization: Option<OrganizationOwner>,
+    organization: Option<OrganizationDestination>,
     fork: Option<Arc<ForkSource>>,
 ) -> Result<(), ImportError> {
     job.verify().await?;
@@ -426,7 +418,7 @@ pub(super) async fn finish_destination(
     catalog: &CatalogStore,
     job: &jobs::Writer,
     id: Uuid,
-    organization: Option<OrganizationOwner>,
+    organization: Option<OrganizationDestination>,
     fork: Option<&ForkSource>,
     snapshot: &jobs::Snapshot,
 ) -> Result<(), ImportError> {
@@ -445,13 +437,26 @@ pub(super) async fn finish_destination(
             .map_err(ImportError::Catalog)
     };
     let destination = organization.map(|owner| owner.id);
-    let source = fork.map(|source| source.organization);
-    if let Some(authority) = destination.or(source) {
+    let source_repository = if let Some(fork) = fork {
+        Some(
+            server
+                .repositories
+                .by_id(fork.source)
+                .ok_or(ImportError::NotFound)?,
+        )
+    } else {
+        None
+    };
+    let scope = source_repository
+        .as_deref()
+        .map(RulesetScope::Repository)
+        .or_else(|| destination.map(RulesetScope::Organization));
+    if let Some(scope) = scope {
         // Hold both policy scopes through the final catalog commit so a
         // source restriction or destination edit cannot bypass verification.
         let published: crate::app::Result<_> = with_destination_ruleset_leases(
             server,
-            RulesetScope::Organization(source.unwrap_or(authority)),
+            scope,
             destination,
             &server.cancellation,
             |cancel| async move {
@@ -463,7 +468,6 @@ pub(super) async fn finish_destination(
                         server,
                         catalog,
                         id,
-                        authority,
                         organization,
                         fork,
                         snapshot,
@@ -493,21 +497,94 @@ pub(super) async fn finish_destination(
     install_destination(server, catalog, id).await
 }
 
+pub(super) async fn reserve_destination(
+    server: &Server,
+    account: &ImportAccount,
+    job: &jobs::Writer,
+    catalog: &CatalogStore,
+    namespace: BrowserNamespace,
+    reservation: GitImportReservation,
+) -> Result<CatalogRecord, ImportError> {
+    let personal_admin =
+        server.auth.is_some() && matches!(&namespace, BrowserNamespace::Personal(_));
+    let reserve = |creator: Option<crate::auth::Identity>| async move {
+        job.verify().await?;
+        account.check(server).await?;
+        let members = creator
+            .iter()
+            .map(|actor| RepositoryMember {
+                subject: actor.subject.clone(),
+                name: actor.name.trim().into(),
+                access: RepositoryAccess::Admin,
+            })
+            .collect();
+        let actor = creator.as_ref().unwrap_or(&account.identity);
+        catalog
+            .reserve_git_import(
+                namespace,
+                reservation,
+                MembershipActor {
+                    issuer: actor.issuer.clone(),
+                    subject: actor.subject.clone(),
+                },
+                members,
+            )
+            .await
+            .map_err(ImportError::Catalog)
+    };
+    let Some(destination) = account.organization else {
+        let creator = personal_admin.then(|| account.identity.clone());
+        return reserve(creator).await;
+    };
+    with_ruleset_lease(
+        server,
+        RulesetScope::Organization(destination.id),
+        &server.cancellation,
+        |cancel| async move {
+            let result = async {
+                let mut creator_identity = None;
+                // Membership removal shares this lease and can revoke a grant
+                // already reserved for the original creator.
+                if let Some(creator) = job.creator().await
+                    && creator.member_identity.is_some()
+                    && organization_role(server, destination.id, creator.actor)
+                        .await
+                        .map_err(ImportError::organization)?
+                        .is_some()
+                {
+                    creator_identity = creator.member_identity;
+                }
+                if cancel.is_cancelled() {
+                    return Err(ImportError::Cancelled);
+                }
+                reserve(creator_identity).await
+            }
+            .await;
+            Ok(result)
+        },
+    )
+    .await
+    .map_err(ImportError::organization)?
+}
+
 async fn validate_destination_policy(
     server: &Server,
     catalog: &CatalogStore,
     id: Uuid,
-    organization: Uuid,
-    owner: Option<OrganizationOwner>,
+    owner: Option<OrganizationDestination>,
     fork: Option<&ForkSource>,
     snapshot: &jobs::Snapshot,
 ) -> Result<(u64, RepositoryBaseline), ImportError> {
     use crate::cells::repository::rulesets::{ActiveRulesets, BypassActor, BypassContext};
     let (document, _) = catalog.load().await.map_err(ImportError::Catalog)?;
+    let organization = owner.map(|destination| destination.id).or_else(|| {
+        fork.filter(|source| !source.visibility.is_public())
+            .and_then(|source| source.organization)
+    });
     let record = document
         .repositories
         .iter()
-        .find(|row| row.id == id && row.organization_id() == Some(organization))
+        .find(|row| row.id == id && row.organization_id() == organization)
         .ok_or(ImportError::DestinationChanged)?;
     if record.forked_from != fork.map(|source| source.source) {
         return Err(ImportError::DestinationChanged);
@@ -516,12 +593,16 @@ async fn validate_destination_policy(
         // This read shares the organization's policy lease with both settings
         // writers. A disabled fork stays quarantined even after its refs commit.
         source.current(server).await?;
-        let upstream = record
-            .access_record(document.repository_by_id(source.source))
-            .map_err(ImportError::Catalog)?;
-        let policy = source.policy_grant(server, false).await?;
-        RepositoryBaseline::capture(upstream.baseline().resolve(policy.baseline))
-            .map_err(ImportError::Catalog)?
+        if source.visibility.is_public() {
+            RepositoryBaseline::Organization
+        } else {
+            let upstream = record
+                .access_record(document.repository_by_id(source.source))
+                .map_err(ImportError::Catalog)?;
+            let policy = source.policy_grant(server, false).await?;
+            RepositoryBaseline::capture(upstream.baseline().resolve(policy.baseline))
+                .map_err(ImportError::Catalog)?
+        }
     } else {
         RepositoryBaseline::Organization
     };
@@ -538,6 +619,10 @@ async fn validate_destination_policy(
     let inherited = crate::repository::settings::inherited_rulesets(server, &repository)
         .await
         .map_err(ImportError::organization)?;
+    let organization_owner = match owner {
+        Some(destination) => destination.check(server).await?,
+        None => false,
+    };
     let teams = if inherited.rulesets.iter().any(|rule| {
         rule.bypass_actors
             .iter()
@@ -556,12 +641,12 @@ async fn validate_destination_policy(
         Vec::new()
     };
     let actor = BypassContext {
-        role: Some(if owner.is_some() {
+        role: Some(if organization_owner {
             RepositoryAccess::Admin
         } else {
             RepositoryAccess::Write
         }),
-        organization_owner: owner.is_some(),
+        organization_owner,
         teams: &teams,
         organization_teams: &teams,
     };

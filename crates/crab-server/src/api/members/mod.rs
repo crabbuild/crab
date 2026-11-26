@@ -250,6 +250,7 @@ async fn replace_authorized(
         record.owner.eq_ignore_ascii_case(owner)
             && record.name.eq_ignore_ascii_case(name)
             && record.forked_from.is_some()
+            && !record.is_public_fork()
     }) {
         return error(
             StatusCode::FORBIDDEN,

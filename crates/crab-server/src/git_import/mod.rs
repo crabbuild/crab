@@ -3,7 +3,7 @@ mod git;
 mod jobs;
 mod source;
 mod workflow;
-use authority::{ForkSource, ImportAccount, OrganizationOwner};
+use authority::{ForkSource, ImportAccount, OrganizationDestination};
 use source::{GitImportRequest, ValidatedImport, validate_request};
 use workflow::run_import;
 
@@ -72,7 +72,7 @@ impl ImportContext {
         repository: Arc<Repository>,
         writer: Arc<jobs::Writer>,
         snapshot: jobs::Snapshot,
-        organization: Option<OrganizationOwner>,
+        organization: Option<OrganizationDestination>,
         fork: Option<Arc<ForkSource>>,
     ) -> ImportGuard {
         self.register(InternalGit::Receive(Arc::new(ReceiveGrant {
@@ -208,7 +208,7 @@ pub(crate) struct FetchGrant {
     route: String,
     writer: Arc<jobs::Writer>,
     fork: Arc<ForkSource>,
-    destination: Option<OrganizationOwner>,
+    destination: Option<OrganizationDestination>,
 }
 
 impl FetchGrant {
@@ -237,7 +237,7 @@ pub(crate) struct ReceiveGrant {
     pub(crate) repository: Arc<Repository>,
     writer: Arc<jobs::Writer>,
     snapshot: jobs::Snapshot,
-    organization: Option<OrganizationOwner>,
+    organization: Option<OrganizationDestination>,
     fork: Option<Arc<ForkSource>>,
     route: String,
 }
@@ -257,26 +257,29 @@ impl ReceiveGrant {
     }
 
     pub(crate) async fn active(&self, server: &Server) -> bool {
+        self.current_owner(server).await.is_some()
+    }
+
+    pub(crate) async fn current_owner(&self, server: &Server) -> Option<bool> {
         let result = async {
             self.writer.verify().await?;
-            if let Some(owner) = self.organization {
-                owner.check(server).await?;
-            }
+            let owner = match self.organization {
+                Some(destination) => destination.check(server).await?,
+                None => false,
+            };
             if let Some(fork) = &self.fork {
                 fork.current(server).await?;
             }
-            Ok::<_, ImportError>(())
+            Ok::<_, ImportError>(owner)
         }
         .await;
-        if let Err(error) = result {
-            tracing::warn!(error = ?error, "Git import authorization expired or could not be verified");
-            return false;
+        match result {
+            Ok(owner) => Some(owner),
+            Err(error) => {
+                tracing::warn!(error = ?error, "Git import authorization expired or could not be verified");
+                None
+            }
         }
-        true
-    }
-
-    pub(crate) fn has_organization_owner(&self) -> bool {
-        self.organization.is_some()
     }
 
     pub(crate) async fn fork_source(
@@ -358,6 +361,8 @@ enum ImportError {
     Ruleset,
     #[error("the organization or repository does not allow private forks")]
     ForkingDisabled,
+    #[error("the organization restricts creation at this visibility")]
+    CreationRestricted,
     #[error("the source organization does not allow forks into other organizations")]
     ExternalForkingDisabled,
     #[error("the organization import authority is unavailable")]
@@ -417,6 +422,11 @@ impl IntoResponse for ImportError {
                 StatusCode::FORBIDDEN,
                 "repository_ruleset",
                 "Organization rules restrict the imported refs",
+            ),
+            Self::CreationRestricted => (
+                StatusCode::FORBIDDEN,
+                "repository_creation_restricted",
+                "The organization restricts repository creation at this visibility",
             ),
             Self::ForkingDisabled => (
                 StatusCode::FORBIDDEN,
@@ -483,6 +493,7 @@ impl IntoResponse for ImportError {
                 | Self::Busy
                 | Self::Conflict
                 | Self::Ruleset
+                | Self::CreationRestricted
                 | Self::ForkingDisabled
                 | Self::ExternalForkingDisabled
         ) {
@@ -573,10 +584,20 @@ async fn start_fork(
 ) -> Result<(StatusCode, Json<jobs::Status>), ImportError> {
     let context = server.git_import.as_ref().ok_or(ImportError::Unavailable)?;
     let source = app::repository(&server, &principal, &key).map_err(ImportError::organization)?;
-    let source_organization = source
-        .organization
-        .filter(|_| source.forked_from.is_none())
+    let catalog = server.catalog().ok_or(ImportError::Unavailable)?;
+    let (document, _) = catalog
+        .load_snapshot()
+        .await
+        .map_err(ImportError::Catalog)?;
+    let record = document
+        .repository_by_id(source.id)
+        .filter(|record| record.forked_from.is_none())
         .ok_or(ImportError::NotFound)?;
+    let source_organization = record.organization_id();
+    let visibility = record.visibility.value;
+    if source_organization.is_none() && !visibility.is_public() {
+        return Err(ImportError::NotFound);
+    }
     let personal = input.destination == ForkDestination::Personal;
     if personal && input.organization.is_some() {
         return Err(ImportError::Invalid("Choose one fork destination"));
@@ -586,10 +607,22 @@ async fn start_fork(
             "Repository properties require an organization destination",
         ));
     }
-    let organization = (!personal).then_some(input.organization.unwrap_or(source_organization));
+    let organization = if personal {
+        None
+    } else {
+        Some(
+            input
+                .organization
+                .or(source_organization)
+                .ok_or(ImportError::Invalid("Choose a destination organization"))?,
+        )
+    };
     let account = ImportAccount::resolve(&server, &principal, organization).await?;
     let name = source::identifier(input.name, "name")?;
-    if organization == Some(source_organization) && name.eq_ignore_ascii_case(&source.config.name) {
+    if organization.is_some()
+        && organization == source_organization
+        && name.eq_ignore_ascii_case(&source.config.name)
+    {
         return Err(ImportError::Invalid("Choose a different name for the fork"));
     }
     let request = ValidatedImport {
@@ -605,7 +638,7 @@ async fn start_fork(
         },
         name,
         description: source::description(&input.description)?,
-        visibility: Visibility::Private,
+        visibility,
         properties: input.properties,
         token: None,
     };
@@ -622,11 +655,13 @@ async fn submit(
     if id.is_nil() {
         return Err(ImportError::Invalid("the import request ID is invalid"));
     }
+    let account = account.for_request(&request);
+    let organization_owner = account.check(server).await?;
     let catalog = server.catalog().ok_or(ImportError::Unavailable)?;
     account.namespace(&request.owner, request.visibility)?;
     let jobs = account.jobs(catalog.root());
     if let Some(status) = jobs.replay(id, &request).await? {
-        account.check(server).await?;
+        account.check_viewer(server).await?;
         return Ok((StatusCode::ACCEPTED, Json(status)));
     }
     if let Some(owner) = account.organization {
@@ -635,15 +670,18 @@ async fn submit(
             .await?;
     }
     account
-        .fork_source(server, &catalog, request.fork_source)
+        .fork_source(server, &catalog, request.fork_source, request.visibility)
         .await?;
     let slot = context.admission.admit(&request)?;
-    let Some(writer) = jobs.create(id, &request).await? else {
+    let Some(writer) = jobs
+        .create(id, &request, account.member_creator(organization_owner))
+        .await?
+    else {
         let status = jobs
             .replay(id, &request)
             .await?
             .ok_or(ImportError::Unavailable)?;
-        account.check(server).await?;
+        account.check_viewer(server).await?;
         return Ok((StatusCode::ACCEPTED, Json(status)));
     };
     Ok((
@@ -684,14 +722,16 @@ async fn resume(
     let (status, request) = jobs
         .resume_request(id, token, &context.allowed_hosts)
         .await?;
+    account.check_viewer(&server).await?;
+    require_job_source(&server, &account, &status).await?;
     let Some(request) = request else {
-        account.check(&server).await?;
-        require_external_job_source(&server, &account, &status).await?;
         return Ok((StatusCode::ACCEPTED, Json(status)));
     };
+    let account = account.for_request(&request);
+    account.check(&server).await?;
     account.namespace(&request.owner, request.visibility)?;
     account
-        .fork_source(&server, &catalog, request.fork_source)
+        .fork_source(&server, &catalog, request.fork_source, request.visibility)
         .await?;
     let slot = context.admission.admit(&request)?;
     let status = match jobs.claim(id, &request).await? {
@@ -745,30 +785,32 @@ async fn status(
     let account = ImportAccount::resolve(&server, &principal, path.organization).await?;
     let id = path.id.ok_or(ImportError::NotFound)?;
     let status = account.jobs(catalog.root()).status(id).await?;
-    account.check(&server).await?;
-    require_external_job_source(&server, &account, &status).await?;
+    account.check_viewer(&server).await?;
+    require_job_source(&server, &account, &status).await?;
     app::account(&principal).map_err(|_| ImportError::NotFound)?;
     Ok(Json(status))
 }
 
-async fn require_external_job_source(
+async fn require_job_source(
     server: &Server,
     account: &ImportAccount,
     status: &jobs::Status,
 ) -> Result<(), ImportError> {
-    let (Some(owner), Some(source)) = (account.organization, status.fork_source) else {
+    let (Some(_), Some(source)) = (account.organization, status.fork_source) else {
         return Ok(());
     };
     let upstream = server
         .repositories
         .by_id(source)
         .ok_or(ImportError::NotFound)?;
-    if upstream.organization != Some(owner.id) {
-        // Shared destination job status contains the upstream repository's address.
-        app::catalog_membership(server, &account.principal, &upstream)
-            .await
-            .map_err(ImportError::organization)?;
+    // Shared destination job status contains the upstream repository's address.
+    let mut principal = account.principal.clone();
+    if status.visibility.is_public() {
+        principal.allow_public_reads();
     }
+    app::catalog_membership(server, &principal, &upstream)
+        .await
+        .map_err(ImportError::organization)?;
     Ok(())
 }
 

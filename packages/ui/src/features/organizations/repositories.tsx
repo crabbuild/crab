@@ -46,11 +46,16 @@ export function OrganizationRepositories({
               onCreated={(repo) => navigate(repoHref(repo))}
             />
           )}
-          {owner && (
+          {(canCreate || requestedImport) && (
             <GitImport
               key={`${id}:${actor}:${requestedImport ?? ""}`}
               account={actor}
-              organization={{ id, name, requestedJob: requestedImport }}
+              organization={{
+                id,
+                name,
+                requestedJob: requestedImport,
+                canStart: canCreate,
+              }}
               csrf={csrf}
               onImported={(repo) => navigate(repoHref(repo))}
             />

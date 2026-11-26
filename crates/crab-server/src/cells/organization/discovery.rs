@@ -6,6 +6,8 @@ pub(crate) enum Landing {
     Member {
         view: View,
         can_create: bool,
+        can_create_private: bool,
+        can_create_public: bool,
     },
     Invitation {
         organization: Organization,
@@ -28,9 +30,15 @@ impl Read for GetLanding {
         {
             let policy = repository_policy::load(context)?;
             let can_create = policy.can_create(role);
+            let can_create_private =
+                policy.permits_creation(role, crate::catalog::visibility::Visibility::Private);
+            let can_create_public =
+                policy.permits_creation(role, crate::catalog::visibility::Visibility::Public);
             return Ok(record(context)?.map(|organization| Landing::Member {
                 view: View { organization, role },
                 can_create,
+                can_create_private,
+                can_create_public,
             }));
         }
         let view = GetInvitation::execute(

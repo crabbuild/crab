@@ -34,6 +34,21 @@ impl CatalogDocument {
             digest.update(record.id.as_bytes());
             digest.update(record.membership_digest()?.as_bytes());
         }
+        for record in self
+            .repositories
+            .iter()
+            .chain(
+                self.deleted_repositories
+                    .iter()
+                    .map(|entry| &entry.repository),
+            )
+            .filter(|record| record.organization_id() == Some(organization))
+        {
+            if let Some(creator) = &record.fork_creator {
+                digest.update(record.id.as_bytes());
+                digest.update(&serde_json::to_vec(creator)?);
+            }
+        }
         Ok(digest.finalize().to_hex().to_string())
     }
 }
