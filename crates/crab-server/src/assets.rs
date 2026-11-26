@@ -24,16 +24,30 @@ pub(crate) async fn serve(request: Request) -> Response {
         };
         valid_id(id)
     };
+    // Mirror the page routes of packages/ui (app/index.tsx and
+    // lib/repository-route.ts); a page missing here returns 404 on reload.
     let global_route = match components.as_slice() {
         [
             "-",
             "profile" | "notifications" | "code-search" | "discussion-search" | "organizations"
-            | "public" | "work",
+            | "public" | "work" | "repositories" | "settings",
         ]
         | ["-", "notifications", "watched" | "subscriptions"]
         | ["-", "repositories", "personal"]
         | ["-", "organizations", "new"]
-        | ["-", "settings", "saved-replies" | "review-availability"] => true,
+        | [
+            "-",
+            "settings",
+            "profile"
+            | "account"
+            | "appearance"
+            | "notifications"
+            | "git-access"
+            | "organizations"
+            | "repositories"
+            | "saved-replies"
+            | "review-availability",
+        ] => true,
         ["-", "users" | "repository-transfers", id] | ["-", "users", id, "repositories"] => {
             valid_id(id)
         }
@@ -57,8 +71,15 @@ pub(crate) async fn serve(request: Request) -> Response {
                 || (components.len() == 3
                     && matches!(
                         components[2],
-                        "code-search" | "projects" | "properties" | "rulesets"
+                        "code-search"
+                            | "fork-compare"
+                            | "forks"
+                            | "projects"
+                            | "properties"
+                            | "rulesets"
+                            | "security"
                     ))
+                || matches!(components.as_slice(), [_, _, "fork-compare", _])
                 || matches!(components.as_slice(), [_, _, "projects", id]
                     if uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil()))
                 || matches!(
@@ -172,6 +193,16 @@ mod tests {
             ("/team/repo.name/properties", StatusCode::OK),
             ("/team/repo.name/rulesets", StatusCode::OK),
             ("/team/repo.name/properties/unknown", StatusCode::NOT_FOUND),
+            ("/team/repo.name/forks", StatusCode::OK),
+            ("/team/repo.name/forks/unknown", StatusCode::NOT_FOUND),
+            ("/team/repo.name/fork-compare", StatusCode::OK),
+            ("/team/repo.name/fork-compare/feature%2Fx", StatusCode::OK),
+            (
+                "/team/repo.name/fork-compare/feature%2Fx/unknown",
+                StatusCode::NOT_FOUND,
+            ),
+            ("/team/repo.name/security?branch=main", StatusCode::OK),
+            ("/team/repo.name/security/unknown", StatusCode::NOT_FOUND),
             ("/team/repo.name/results", StatusCode::OK),
             (
                 "/team/repo.name/results?report=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
@@ -191,8 +222,17 @@ mod tests {
                 StatusCode::OK,
             ),
             ("/-/discussion-search/unknown", StatusCode::NOT_FOUND),
+            ("/-/settings", StatusCode::OK),
+            ("/-/settings/profile", StatusCode::OK),
+            ("/-/settings/account", StatusCode::OK),
+            ("/-/settings/appearance", StatusCode::OK),
+            ("/-/settings/notifications", StatusCode::OK),
+            ("/-/settings/git-access", StatusCode::OK),
+            ("/-/settings/organizations", StatusCode::OK),
+            ("/-/settings/repositories", StatusCode::OK),
             ("/-/settings/saved-replies", StatusCode::OK),
             ("/-/settings/review-availability", StatusCode::OK),
+            ("/-/settings/unknown", StatusCode::NOT_FOUND),
             (
                 "/-/settings/review-availability/unknown",
                 StatusCode::NOT_FOUND,
@@ -204,7 +244,10 @@ mod tests {
                 "/-/users/01900000-0000-7000-8000-000000000001",
                 StatusCode::OK,
             ),
+            ("/-/repositories", StatusCode::OK),
+            ("/-/repositories?q=crab", StatusCode::OK),
             ("/-/repositories/personal", StatusCode::OK),
+            ("/-/repositories/unknown", StatusCode::NOT_FOUND),
             ("/-/public?q=open-library", StatusCode::OK),
             ("/-/public/unknown", StatusCode::NOT_FOUND),
             ("/-/organizations", StatusCode::OK),
