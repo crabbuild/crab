@@ -614,6 +614,9 @@ pub(crate) struct SessionResponse {
     user: Option<SessionIdentity>,
     csrf: Option<String>,
     can_sign_up: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    avatar: Option<crate::cells::directory::avatar::AvatarConfig>,
 }
 
 pub(crate) async fn session(
@@ -632,6 +635,20 @@ pub(crate) async fn session(
         .auth
         .as_ref()
         .is_some_and(Authentication::can_sign_up);
+    let avatar = match (crate::app::account(&principal).ok(), server.cells()) {
+        (Some(identity), Some(cells)) => crate::app::query_output(
+            cells
+                .query::<crate::cells::directory::avatar::GetOwnAvatar>(
+                    crate::cells::Address::Directory,
+                    None,
+                    identity,
+                )
+                .await,
+        )
+        .ok()
+        .flatten(),
+        _ => None,
+    };
     let value = if principal.is_local() {
         SessionResponse {
             authenticated: true,
@@ -639,6 +656,7 @@ pub(crate) async fn session(
             user: None,
             csrf: None,
             can_sign_up: false,
+            avatar,
         }
     } else if let Some(session) = principal.user_session() {
         SessionResponse {
@@ -653,6 +671,7 @@ pub(crate) async fn session(
             }),
             csrf: Some(session.csrf.clone()),
             can_sign_up,
+            avatar,
         }
     } else {
         SessionResponse {
@@ -661,6 +680,7 @@ pub(crate) async fn session(
             user: None,
             csrf: None,
             can_sign_up,
+            avatar: None,
         }
     };
     Json(value)

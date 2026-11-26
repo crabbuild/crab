@@ -16,7 +16,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { UserAvatar } from "@/components/ui/user-avatar";
 import { Field, FieldLabel } from "@/components/ui/field";
 import {
   InputGroup,
@@ -53,7 +53,7 @@ type CatalogOption = Choice &
     exclude_query?: string | null;
   };
 type AuthorOption = Choice & {
-  actor: Pick<ActorProfile, "id" | "handle" | "name">;
+  actor: Pick<ActorProfile, "id" | "handle" | "name" | "avatar">;
 };
 type PersonOption = Choice & { person: RepositoryAssignee };
 type Item = CatalogOption | AuthorOption | PersonOption;
@@ -433,10 +433,18 @@ export function DiscussionFilter({
                     ? LockOpenIcon
                     : Icon;
                 const excluded = "excluded" in choice && choice.excluded;
-                const initial =
-                  "actor" in choice || "person" in choice
-                    ? Array.from(title.trim())[0]?.toUpperCase()
-                    : undefined;
+                const avatar =
+                  "actor" in choice
+                    ? choice.actor.avatar
+                    : "person" in choice
+                      ? choice.person.profile?.avatar
+                      : undefined;
+                const avatarName =
+                  "actor" in choice
+                    ? choice.actor.handle
+                    : "person" in choice
+                      ? choice.person.profile?.handle || choice.person.name
+                      : title;
                 return (
                   <Button
                     key={key}
@@ -467,11 +475,12 @@ export function DiscussionFilter({
                       )
                     ) : null}
                     {people && (
-                      <Avatar size="sm" aria-hidden="true">
-                        <AvatarFallback>
-                          {initial || <UserRoundIcon />}
-                        </AvatarFallback>
-                      </Avatar>
+                      <UserAvatar
+                        name={avatarName}
+                        avatar={avatar}
+                        size={20}
+                        className="mt-0.5"
+                      />
                     )}
                     {color && (
                       <span

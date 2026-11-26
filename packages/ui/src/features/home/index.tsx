@@ -32,7 +32,7 @@ import type { OrganizationMembershipEntry } from "@/features/organizations/choic
 import { useOrganizationDirectory } from "@/features/organizations/directory";
 import { CreateRepository } from "@/features/repository/create";
 import { navigate, useRequest, type Repository } from "@/lib/api";
-import type { OwnProfile, Session } from "@/lib/contracts";
+import type { AvatarConfig, OwnProfile, Session } from "@/lib/contracts";
 import { repoHref } from "@/lib/repository-route";
 import { cn } from "@/lib/utils";
 import crabMark from "../../../../web/crab.optimized.svg";
@@ -81,10 +81,12 @@ function readPinnedTab(): HomeTab {
 
 export function HomeDashboard({
   session,
+  avatar,
   url,
   onRepositoryCreated,
 }: {
   session: Session;
+  avatar?: AvatarConfig | null;
   url: URL;
   onRepositoryCreated?: () => void;
 }) {
@@ -145,6 +147,12 @@ export function HomeDashboard({
       <HomeSidebar
         accountName={accountName}
         accountHandle={accountHandle}
+        accountAvatar={
+          avatar ??
+          ownProfile.data?.avatar ??
+          ownProfile.data?.profile?.avatar ??
+          null
+        }
         activeTab={activeTab}
         pinnedTab={pinnedTab}
         onSelectTab={selectTab}

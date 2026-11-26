@@ -21,6 +21,7 @@ import {
   type RepositoryLabel,
 } from "@/lib/api";
 import { Author } from "./author";
+import { UserAvatar } from "@/components/ui/user-avatar";
 import { LinkedWork } from "./links";
 import { MilestonePicker } from "@/features/milestones/picker";
 import { LabelBadges, LabelPicker } from "@/features/labels/selection";
@@ -30,15 +31,6 @@ import { Result } from "@/components/request/result";
 interface AssigneeCatalog {
   items: RepositoryAssignee[];
   can_manage: boolean;
-}
-
-function initials(name: string) {
-  return name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join("");
 }
 
 export function AssigneeAvatars({
@@ -55,12 +47,17 @@ export function AssigneeAvatars({
     >
       {assignees.map((assignee) => (
         <span
-          className="assignee-avatar"
+          className="assignee-avatar overflow-hidden p-0"
           key={assignee.id}
           title={assignee.name}
           aria-hidden="true"
         >
-          {initials(assignee.name)}
+          <UserAvatar
+            name={assignee.profile?.handle || assignee.name}
+            avatar={assignee.profile?.avatar}
+            size={20}
+            className="border-0"
+          />
         </span>
       ))}
     </span>
@@ -193,8 +190,16 @@ function AssigneePicker({
                               )
                             }
                           />
-                          <span className="assignee-avatar" aria-hidden="true">
-                            {initials(person.name)}
+                          <span
+                            className="assignee-avatar overflow-hidden p-0"
+                            aria-hidden="true"
+                          >
+                            <UserAvatar
+                              name={person.profile?.handle || person.name}
+                              avatar={person.profile?.avatar}
+                              size={20}
+                              className="border-0"
+                            />
                           </span>
                           <span className="min-w-0">
                             <span className="assignee-choice-name block truncate">
@@ -309,8 +314,16 @@ export function DiscussionMetadata({
           <ul className="metadata-assignees">
             {assignees.map((assignee) => (
               <li key={assignee.id}>
-                <span className="assignee-avatar" aria-hidden="true">
-                  {initials(assignee.name)}
+                <span
+                  className="assignee-avatar overflow-hidden p-0"
+                  aria-hidden="true"
+                >
+                  <UserAvatar
+                    name={assignee.profile?.handle || assignee.name}
+                    avatar={assignee.profile?.avatar}
+                    size={20}
+                    className="border-0"
+                  />
                 </span>
                 <Author author={assignee} />
               </li>
