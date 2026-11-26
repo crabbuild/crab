@@ -9,6 +9,11 @@ test("unified GitHub-style settings lets users configure profile, account, appea
 }) => {
   const orgId = "01900000-0000-7000-8000-000000000010";
   const now = Date.UTC(2026, 10, 25, 18, 0, 0);
+  let savedAvatar: {
+    variant: string;
+    seed: string;
+    colors: string[];
+  } | null = null;
 
   await page.route("**/api/**", (route) => {
     const request = route.request();
@@ -20,6 +25,7 @@ test("unified GitHub-style settings lets users configure profile, account, appea
           mode: "oidc",
           csrf: "fixture-csrf",
           can_sign_up: false,
+          ...(savedAvatar ? { avatar: savedAvatar } : {}),
           user: {
             issuer: "https://accounts.example",
             subject: "forhappy",
@@ -31,9 +37,19 @@ test("unified GitHub-style settings lets users configure profile, account, appea
     if (pathname === "/api/notifications/unread") {
       return route.fulfill({ json: { unread: false } });
     }
+    if (pathname === "/api/profile/avatar") {
+      if (request.method() === "PUT") {
+        expect(request.headers()["x-csrf-token"]).toBe("fixture-csrf");
+        const body = request.postDataJSON() as { avatar: typeof savedAvatar };
+        savedAvatar = body.avatar;
+        return route.fulfill({ json: { avatar: savedAvatar } });
+      }
+      return route.fulfill({ json: { avatar: savedAvatar } });
+    }
     if (pathname === "/api/profile") {
       return route.fulfill({
         json: {
+          ...(savedAvatar ? { avatar: savedAvatar } : {}),
           profile: {
             id: "01900000-0000-7000-8000-000000000001",
             handle: "forhappy",
@@ -41,6 +57,7 @@ test("unified GitHub-style settings lets users configure profile, account, appea
             version: 1,
             created_at_ms: now - 86_400_000,
             updated_at_ms: now - 3_600_000,
+            ...(savedAvatar ? { avatar: savedAvatar } : {}),
           },
         },
       });
@@ -124,6 +141,25 @@ test("unified GitHub-style settings lets users configure profile, account, appea
   await expect(
     page.getByRole("heading", { name: "Profile picture", exact: true }),
   ).toBeVisible();
+
+  // Customize Boring Avatar via Edit dialog
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Customize profile picture" }),
+  ).toBeVisible();
+  await page.getByLabel("Avatar name", { exact: true }).fill("Maria Mitchell");
+  await page.getByRole("radio", { name: "Marble", exact: true }).click();
+  await page.getByRole("radio", { name: "Ocean", exact: true }).click();
+  await expectNoAccessibilityViolations(page);
+  await page.getByRole("button", { name: "Save avatar", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText(
+    "Profile picture updated.",
+  );
+  expect(savedAvatar).toEqual({
+    variant: "marble",
+    seed: "Maria Mitchell",
+    colors: ["#0A0310", "#49007E", "#FF005B", "#FF7D10", "#FFB238"],
+  });
 
   // Switch settings context dropdown loads organizations lazily
   await page.getByRole("button", { name: "Switch settings context" }).click();

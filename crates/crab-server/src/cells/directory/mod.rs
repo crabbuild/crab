@@ -14,6 +14,7 @@ const COLUMNS: &str = "p.id, p.handle, p.name, p.version, p.created_at_ms, p.upd
 
 mod accounts;
 pub(crate) use accounts::RegisterAccounts;
+pub(crate) mod avatar;
 mod migration;
 pub use migration::DirectoryState;
 pub(crate) use migration::{GetDirectoryState, MigrateDirectory};
@@ -70,6 +71,9 @@ pub(crate) struct ActorProfile {
     pub version: u64,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub avatar: Option<avatar::AvatarConfig>,
 }
 
 impl TryFrom<&[SqlValue]> for ActorProfile {
@@ -96,6 +100,7 @@ impl TryFrom<&[SqlValue]> for ActorProfile {
                 .map_err(|_| Error::Invalid("actor timestamp is negative"))?,
             updated_at_ms: u64::try_from(*updated)
                 .map_err(|_| Error::Invalid("actor timestamp is negative"))?,
+            avatar: None,
         })
     }
 }
@@ -193,10 +198,12 @@ fn profile(context: &Transaction<'_>, id: Uuid) -> Result<Option<ActorProfile>> 
         &format!("SELECT {COLUMNS} FROM profiles p WHERE p.id = ?"),
         &[SqlValue::Blob(id.as_bytes().to_vec())],
     )?;
-    rows.rows
-        .first()
-        .map(|row| ActorProfile::try_from(row.as_slice()))
-        .transpose()
+    let Some(row) = rows.rows.first() else {
+        return Ok(None);
+    };
+    let mut actor = ActorProfile::try_from(row.as_slice())?;
+    actor.avatar = avatar::load(context, actor.id)?;
+    Ok(Some(actor))
 }
 fn own_profile(context: &Transaction<'_>, identity: &IdentityKey) -> Result<Option<ActorProfile>> {
     let rows = context.query(
@@ -206,10 +213,12 @@ fn own_profile(context: &Transaction<'_>, identity: &IdentityKey) -> Result<Opti
             SqlValue::Text(identity.subject.clone()),
         ],
     )?;
-    rows.rows
-        .first()
-        .map(|row| ActorProfile::try_from(row.as_slice()))
-        .transpose()
+    let Some(row) = rows.rows.first() else {
+        return Ok(None);
+    };
+    let mut actor = ActorProfile::try_from(row.as_slice())?;
+    actor.avatar = avatar::load(context, actor.id)?;
+    Ok(Some(actor))
 }
 fn advance(context: &Transaction<'_>) -> Result<()> {
     let result = context.query("UPDATE directory_identity SET app_revision = app_revision + 1 WHERE singleton = 1 AND app_revision < 9007199254740991", &[])?;
@@ -233,6 +242,7 @@ pub(in crate::cells) fn dispatch_read(
         review_availability::GetAvailability::ID => {
             invoke_read::<review_availability::GetAvailability>(context, input)
         }
+        avatar::GetOwnAvatar::ID => invoke_read::<avatar::GetOwnAvatar>(context, input),
         #[cfg(test)]
         migration::tests::InspectSource::ID => {
             invoke_read::<migration::tests::InspectSource>(context, input)
@@ -295,6 +305,7 @@ pub(in crate::cells) fn dispatch_mutation(
         review_availability::SetAvailability::ID => {
             invoke_mutation::<review_availability::SetAvailability>(context, input)
         }
+        avatar::SetOwnAvatar::ID => invoke_mutation::<avatar::SetOwnAvatar>(context, input),
         notifications::Deliver::ID => invoke_mutation::<notifications::Deliver>(context, input),
         notifications::filters::UpdateFilters::ID => {
             invoke_mutation::<notifications::filters::UpdateFilters>(context, input)

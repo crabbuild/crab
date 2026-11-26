@@ -31,6 +31,7 @@ impl Mutation for SeedVersionOne {
                 version: 3,
                 created_at_ms: 100,
                 updated_at_ms: 200,
+                avatar: None,
             };
             let digest = blake3::hash(&serde_json::to_vec(&(
                 &input.identity,

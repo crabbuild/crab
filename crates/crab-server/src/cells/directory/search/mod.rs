@@ -73,7 +73,11 @@ impl Read for CompleteHandles {
         let mut items = rows
             .rows
             .iter()
-            .map(|row| ActorProfile::try_from(row.as_slice()).map(Into::into))
+            .map(|row| {
+                let mut actor = ActorProfile::try_from(row.as_slice())?;
+                actor.avatar = avatar::load(context, actor.id)?;
+                Ok(actor.into())
+            })
             .collect::<Result<Vec<_>>>()?;
         let truncated = items.len() > 20;
         items.truncate(20);
@@ -132,12 +136,15 @@ impl Read for MentionCandidates {
                 else {
                     return Err(Error::Invalid("Mention profile is invalid"));
                 };
+                let actor_id = Uuid::from_slice(id).map_err(Error::sdk)?;
+                let actor_avatar = avatar::load(context, actor_id)?;
                 Ok(MentionCandidate {
                     subject: subject.clone(),
                     actor: ActorSummary {
-                        id: Uuid::from_slice(id).map_err(Error::sdk)?,
+                        id: actor_id,
                         handle: handle.clone(),
                         name: name.clone(),
+                        avatar: actor_avatar,
                     },
                 })
             })

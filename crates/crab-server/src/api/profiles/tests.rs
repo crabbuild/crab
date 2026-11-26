@@ -251,3 +251,88 @@ async fn profiles_keep_actor_ids_on_rename_and_isolate_accounts_conflicts_and_re
     );
     h.close().await;
 }
+
+#[tokio::test]
+async fn avatar_persists_before_and_after_profile_enrollment_and_validates_inputs() {
+    let h = Harness::new(false).await;
+    h.server
+        .cells()
+        .unwrap()
+        .initialize(Address::Directory)
+        .await
+        .unwrap();
+    let alice = h.login().await;
+    assert_eq!(
+        h.json("/api/profile/avatar", &alice).await,
+        json!({"avatar": null})
+    );
+    let avatar = json!({
+        "variant": "marble",
+        "seed": "Maria Mitchell",
+        "colors": ["#92A1C6", "#146A7C", "#F0AB3D", "#C271B4", "#C20D90"]
+    });
+    let saved = h
+        .write(
+            Method::PUT,
+            "/api/profile/avatar",
+            &alice,
+            json!({"avatar": avatar}),
+        )
+        .await;
+    assert_eq!(saved.status(), StatusCode::OK);
+    assert_eq!(
+        saved.json::<Value>().await.unwrap(),
+        json!({"avatar": avatar})
+    );
+    assert_eq!(
+        h.json("/api/profile", &alice).await,
+        json!({"profile": null, "avatar": avatar})
+    );
+
+    let created: Value = h
+        .write(Method::POST, "/api/profile", &alice, registration("alice"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(created["avatar"], avatar);
+    let id = created["id"].as_str().unwrap();
+    assert_eq!(
+        h.json(&format!("/api/actors/{id}"), &alice).await["avatar"],
+        avatar
+    );
+
+    for bad in [
+        json!({"avatar": {"variant": "beam", "seed": " ", "colors": ["#112233"]}}),
+        json!({"avatar": {"variant": "beam", "seed": "Maria", "colors": []}}),
+        json!({"avatar": {"variant": "beam", "seed": "Maria", "colors": ["not-a-color"]}}),
+    ] {
+        assert_eq!(
+            h.write(Method::PUT, "/api/profile/avatar", &alice, bad)
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    let cleared = h
+        .write(
+            Method::PUT,
+            "/api/profile/avatar",
+            &alice,
+            json!({"avatar": null}),
+        )
+        .await;
+    assert_eq!(cleared.status(), StatusCode::OK);
+    assert_eq!(
+        cleared.json::<Value>().await.unwrap(),
+        json!({"avatar": null})
+    );
+    assert!(
+        h.json(&format!("/api/actors/{id}"), &alice)
+            .await
+            .get("avatar")
+            .is_none()
+    );
+    h.close().await;
+}

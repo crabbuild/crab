@@ -19,6 +19,7 @@ use crate::{
         directory::{
             self, ActorProfile, CreateProfile, CreateProfileInput, EditProfile, EditProfileInput,
             GetActor, GetOwnProfile, LookupIdentities, ProfileOutcome,
+            avatar::{AvatarConfig, GetOwnAvatar, SetAvatarInput, SetOwnAvatar},
         },
     },
     server::Server,
@@ -32,11 +33,27 @@ mod saved_replies;
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub(super) struct OwnProfile {
     profile: Option<ActorProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    avatar: Option<AvatarConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AvatarUpdate {
+    avatar: Option<AvatarConfig>,
+}
+
+#[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(super) struct AvatarResponse {
+    avatar: Option<AvatarConfig>,
 }
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/profile", get(own).post(create).patch(edit))
+        .route("/api/profile/avatar", get(get_avatar).put(put_avatar))
         .route("/api/actors/{id}", get(actor))
         .route("/api/actors/{id}/repositories", get(repositories))
         .route(
@@ -62,11 +79,61 @@ async fn own(
     let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
     let profile = app::query_output(
         cells
-            .query::<GetOwnProfile>(Address::Directory, None, identity)
+            .query::<GetOwnProfile>(Address::Directory, None, identity.clone())
+            .await,
+    )?;
+    let avatar = match &profile {
+        Some(actor) => actor.avatar.clone(),
+        None => app::query_output(
+            cells
+                .query::<GetOwnAvatar>(Address::Directory, None, identity)
+                .await,
+        )?,
+    };
+    app::account(&principal)?;
+    Ok(Json(OwnProfile { profile, avatar }))
+}
+
+async fn get_avatar(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<AvatarResponse>> {
+    let identity = app::account(&principal)?;
+    let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
+    let avatar = app::query_output(
+        cells
+            .query::<GetOwnAvatar>(Address::Directory, None, identity)
             .await,
     )?;
     app::account(&principal)?;
-    Ok(Json(OwnProfile { profile }))
+    Ok(Json(AvatarResponse { avatar }))
+}
+
+async fn put_avatar(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    input: std::result::Result<Json<AvatarUpdate>, JsonRejection>,
+) -> Result<Json<AvatarResponse>> {
+    let identity = app::account(&principal)?;
+    let Json(input) = input.map_err(app::Error::Body)?;
+    if let Some(ref avatar) = input.avatar {
+        avatar.validate().map_err(app::Error::Invalid)?;
+    }
+    let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
+    let avatar = app::command_output(
+        cells
+            .command::<SetOwnAvatar>(
+                Address::Directory,
+                app::mutation_identity()?,
+                SetAvatarInput {
+                    identity,
+                    avatar: input.avatar,
+                },
+            )
+            .await,
+    )?;
+    app::account(&principal)?;
+    Ok(Json(AvatarResponse { avatar }))
 }
 async fn actor(
     State(server): State<Arc<Server>>,

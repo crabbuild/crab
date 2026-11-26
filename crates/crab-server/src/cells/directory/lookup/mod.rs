@@ -7,6 +7,9 @@ pub(crate) struct ActorSummary {
     pub id: Uuid,
     pub handle: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub avatar: Option<avatar::AvatarConfig>,
 }
 
 impl From<ActorProfile> for ActorSummary {
@@ -15,6 +18,7 @@ impl From<ActorProfile> for ActorSummary {
             id: profile.id,
             handle: profile.handle,
             name: profile.name,
+            avatar: profile.avatar,
         }
     }
 }

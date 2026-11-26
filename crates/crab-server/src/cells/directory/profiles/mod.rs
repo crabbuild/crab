@@ -109,6 +109,7 @@ impl Mutation for CreateProfile {
         let now = u64::try_from(context.now_ms())
             .map_err(|_| Error::Invalid("profile clock is negative"))?;
         let (id, _) = accounts::ensure(context, &input.identity)?;
+        let avatar = avatar::load(context, id)?;
         let actor = ActorProfile {
             id,
             handle: input.handle,
@@ -116,6 +117,7 @@ impl Mutation for CreateProfile {
             version: 1,
             created_at_ms: now,
             updated_at_ms: now,
+            avatar,
         };
         context.query("INSERT INTO profiles(id, handle, name, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, 1, ?, ?)", &[
             SqlValue::Blob(actor.id.as_bytes().to_vec()), SqlValue::Text(actor.handle.clone()), SqlValue::Text(actor.name.clone()),

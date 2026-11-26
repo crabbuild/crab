@@ -31,9 +31,9 @@ import {
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { AppearanceControl, type Theme } from "@/app/theme/control";
 import { Link } from "@/components/navigation/link";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { UserAvatar } from "@/components/ui/user-avatar";
 import {
   Dialog,
   DialogContent,
@@ -64,7 +64,7 @@ import { signInHref } from "@/features/auth/sign-in";
 import { NotificationLink } from "@/features/notifications";
 import { CreateRepository } from "@/features/repository/create";
 import { navigate, useRequest, type Repository } from "@/lib/api";
-import type { Organization, Session } from "@/lib/contracts";
+import type { AvatarConfig, Organization, Session } from "@/lib/contracts";
 import { organizationHref } from "@/lib/organization-route";
 import { repoHref } from "@/lib/repository-route";
 import { cn } from "@/lib/utils";
@@ -79,6 +79,7 @@ function isEditableElement(target: EventTarget | null) {
 
 export function GlobalHeader({
   session,
+  avatar,
   url,
   repo,
   repositoryOrganization,
@@ -93,6 +94,7 @@ export function GlobalHeader({
   onRepositoryCreated,
 }: {
   session: Session;
+  avatar?: AvatarConfig | null;
   url: URL;
   repo?: Repository;
   repositoryOrganization?: Organization;
@@ -114,9 +116,6 @@ export function GlobalHeader({
 
   const authenticated = session.authenticated;
   const userName = session.user?.name ?? "Local session";
-  const userInitial = Array.from(
-    session.user?.name.trim() ?? "",
-  )[0]?.toUpperCase();
 
   // Only load repository suggestions when the drawer or search palette is opened.
   const navCatalog = useRequest<{ repositories: Repository[] }>(
@@ -491,11 +490,12 @@ export function GlobalHeader({
                   {signingOut ? (
                     <Spinner />
                   ) : (
-                    <Avatar className="size-8" aria-hidden="true">
-                      <AvatarFallback className="text-xs font-semibold">
-                        {userInitial || <UserRoundIcon className="size-4" />}
-                      </AvatarFallback>
-                    </Avatar>
+                    <UserAvatar
+                      name={userName}
+                      avatar={avatar}
+                      size={32}
+                      className="border-0"
+                    />
                   )}
                 </Button>
               </DropdownMenuTrigger>
@@ -507,14 +507,7 @@ export function GlobalHeader({
               >
                 <DropdownMenuLabel className="p-0 font-normal">
                   <div className="flex items-center gap-2.5 px-2.5 py-2">
-                    <Avatar
-                      className="size-9 shrink-0 border border-border"
-                      aria-hidden="true"
-                    >
-                      <AvatarFallback className="text-sm font-semibold">
-                        {userInitial || <UserRoundIcon className="size-4" />}
-                      </AvatarFallback>
-                    </Avatar>
+                    <UserAvatar name={userName} avatar={avatar} size={36} />
                     <div className="min-w-0 flex-1">
                       {session.user ? (
                         <>
