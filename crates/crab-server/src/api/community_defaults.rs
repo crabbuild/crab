@@ -16,15 +16,18 @@ const TEMPLATE_BYTES: u64 = 32 * 1024;
 
 pub(super) fn source(server: &Server, repo: &Repository) -> Option<Arc<Repository>> {
     if repo.config.name == DEFAULTS_REPOSITORY
-        || (repo.organization.is_none()
-            && !crate::catalog::is_personal_namespace(&repo.config.owner))
+        || (repo.organization.is_none() && !repo.is_personal())
     {
         return None;
     }
     server
         .repositories
         .get(&(repo.config.owner.clone(), DEFAULTS_REPOSITORY.into()))
-        .filter(|source| source.id != repo.id && source.organization == repo.organization)
+        .filter(|source| {
+            source.id != repo.id
+                && source.organization == repo.organization
+                && source.personal_namespace == repo.personal_namespace
+        })
 }
 
 pub(super) async fn readable(

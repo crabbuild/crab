@@ -53,9 +53,7 @@ impl Scope {
     fn includes(&self, repo: &Repository) -> bool {
         match self {
             Self::All | Self::Public => true,
-            Self::Personal(owner) => {
-                repo.owning_organization().is_none() && repo.config.owner == *owner
-            }
+            Self::Personal(owner) => repo.belongs_to_personal_namespace(owner),
             Self::Forks(upstream) => repo.forked_from == Some(*upstream),
             Self::Organization(id)
             | Self::Team {

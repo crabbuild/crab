@@ -36,6 +36,7 @@ pub(super) struct ImportAccount {
     pub(super) principal: Principal,
     pub(super) organization: Option<OrganizationDestination>,
     organization_role: Option<Role>,
+    personal_handle: Option<String>,
     local: bool,
 }
 
@@ -47,7 +48,7 @@ impl ImportAccount {
     ) -> Result<Self, ImportError> {
         let key = app::account(principal).map_err(|_| ImportError::NotFound)?;
         let (organization, organization_role) = if let Some(id) = organization {
-            let actor = actor_id(server, key)
+            let actor = actor_id(server, key.clone())
                 .await
                 .map_err(ImportError::organization)?
                 .ok_or(ImportError::NotFound)?;
@@ -60,12 +61,28 @@ impl ImportAccount {
         } else {
             (None, None)
         };
+        let personal_handle = if !principal.is_local()
+            && let Some(cells) = server.cells()
+            && let Ok(Some(profile)) = app::query_output(
+                cells
+                    .query::<crate::cells::directory::GetOwnProfile>(Address::Directory, None, key)
+                    .await,
+            )
+            && !crate::catalog::is_personal_namespace(&profile.handle)
+            && !crate::catalog::is_organization_namespace(&profile.handle)
+            && profile.handle != "local"
+        {
+            Some(profile.handle)
+        } else {
+            None
+        };
         let identity = app::actor(principal).map_err(|_| ImportError::NotFound)?;
         Ok(Self {
             identity,
             principal: principal.clone(),
             organization,
             organization_role,
+            personal_handle,
             local: principal.is_local(),
         })
     }
@@ -98,7 +115,8 @@ impl ImportAccount {
         }
         let personal =
             crate::catalog::personal_namespace(&self.identity.issuer, &self.identity.subject);
-        if visibility.is_public() && (self.local || owner != personal) {
+        let is_own_personal = owner == personal || self.personal_handle.as_deref() == Some(owner);
+        if visibility.is_public() && (self.local || !is_own_personal) {
             return Err(ImportError::Invalid(
                 "Public imports require an organization or your managed personal namespace",
             ));
@@ -107,6 +125,15 @@ impl ImportAccount {
             return Err(ImportError::Invalid(
                 "Imports into personal namespaces must use your own namespace",
             ));
+        }
+        if !self.local && is_own_personal {
+            return Ok(BrowserNamespace::ManagedPersonal {
+                owner: owner.into(),
+                actor: MembershipActor {
+                    issuer: self.identity.issuer.clone(),
+                    subject: self.identity.subject.clone(),
+                },
+            });
         }
         Ok(BrowserNamespace::Personal(owner.into()))
     }

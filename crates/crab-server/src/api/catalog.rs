@@ -141,7 +141,7 @@ pub(super) async fn list(
             "can_admin": current.can_admin(repository.id),
             "visibility": visibility,
             "can_configure_visibility": current.can_admin(repository.id) && repository.forked_from.is_none()
-                && (repository.organization.is_some() || crate::catalog::is_personal_namespace(&repository.config.owner)),
+                && (repository.organization.is_some() || repository.is_personal()),
             "public_read_only": public_reader,
             "can_maintain": current.can_maintain(repository.id),
             "fork": repository.forked_from.is_some(),
@@ -476,6 +476,33 @@ fn namespace(principal: &Principal) -> app::Result<String> {
     ))
 }
 
+async fn personal_owner_name(server: &Server, principal: &Principal) -> app::Result<String> {
+    let identity = app::account(principal)?;
+    if principal.is_local() {
+        return Ok("local".into());
+    }
+    if let Some(cells) = server.cells()
+        && let Ok(Some(profile)) = app::query_output(
+            cells
+                .query::<crate::cells::directory::GetOwnProfile>(
+                    Address::Directory,
+                    None,
+                    identity.clone(),
+                )
+                .await,
+        )
+        && !crate::catalog::is_personal_namespace(&profile.handle)
+        && !crate::catalog::is_organization_namespace(&profile.handle)
+        && profile.handle != "local"
+    {
+        return Ok(profile.handle);
+    }
+    Ok(crate::catalog::personal_namespace(
+        &identity.issuer,
+        &identity.subject,
+    ))
+}
+
 async fn personal(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
@@ -488,9 +515,10 @@ async fn personal(
 }
 
 async fn creation(
+    State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
 ) -> app::Result<Json<serde_json::Value>> {
-    let owner = namespace(&principal)?;
+    let owner = personal_owner_name(&server, &principal).await?;
     Ok(Json(
         json!({"owner":owner,"default_branch":crate::config::DEFAULT_REPOSITORY_BRANCH,
             "visibilities":personal_visibilities(&principal)}),
@@ -643,7 +671,8 @@ async fn create(
     Extension(principal): Extension<Principal>,
     Json(input): Json<BrowserCreation>,
 ) -> app::Result<(StatusCode, Json<CreatedRepository>)> {
-    let owner = namespace(&principal)?;
+    let identity = app::account(&principal)?;
+    let owner = personal_owner_name(&server, &principal).await?;
     input.validate()?;
     if !input.properties.is_empty() {
         return Err(app::Error::Invalid(
@@ -655,14 +684,18 @@ async fn create(
             "Choose a visibility available for this account",
         ));
     }
-    let record = reserve(
-        &server,
-        &principal,
-        BrowserNamespace::Personal(owner),
-        true,
-        input,
-    )
-    .await?;
+    let destination = if principal.is_local() {
+        BrowserNamespace::Personal(owner)
+    } else {
+        BrowserNamespace::ManagedPersonal {
+            owner,
+            actor: MembershipActor {
+                issuer: identity.issuer,
+                subject: identity.subject,
+            },
+        }
+    };
+    let record = reserve(&server, &principal, destination, true, input).await?;
     publish(
         &server,
         &principal,
@@ -787,9 +820,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(without_csrf.status(), StatusCode::FORBIDDEN);
+        let actor = MembershipActor {
+            issuer: h.server.auth.as_ref().unwrap().issuer().into(),
+            subject: "alice-id".into(),
+        };
         let pending = catalog
             .reserve_browser_repository(
-                BrowserNamespace::Personal(owner.into()),
+                BrowserNamespace::ManagedPersonal {
+                    owner: owner.into(),
+                    actor: actor.clone(),
+                },
                 BrowserCreation {
                     request_id,
                     name: "first-repo".into(),
@@ -797,10 +837,7 @@ mod tests {
                     visibility: Visibility::Private,
                     properties: Default::default(),
                 },
-                MembershipActor {
-                    issuer: h.server.auth.as_ref().unwrap().issuer().into(),
-                    subject: "alice-id".into(),
-                },
+                actor,
                 vec![RepositoryMember {
                     subject: "alice-id".into(),
                     name: "Alice".into(),
@@ -905,6 +942,107 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|entry| entry["path"] == "README.md")
+        );
+        h.close().await;
+    }
+
+    #[tokio::test]
+    async fn enrolled_user_creates_personal_repository_under_username_and_keeps_ownership_after_rename()
+     {
+        let h = Harness::new(false).await;
+        h.initialize_directory().await;
+        let catalog = h.server.catalog().unwrap();
+        let existing = h.server.repositories.values()[0].id;
+        catalog.mark_cell_ready(existing).await.unwrap();
+        let alice = h.login().await;
+
+        let profile: Value = h
+            .write(
+                Method::POST,
+                "/api/profile",
+                &alice,
+                json!({"request_id": Uuid::now_v7(), "handle": "forhappy", "name": "Forhappy"}),
+            )
+            .await
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let destination = h.json("/api/repos/creation", &alice).await;
+        assert_eq!(destination["owner"], "forhappy");
+
+        let created: Value = h
+            .write(
+                Method::POST,
+                "/api/repos/creation",
+                &alice,
+                json!({"request_id": Uuid::now_v7(), "name": "demo", "description": "Hello"}),
+            )
+            .await
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(created["owner"], "forhappy");
+        assert_eq!(created["name"], "demo");
+
+        let detail = h.json("/api/repos?owner=forhappy&name=demo", &alice).await;
+        assert_eq!(detail["repositories"][0]["owner"], "forhappy");
+        assert_eq!(detail["repositories"][0]["can_configure_visibility"], true);
+
+        let personal = h.json("/api/repos/personal", &alice).await;
+        assert_eq!(personal["repositories"][0]["owner"], "forhappy");
+        assert_eq!(personal["repositories"][0]["name"], "demo");
+
+        // Renaming handle preserves personal ownership and prevents another user
+        // who later claims the old handle from seeing or taking over the repo.
+        h.write(
+            Method::PATCH,
+            "/api/profile",
+            &alice,
+            json!({"version": profile["version"], "handle": "forhappy-next", "name": "Forhappy"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+
+        assert_eq!(
+            h.json("/api/repos/creation", &alice).await["owner"],
+            "forhappy-next"
+        );
+        assert_eq!(
+            h.json("/api/repos/personal", &alice).await["repositories"][0]["name"],
+            "demo"
+        );
+
+        *h.provider.mode.lock().await = "member".into();
+        let bob = h.login().await;
+        h.write(
+            Method::POST,
+            "/api/profile",
+            &bob,
+            json!({"request_id": Uuid::now_v7(), "handle": "forhappy", "name": "Bob"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+        assert_eq!(
+            h.json("/api/repos/personal", &bob).await["repositories"],
+            json!([])
+        );
+        assert_eq!(
+            h.write(
+                Method::POST,
+                "/api/repos/creation",
+                &bob,
+                json!({"request_id": Uuid::now_v7(), "name": "demo", "description": ""}),
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
         );
         h.close().await;
     }

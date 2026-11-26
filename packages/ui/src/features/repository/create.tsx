@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { RepoIcon } from "@primer/octicons-react";
 import { useMutation } from "@/components/discussion/mutations";
+import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import {
@@ -247,6 +248,13 @@ function RepositoryForm({
           </code>{" "}
           · Default branch <code>{destination.default_branch}</code>
         </p>
+        {/^user-[0-9a-f]{32}$/i.test(destination.owner) && (
+          <p className="m-0 text-xs text-muted-foreground">
+            Set a username in{" "}
+            <Link href="/-/profile">Public profile settings</Link> to create
+            repositories under your username.
+          </p>
+        )}
         {mutation.error && <FieldError>{mutation.error}</FieldError>}
         <div className="flex justify-end">
           <Button

@@ -29,6 +29,7 @@ pub(crate) struct Repository {
     pub(crate) id: Uuid,
     pub(crate) created_at_ms: Option<u64>,
     pub(crate) organization: Option<Uuid>,
+    pub(crate) personal_namespace: Option<String>,
     pub(crate) ownership_epoch: u32,
     pub(crate) property_seed: Option<Uuid>,
     pub(crate) forked_from: Option<Uuid>,
@@ -86,6 +87,18 @@ pub(crate) struct BrowseRepository {
 }
 
 impl Repository {
+    pub(crate) fn is_personal(&self) -> bool {
+        self.personal_namespace.is_some()
+            || (self.organization.is_none()
+                && crate::catalog::is_personal_namespace(&self.config.owner))
+    }
+
+    pub(crate) fn belongs_to_personal_namespace(&self, namespace: &str) -> bool {
+        self.owning_organization().is_none()
+            && (self.personal_namespace.as_deref() == Some(namespace)
+                || self.config.owner == namespace)
+    }
+
     pub(crate) fn owning_organization(&self) -> Option<Uuid> {
         // A personal fork uses its upstream organization's live authority
         // while its address belongs to the member's repository namespace.
@@ -123,6 +136,7 @@ impl Repository {
             id,
             created_at_ms: None,
             organization: None,
+            personal_namespace: None,
             ownership_epoch: 0,
             property_seed: None,
             forked_from: None,
