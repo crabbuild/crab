@@ -124,8 +124,10 @@ export function GlobalHeader({
   useEffect(() => {
     if (!authenticated) return;
     const onKeyDown = (event: KeyboardEvent) => {
+      // Page searches that own "/" handle it first and prevent the default.
       if (
         event.key === "/" &&
+        !event.defaultPrevented &&
         !event.metaKey &&
         !event.ctrlKey &&
         !event.altKey &&
