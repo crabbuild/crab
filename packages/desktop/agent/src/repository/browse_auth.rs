@@ -345,7 +345,7 @@ mod tests {
 
             [[cdn]]
             origin = "https://first.blob.core.windows.net/desktop-models"
-            export_origin = "https://first.blob.core.windows.net/approved-export"
+            export_origin = "https://firstexport.blob.core.windows.net/approved-export"
             repo_prefix = "org/repo"
             base_url = "https://gateway.example.com/crab"
             access = "public"
