@@ -264,6 +264,10 @@ test("checking and clearing selection keeps the checkbox positions and focus", a
     await expect(row).toBeFocused();
 
     await page.setViewportSize({ width: 390, height: 844 });
+    // Measure once the filters have moved into their narrow-screen menu.
+    await expect(
+      page.getByRole("button", { name: "More filters" }),
+    ).toBeVisible();
     const mobilePosition = await row.boundingBox();
     await row.click();
     await expect(row).toBeChecked();

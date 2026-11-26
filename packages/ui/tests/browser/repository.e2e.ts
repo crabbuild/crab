@@ -833,6 +833,7 @@ test("GitHub paths retain file context, pin permalinks, and restore browser hist
     "Pull requests",
     "Projects",
     "Activity",
+    "Security",
     "Settings",
   ]);
   await expect(
@@ -4213,7 +4214,10 @@ test("repository settings archive and unarchive the repository with exact confir
     page.getByRole("button", { name: "Add branch protection rule" }),
   ).toHaveCount(0);
 
-  await page.getByRole("link", { name: "Issues", exact: true }).first().click();
+  await page
+    .getByRole("navigation", { name: "Repository", exact: true })
+    .getByRole("link", { name: "Issues", exact: true })
+    .click();
   await expect(page.getByRole("button", { name: "New issue" })).toHaveCount(0);
   await page.goto("/team/project/issues/new");
   await expect(
@@ -4234,7 +4238,10 @@ test("repository settings archive and unarchive the repository with exact confir
   await expect(
     page.getByText("This repository was archived and is read-only."),
   ).toHaveCount(0);
-  await page.getByRole("link", { name: "Issues", exact: true }).first().click();
+  await page
+    .getByRole("navigation", { name: "Repository", exact: true })
+    .getByRole("link", { name: "Issues", exact: true })
+    .click();
   await expect(page.getByRole("button", { name: "New issue" })).toBeVisible();
   expect(updates).toEqual([
     {

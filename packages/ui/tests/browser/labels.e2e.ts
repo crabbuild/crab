@@ -1,5 +1,5 @@
 import { conversationPage } from "./conversation";
-import { emptyReactions } from "./fixtures";
+import { emptyReactions, fulfillIdleReads } from "./fixtures";
 import { expect, test } from "@playwright/test";
 import {
   expectNoAccessibilityViolations,
@@ -14,6 +14,7 @@ test("repository metadata can be managed and assigned to an issue", async ({
   let assigned: string[] = [];
   let issueVersion = 1;
   await page.route("**/api/**", async (route) => {
+    if (await fulfillIdleReads(route)) return;
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (path.endsWith("/issues/pins") && request.method() === "GET")

@@ -230,6 +230,10 @@ test("repository admins manage rulesets and readers see active rules", async ({
   await page.getByRole("button", { name: "Edit Release branches" }).click();
   await chooseSelectOption(page.getByLabel("Enforcement"), "disabled");
   await page.getByRole("button", { name: "Save ruleset" }).click();
+  // The open editor also shows "Disabled" until the save closes it.
+  await expect(page.getByRole("button", { name: "Save ruleset" })).toHaveCount(
+    0,
+  );
   await expect(page.getByText("Disabled", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Delete Release branches" }).click();
   await page

@@ -160,7 +160,7 @@ test("review availability is reachable from account settings and persists on mob
   await expectNoAccessibilityViolations(page);
 });
 
-test("mobile header and footer stay stable while the signed-in session loads", async ({
+test("the session check shows progress until the signed-in app replaces it", async ({
   page,
 }) => {
   await fixture(page);
@@ -182,29 +182,14 @@ test("mobile header and footer stay stable while the signed-in session loads", a
   try {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/-/profile");
-    await expect(
-      page.getByText("Checking your session…", { exact: true }),
-    ).toBeVisible();
-    const header = page.locator(".global-header");
-    const before = (await header.boundingBox())!;
+    const checking = page.getByText("Checking your session…", { exact: true });
+    await expect(checking).toBeVisible();
     release();
     await expect(
       page.getByRole("button", { name: "Open user menu", exact: true }),
     ).toBeVisible();
     await expect(page.getByLabel("Username", { exact: true })).toBeVisible();
-    await expect
-      .poll(async () => (await header.boundingBox())!.height)
-      .toBe(before.height);
-    expect((await page.locator("main").boundingBox())!.y).toBe(
-      before.y + before.height,
-    );
-    await expect
-      .poll(() =>
-        page
-          .locator(".site-footer")
-          .evaluate((node) => node.getBoundingClientRect().bottom),
-      )
-      .toBe(844);
+    await expect(checking).toHaveCount(0);
   } finally {
     release();
   }

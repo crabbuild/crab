@@ -1,7 +1,7 @@
 import { conversationPage } from "./conversation";
 import { expect, test, type Page } from "@playwright/test";
 import type { ReviewState } from "../../src/components/discussion/conversation/model";
-import { emptyReactions } from "./fixtures";
+import { emptyReactions, fulfillIdleReads } from "./fixtures";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
@@ -31,6 +31,7 @@ async function fixture(page: Page, withTeam = false) {
   const unexpected: string[] = [];
   const writes: unknown[] = [];
   await page.route("**/api/**", async (route) => {
+    if (await fulfillIdleReads(route)) return;
     const request = route.request();
     const url = new URL(request.url()),
       path = url.pathname;

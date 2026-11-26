@@ -27,6 +27,19 @@ export async function expectNoAccessibilityViolations(page: Page) {
   await expect(
     page.locator('[data-slot="tooltip-content"][data-state="closed"]'),
   ).toHaveCount(0);
+  // Axe samples colours mid-transition otherwise; endless spinners never settle.
+  await page.evaluate(() =>
+    Promise.all(
+      document
+        .getAnimations()
+        .filter(
+          (animation) =>
+            animation.playState === "running" &&
+            animation.effect?.getComputedTiming().endTime !== Infinity,
+        )
+        .map((animation) => animation.finished.catch(() => undefined)),
+    ),
+  );
   const result = await new AxeBuilder({ page })
     .withTags([
       "wcag2a",
@@ -47,13 +60,18 @@ export async function selectTheme(
   const label =
     theme === "light" ? "Light" : theme === "dark" ? "Dark" : "System";
   const direct = page.locator(`[aria-label="${label}"]`);
+  const userMenu = page.getByRole("button", {
+    name: "Open user menu",
+    exact: true,
+  });
+  // The session check shows its own theme buttons until the app replaces them.
+  await expect(userMenu.or(direct).first()).toBeVisible();
+  await expect(
+    page.getByText("Checking your session…", { exact: true }),
+  ).toHaveCount(0);
   if (await direct.isVisible()) {
     await direct.click();
   } else {
-    const userMenu = page.getByRole("button", {
-      name: "Open user menu",
-      exact: true,
-    });
     await userMenu.click();
     await page.getByRole("menuitemradio", { name: label, exact: true }).click();
   }
