@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { SearchIcon, SyncIcon } from "@primer/octicons-react";
 import { LockKeyholeIcon, UsersIcon } from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
@@ -104,68 +105,77 @@ function TeamList({
     listing.retry();
   }
   return (
-    <div className="flex flex-col gap-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-lg font-semibold">Organization teams</h2>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button asChild variant="outline">
-            <Link href={teamHref(id, undefined, "requests")}>
-              Team requests
-            </Link>
+    <div className="flex flex-col gap-4">
+      <h2 className="sr-only">Organization teams</h2>
+      <div className="flex flex-wrap items-center gap-2">
+        <form
+          role="search"
+          aria-label="Team search"
+          className="flex min-w-0 flex-1 basis-72 flex-wrap items-center gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setAfter(undefined);
+            if (query.trim() === search && !after) listing.retry();
+            setSearch(query.trim());
+          }}
+        >
+          <div className="relative min-w-36 flex-1">
+            <SearchIcon
+              size={16}
+              aria-hidden="true"
+              className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-muted-foreground"
+            />
+            <Input
+              id="team-search"
+              className="pl-8"
+              aria-label="Find a team"
+              type="search"
+              value={query}
+              maxLength={100}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Find a team…"
+            />
+          </div>
+          <Button variant="outline" type="submit">
+            Search
           </Button>
-          <Button variant="outline" onClick={refresh}>
-            Refresh teams
-          </Button>
-          {listing.data?.can_create && (
+          {search && (
             <Button
-              disabled={commands.locked}
-              onClick={() => setCreating((value) => !value)}
-              aria-expanded={creating}
-              aria-controls={creating ? "new-team" : undefined}
+              variant="ghost"
+              type="button"
+              onClick={() => {
+                setQuery("");
+                setSearch("");
+                setAfter(undefined);
+              }}
             >
-              {creating ? "Close new team" : "New team"}
+              Clear search
             </Button>
           )}
-        </div>
-      </div>
-      <form
-        role="search"
-        aria-label="Team search"
-        className="flex flex-wrap items-center gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          setAfter(undefined);
-          if (query.trim() === search && !after) listing.retry();
-          setSearch(query.trim());
-        }}
-      >
-        <Input
-          id="team-search"
-          className="min-w-36 max-w-md flex-1"
-          aria-label="Find a team"
-          type="search"
-          value={query}
-          maxLength={100}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search teams…"
-        />
-        <Button variant="outline" type="submit">
-          Search
+        </form>
+        <Button asChild variant="ghost">
+          <Link href={teamHref(id, undefined, "requests")}>Team requests</Link>
         </Button>
-        {search && (
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Refresh teams"
+          title="Refresh teams"
+          onClick={refresh}
+        >
+          <SyncIcon aria-hidden="true" />
+        </Button>
+        {listing.data?.can_create && (
           <Button
-            variant="ghost"
-            type="button"
-            onClick={() => {
-              setQuery("");
-              setSearch("");
-              setAfter(undefined);
-            }}
+            disabled={commands.locked}
+            onClick={() => setCreating((value) => !value)}
+            aria-expanded={creating}
+            aria-controls={creating ? "new-team" : undefined}
           >
-            Clear search
+            {creating ? "Close new team" : "New team"}
           </Button>
         )}
-      </form>
+      </div>
       {creating && (
         <form
           id="new-team"
@@ -228,6 +238,13 @@ function TeamList({
         {(data) => (
           <>
             <div className="overflow-hidden rounded-lg border">
+              {data.items.length > 0 && (
+                <p className="m-0 border-b bg-muted/50 px-5 py-3 text-sm font-semibold">
+                  {data.items.length}{" "}
+                  {data.items.length === 1 ? "team" : "teams"}
+                  {(after || data.next) && " on this page"}
+                </p>
+              )}
               {data.items.length ? (
                 <ul className="divide-y">
                   {data.items.map((item) => (

@@ -1,6 +1,6 @@
 import { RepoIcon } from "@primer/octicons-react";
 import { SettingsIcon } from "lucide-react";
-import { useRef } from "react";
+import { useRef, type ReactNode } from "react";
 import { RelativeTime } from "@/components/discussion/time";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
@@ -63,7 +63,15 @@ const emptyText = {
   team: "No repositories with team access are visible to you.",
 };
 
-export function BrowseRepositories({ url, scope }: { url: URL; scope: Scope }) {
+export function BrowseRepositories({
+  url,
+  scope,
+  actions,
+}: {
+  url: URL;
+  scope: Scope;
+  actions?: ReactNode;
+}) {
   const query = url.searchParams.get("q") ?? "";
   const after = url.searchParams.get("after");
   const params = new URLSearchParams({ limit: "32" });
@@ -110,35 +118,48 @@ export function BrowseRepositories({ url, scope }: { url: URL; scope: Scope }) {
 
   return (
     <div className="grid min-w-0 gap-4">
-      <form
-        className="flex flex-wrap items-center gap-2"
-        aria-label="Repository search"
-        role="search"
-        onSubmit={(event) => {
-          event.preventDefault();
-          const value = new FormData(event.currentTarget).get("q");
-          const destination = href(
-            typeof value === "string" ? value.trim() : "",
-          );
-          if (destination === url.pathname + url.search) page.retry();
-          else navigate(destination);
-        }}
-      >
-        <CatalogSearchInput
-          key={query}
-          input={searchInput}
-          query={query}
-          organization={organization}
-        />
-        <Button type="submit" size="sm">
-          Search
-        </Button>
-        {query && (
-          <Button asChild variant="ghost" size="sm">
-            <Link href={href("")}>Clear search</Link>
+      <div className="flex flex-wrap items-start gap-2">
+        <form
+          className="flex min-w-0 flex-1 basis-80 flex-wrap items-center gap-2"
+          aria-label="Repository search"
+          role="search"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const value = new FormData(event.currentTarget).get("q");
+            const destination = href(
+              typeof value === "string" ? value.trim() : "",
+            );
+            if (destination === url.pathname + url.search) page.retry();
+            else navigate(destination);
+          }}
+        >
+          <CatalogSearchInput
+            key={query}
+            input={searchInput}
+            query={query}
+            organization={organization}
+          />
+          {/* Beside page actions, search yields the primary style to them. */}
+          <Button
+            type="submit"
+            variant={actions ? "outline" : "default"}
+            size={actions ? "default" : "sm"}
+          >
+            Search
           </Button>
+          {query && (
+            <Button asChild variant="ghost" size="sm">
+              <Link href={href("")}>Clear search</Link>
+            </Button>
+          )}
+        </form>
+        {actions && (
+          // An expanded panel, such as the Git import form, takes a full row.
+          <div className="flex flex-wrap items-start gap-2 has-[>section]:basis-full [&>section]:basis-full">
+            {actions}
+          </div>
         )}
-      </form>
+      </div>
       <RepositoryStateFilters
         key={query}
         query={query}
