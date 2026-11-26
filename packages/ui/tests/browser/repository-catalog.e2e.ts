@@ -169,7 +169,7 @@ test("repository search pages on the server and restores a stale continuation", 
     });
   });
 
-  await page.goto("/");
+  await page.goto("/-/repositories");
   await expect(
     page.getByRole("link", { name: "team / toolbox" }),
   ).toBeVisible();

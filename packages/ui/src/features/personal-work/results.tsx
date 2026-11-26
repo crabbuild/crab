@@ -1,4 +1,5 @@
 import {
+  CommentIcon,
   GitMergeIcon,
   GitPullRequestClosedIcon,
   GitPullRequestDraftIcon,
@@ -6,6 +7,7 @@ import {
   IssueClosedIcon,
   IssueOpenedIcon,
 } from "@primer/octicons-react";
+import { Author, type DiscussionAuthor } from "@/components/discussion/author";
 import { RelativeTime } from "@/components/discussion/time";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
@@ -15,7 +17,7 @@ import { repoHref } from "@/lib/repository-route";
 
 export type Kind = "issue" | "pull";
 export type WorkSort = "created" | "updated" | "comments" | "reactions";
-type Item = {
+export type WorkItem = {
   repository: Pick<Repository, "id" | "owner" | "name">;
   kind: Kind;
   number: number;
@@ -25,10 +27,12 @@ type Item = {
   created_at: number;
   updated_at: number;
   sort_value: number;
+  comments?: number;
+  author?: DiscussionAuthor;
 };
-export type WorkPage = { items: Item[]; next: string | null };
+export type WorkPage = { items: WorkItem[]; next: string | null };
 
-function WorkRow({ item, sort }: { item: Item; sort: WorkSort }) {
+function WorkRow({ item, sort }: { item: WorkItem; sort: WorkSort }) {
   const { kind } = item;
   const label =
     item.draft && item.state === "open"
@@ -83,21 +87,38 @@ function WorkRow({ item, sort }: { item: Item; sort: WorkSort }) {
           </span>
           {" #"}
           {item.number}
+          {item.author && (
+            <>
+              {" · Opened by "}
+              <Author author={item.author} />
+            </>
+          )}
         </p>
       </div>
-      <p className="col-start-2 m-0 mt-1 text-sm text-muted-foreground sm:col-start-3">
-        {label} ·{" "}
-        {metric ? (
-          `${item.sort_value} ${metric}${item.sort_value === 1 ? "" : "s"}`
-        ) : (
-          <>
-            {sort === "updated" ? "Updated" : "Opened"}{" "}
-            <RelativeTime
-              value={sort === "updated" ? item.updated_at : item.created_at}
-            />
-          </>
+      <div className="col-start-2 m-0 mt-1 flex items-center gap-3 text-sm text-muted-foreground sm:col-start-3">
+        <p className="m-0">
+          {label} ·{" "}
+          {metric ? (
+            `${item.sort_value} ${metric}${item.sort_value === 1 ? "" : "s"}`
+          ) : (
+            <>
+              {sort === "updated" ? "Updated" : "Opened"}{" "}
+              <RelativeTime
+                value={sort === "updated" ? item.updated_at : item.created_at}
+              />
+            </>
+          )}
+        </p>
+        {!metric && item.comments !== undefined && item.comments > 0 && (
+          <span
+            className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+            aria-label={`${item.comments} ${item.comments === 1 ? "comment" : "comments"}`}
+          >
+            <CommentIcon size={14} aria-hidden="true" />
+            {item.comments}
+          </span>
         )}
-      </p>
+      </div>
     </li>
   );
 }

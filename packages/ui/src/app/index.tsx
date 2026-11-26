@@ -1,31 +1,17 @@
 import { ProjectCommandsProvider } from "@/features/projects/commands";
 import { OrganizationProjects } from "@/features/projects/workspace";
-import {
-  AppearanceControl,
-  ThemeControl,
-  type Theme,
-} from "@/app/theme/control";
+import { AppearanceControl, type Theme } from "@/app/theme/control";
+import { GlobalHeader } from "@/app/global-header";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { SignIn, signInHref } from "@/features/auth/sign-in";
-import { GitAccess } from "@/features/git-access";
+import { SignIn } from "@/features/auth/sign-in";
+import { HomeDashboard } from "@/features/home";
 import { RepositoryOwnerActions } from "@/features/repository/owner-actions";
 import { PersonalWork } from "@/features/personal-work";
-import { NotificationLink, Notifications } from "@/features/notifications";
+import { Notifications } from "@/features/notifications";
 import { DiscussionSubscriptions } from "@/features/notifications/subscriptions";
 import { WatchedRepositories } from "@/features/notifications/watched";
 import {
@@ -33,22 +19,13 @@ import {
   OrganizationInvitation,
 } from "@/features/organizations";
 import { OrganizationDirectory } from "@/features/organizations/directory";
-import {
-  matchOrganizationRoute,
-  organizationHref,
-} from "@/lib/organization-route";
+import { matchOrganizationRoute } from "@/lib/organization-route";
 import type { OrganizationView } from "@/lib/contracts";
 import {
   TeamFeedback,
   useTeamCommands,
 } from "@/features/organizations/teams/commands";
 import { ProfileSettings, UserProfile } from "@/features/profile";
-import {
-  Building2Icon,
-  ListTodoIcon,
-  LogOutIcon,
-  UserRoundIcon,
-} from "lucide-react";
 import { RepositoryPage } from "@/features/repository/page";
 import { TransferPage } from "@/features/settings/transfer";
 import { BrowseRepositories } from "@/features/repository/catalog-browse";
@@ -66,7 +43,6 @@ import {
   type CodeTheme,
 } from "@/lib/code-theme";
 import { repoHref, repositoryRoute } from "@/lib/repository-route";
-import { RepoIcon, SearchIcon } from "@primer/octicons-react";
 import { lazy, Suspense, useEffect, useLayoutEffect, useState } from "react";
 import crabMark from "../../../web/crab.optimized.svg";
 
@@ -157,11 +133,19 @@ export function App() {
     /^\/-\/users\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(\/repositories)?$/i.exec(
       url.pathname,
     );
+  const allRepositories = url.pathname === "/-/repositories";
   const personalRepositories = url.pathname === "/-/repositories/personal";
   const publicRepositories = url.pathname === "/-/public";
   const organizations = url.pathname === "/-/organizations";
+  const homeDashboard =
+    url.pathname === "/" &&
+    !url.searchParams.has("q") &&
+    !url.searchParams.has("after");
   const repositoryCatalogPage =
-    url.pathname === "/" || personalRepositories || publicRepositories;
+    allRepositories ||
+    personalRepositories ||
+    publicRepositories ||
+    (url.pathname === "/" && !homeDashboard);
   const transferId = /^\/-\/repository-transfers\/([0-9a-f-]{36})$/i.exec(
     url.pathname,
   )?.[1];
@@ -169,6 +153,7 @@ export function App() {
   const route =
     profileSettings ||
     actorRoute ||
+    allRepositories ||
     personalRepositories ||
     publicRepositories ||
     transferId ||
@@ -200,9 +185,6 @@ export function App() {
   const teamCommands = useTeamCommands(session.data?.csrf ?? "", teamAccount);
   const [signingOut, setSigningOut] = useState(false);
   const [sessionError, setSessionError] = useState<string>();
-  const userInitial = Array.from(
-    session.data?.user?.name.trim() ?? "",
-  )[0]?.toUpperCase();
   useEffect(() => {
     const expired = () => session.retry();
     window.addEventListener("crab-session-expired", expired);
@@ -280,27 +262,30 @@ export function App() {
     }
     document.title = repo
       ? `${repositoryOrganization?.name ?? repo.owner}/${repo.name} · Crab`
-      : subscriptions
-        ? "Subscriptions · Crab"
-        : watched
-          ? "Watched repositories · Crab"
-          : inbox
-            ? "Notifications · Crab"
-            : transferId
-              ? "Repository transfer · Crab"
-              : projectWorkspace
-                ? "Projects · Crab"
-                : codeSearch
-                  ? "Search code · Crab"
-                  : myWork
-                    ? "My work · Crab"
-                    : workSearch
-                      ? "Search issues and pull requests · Crab"
-                      : "Repositories · Crab";
+      : homeDashboard
+        ? "Dashboard · Crab"
+        : subscriptions
+          ? "Subscriptions · Crab"
+          : watched
+            ? "Watched repositories · Crab"
+            : inbox
+              ? "Notifications · Crab"
+              : transferId
+                ? "Repository transfer · Crab"
+                : projectWorkspace
+                  ? "Projects · Crab"
+                  : codeSearch
+                    ? "Search code · Crab"
+                    : myWork
+                      ? "My work · Crab"
+                      : workSearch
+                        ? "Search issues and pull requests · Crab"
+                        : "Repositories · Crab";
   }, [
     authenticated,
     publicView,
     repo,
+    homeDashboard,
     repositoryOrganization,
     watched,
     inbox,
@@ -372,187 +357,44 @@ export function App() {
           <a className="skip-link" href="#main">
             Skip to content
           </a>
-          <header className="global-header">
-            <Link className="brand" href="/" aria-label="Crab repositories">
-              <img className="brand-mark" src={crabMark} alt="" />
-            </Link>
-            {repo ? (
-              <div className="global-repository">
-                <RepoIcon size={16} />
-                <h1 className="wrap-anywhere">
-                  {repositoryOrganization ? (
-                    <>
-                      <Link
-                        href={organizationHref(
-                          repositoryOrganization,
-                          "?tab=repositories",
-                        )}
-                      >
-                        <bdi>{repositoryOrganization.name}</bdi>
-                      </Link>{" "}
-                      <span aria-hidden="true">/</span>{" "}
-                      <Link href={repoHref(repo)}>
-                        <strong>{repo.name}</strong>
-                      </Link>
-                    </>
-                  ) : (
-                    <Link href={repoHref(repo)}>
-                      {repo.owner} <span aria-hidden="true">/</span>{" "}
-                      <strong>{repo.name}</strong>
-                    </Link>
-                  )}
-                </h1>
-                {repo.archived && <Badge variant="outline">Archived</Badge>}
-                {repo.visibility === "public" && (
-                  <Badge variant="outline">Public</Badge>
-                )}
-              </div>
-            ) : (
-              <Link
-                className="global-catalog-link"
-                href={
-                  projectWorkspace
-                    ? `/-/organizations/${projectWorkspace}/projects`
+          <GlobalHeader
+            session={session.data}
+            url={url}
+            repo={repo}
+            repositoryOrganization={repositoryOrganization}
+            contextLabel={
+              homeDashboard
+                ? "Dashboard"
+                : projectWorkspace
+                  ? "Projects"
+                  : allRepositories ||
+                      personalRepositories ||
+                      publicRepositories
+                    ? "Repositories"
+                    : "Dashboard"
+            }
+            contextHref={
+              homeDashboard
+                ? "/"
+                : projectWorkspace
+                  ? `/-/organizations/${projectWorkspace}/projects`
+                  : allRepositories ||
+                      personalRepositories ||
+                      publicRepositories
+                    ? "/-/repositories"
                     : "/"
-                }
-              >
-                {projectWorkspace ? "Projects" : "Repositories"}
-              </Link>
-            )}
-            <div className="header-actions">
-              {session.data?.authenticated && (
-                <Button asChild variant="ghost" size="sm">
-                  <Link
-                    href="/-/code-search"
-                    aria-label="Search code across repositories"
-                    aria-current={codeSearch ? "page" : undefined}
-                  >
-                    <SearchIcon data-icon="inline-start" />
-                    <span className="hidden sm:inline">Search code</span>
-                  </Link>
-                </Button>
-              )}
-              {session.data?.authenticated && (
-                <Button asChild variant="ghost" size="sm">
-                  <Link
-                    href="/-/work"
-                    aria-label="My work"
-                    aria-current={myWork ? "page" : undefined}
-                  >
-                    <ListTodoIcon data-icon="inline-start" />
-                    <span className="hidden sm:inline">My work</span>
-                  </Link>
-                </Button>
-              )}
-              {session.data?.user && (
-                <GitAccess
-                  session={session.data}
-                  repositories={catalog.data?.repositories ?? []}
-                  onOpenChange={setGitAccessOpen}
-                />
-              )}
-              <ThemeControl
-                theme={theme}
-                setTheme={setTheme}
-                codeTheme={codeTheme}
-                setCodeTheme={selectCodeTheme}
-              />
-              {!authenticated && (
-                <Button asChild variant="outline" size="sm">
-                  <a href={signInHref(url)}>Sign in</a>
-                </Button>
-              )}
-              {session.data?.user && (
-                <NotificationLink current={notifications} />
-              )}
-              {session.data?.authenticated && (
-                <DropdownMenu modal={false}>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon-lg"
-                      className="rounded-full"
-                      aria-label={
-                        signingOut ? "Signing out…" : "Open user menu"
-                      }
-                      title={session.data.user?.name ?? "User menu"}
-                      disabled={signingOut}
-                    >
-                      {signingOut ? (
-                        <Spinner />
-                      ) : (
-                        <Avatar aria-hidden="true">
-                          <AvatarFallback>
-                            {userInitial || <UserRoundIcon />}
-                          </AvatarFallback>
-                        </Avatar>
-                      )}
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent
-                    align="end"
-                    collisionPadding={16}
-                    className="w-56 max-w-[calc(100vw-2rem)]"
-                  >
-                    <DropdownMenuGroup>
-                      <DropdownMenuLabel>
-                        {session.data.user ? (
-                          <>
-                            <span className="block font-normal">
-                              Signed in as
-                            </span>
-                            <span className="block truncate">
-                              {session.data.user.name}
-                            </span>
-                          </>
-                        ) : (
-                          "Local session"
-                        )}
-                      </DropdownMenuLabel>
-                      <DropdownMenuItem asChild>
-                        <Link href="/-/profile">
-                          <UserRoundIcon aria-hidden="true" />
-                          Your profile
-                        </Link>
-                      </DropdownMenuItem>
-                      <DropdownMenuItem asChild>
-                        <Link href="/-/repositories/personal">
-                          <RepoIcon aria-hidden="true" />
-                          Your repositories
-                        </Link>
-                      </DropdownMenuItem>
-                      <DropdownMenuItem asChild>
-                        <Link href="/-/organizations">
-                          <Building2Icon aria-hidden="true" /> Your
-                          organizations
-                        </Link>
-                      </DropdownMenuItem>
-                      <DropdownMenuItem asChild>
-                        <Link href="/-/discussion-search">
-                          <SearchIcon aria-hidden="true" /> Search issues and
-                          PRs
-                        </Link>
-                      </DropdownMenuItem>
-                    </DropdownMenuGroup>
-                    {session.data.user && (
-                      <>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuGroup>
-                          <DropdownMenuItem
-                            disabled={signingOut}
-                            onSelect={() => void signOut()}
-                          >
-                            <LogOutIcon aria-hidden="true" />
-                            Sign out
-                          </DropdownMenuItem>
-                        </DropdownMenuGroup>
-                      </>
-                    )}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              )}
-            </div>
-          </header>
+            }
+            notificationsActive={notifications}
+            theme={theme}
+            setTheme={setTheme}
+            codeTheme={codeTheme}
+            setCodeTheme={selectCodeTheme}
+            signingOut={signingOut}
+            onSignOut={() => void signOut()}
+            catalogRepositories={catalog.data?.repositories ?? []}
+            onGitAccessOpenChange={setGitAccessOpen}
+            onRepositoryCreated={() => catalog.retry()}
+          />
           <main id="main" tabIndex={-1}>
             {(teamCommands.intent ||
               teamCommands.failure ||
@@ -566,7 +408,14 @@ export function App() {
                 {sessionError}
               </p>
             )}
-            {myWork ? (
+            {homeDashboard && authenticated ? (
+              <HomeDashboard
+                key={teamAccount}
+                session={session.data}
+                url={url}
+                onRepositoryCreated={() => catalog.retry()}
+              />
+            ) : myWork ? (
               <PersonalWork key={teamAccount} url={url} />
             ) : workSearch ? (
               <Suspense
@@ -696,7 +545,7 @@ export function App() {
                       }
                     >
                       <Link
-                        href="/"
+                        href="/-/repositories"
                         aria-current={
                           personalRepositories || publicRepositories
                             ? undefined
