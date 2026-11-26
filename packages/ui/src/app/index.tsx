@@ -25,7 +25,11 @@ import {
   TeamFeedback,
   useTeamCommands,
 } from "@/features/organizations/teams/commands";
-import { ProfileSettings, UserProfile } from "@/features/profile";
+import {
+  ProfileSettings,
+  UserProfile,
+  type SettingsSection,
+} from "@/features/profile";
 import { RepositoryPage } from "@/features/repository/page";
 import { TransferPage } from "@/features/settings/transfer";
 import { BrowseRepositories } from "@/features/repository/catalog-browse";
@@ -125,10 +129,29 @@ export function App() {
   const watched = url.pathname === "/-/notifications/watched";
   const subscriptions = url.pathname === "/-/notifications/subscriptions";
   const notifications = inbox || watched || subscriptions;
-  const savedReplies = url.pathname === "/-/settings/saved-replies";
-  const reviewAvailability = url.pathname === "/-/settings/review-availability";
-  const profileSettings =
-    url.pathname === "/-/profile" || savedReplies || reviewAvailability;
+  const settingsSection: SettingsSection | undefined =
+    url.pathname === "/-/profile" ||
+    url.pathname === "/-/settings" ||
+    url.pathname === "/-/settings/profile"
+      ? "profile"
+      : url.pathname === "/-/settings/account"
+        ? "account"
+        : url.pathname === "/-/settings/appearance"
+          ? "appearance"
+          : url.pathname === "/-/settings/notifications"
+            ? "notifications"
+            : url.pathname === "/-/settings/git-access"
+              ? "git-access"
+              : url.pathname === "/-/settings/organizations"
+                ? "organizations"
+                : url.pathname === "/-/settings/repositories"
+                  ? "repositories"
+                  : url.pathname === "/-/settings/saved-replies"
+                    ? "saved-replies"
+                    : url.pathname === "/-/settings/review-availability"
+                      ? "review-availability"
+                      : undefined;
+  const profileSettings = settingsSection !== undefined;
   const actorRoute =
     /^\/-\/users\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(\/repositories)?$/i.exec(
       url.pathname,
@@ -190,9 +213,8 @@ export function App() {
     window.addEventListener("crab-session-expired", expired);
     return () => window.removeEventListener("crab-session-expired", expired);
   });
-  const [gitAccessOpen, setGitAccessOpen] = useState(false);
   const catalog = useRequest<{ repositories: Repository[] }>(
-    session.data?.authenticated && (inbox || subscriptions || gitAccessOpen)
+    session.data?.authenticated && (inbox || subscriptions)
       ? "/api/repos"
       : null,
   );
@@ -264,28 +286,31 @@ export function App() {
       ? `${repositoryOrganization?.name ?? repo.owner}/${repo.name} · Crab`
       : homeDashboard
         ? "Dashboard · Crab"
-        : subscriptions
-          ? "Subscriptions · Crab"
-          : watched
-            ? "Watched repositories · Crab"
-            : inbox
-              ? "Notifications · Crab"
-              : transferId
-                ? "Repository transfer · Crab"
-                : projectWorkspace
-                  ? "Projects · Crab"
-                  : codeSearch
-                    ? "Search code · Crab"
-                    : myWork
-                      ? "My work · Crab"
-                      : workSearch
-                        ? "Search issues and pull requests · Crab"
-                        : "Repositories · Crab";
+        : profileSettings
+          ? "Settings · Crab"
+          : subscriptions
+            ? "Subscriptions · Crab"
+            : watched
+              ? "Watched repositories · Crab"
+              : inbox
+                ? "Notifications · Crab"
+                : transferId
+                  ? "Repository transfer · Crab"
+                  : projectWorkspace
+                    ? "Projects · Crab"
+                    : codeSearch
+                      ? "Search code · Crab"
+                      : myWork
+                        ? "My work · Crab"
+                        : workSearch
+                          ? "Search issues and pull requests · Crab"
+                          : "Repositories · Crab";
   }, [
     authenticated,
     publicView,
     repo,
     homeDashboard,
+    profileSettings,
     repositoryOrganization,
     watched,
     inbox,
@@ -365,34 +390,35 @@ export function App() {
             contextLabel={
               homeDashboard
                 ? "Dashboard"
-                : projectWorkspace
-                  ? "Projects"
-                  : allRepositories ||
-                      personalRepositories ||
-                      publicRepositories
-                    ? "Repositories"
-                    : "Dashboard"
+                : profileSettings
+                  ? "Settings"
+                  : projectWorkspace
+                    ? "Projects"
+                    : allRepositories ||
+                        personalRepositories ||
+                        publicRepositories
+                      ? "Repositories"
+                      : "Dashboard"
             }
             contextHref={
               homeDashboard
                 ? "/"
-                : projectWorkspace
-                  ? `/-/organizations/${projectWorkspace}/projects`
-                  : allRepositories ||
-                      personalRepositories ||
-                      publicRepositories
-                    ? "/-/repositories"
-                    : "/"
+                : profileSettings
+                  ? "/-/settings"
+                  : projectWorkspace
+                    ? `/-/organizations/${projectWorkspace}/projects`
+                    : allRepositories ||
+                        personalRepositories ||
+                        publicRepositories
+                      ? "/-/repositories"
+                      : "/"
             }
             notificationsActive={notifications}
             theme={theme}
             setTheme={setTheme}
-            codeTheme={codeTheme}
-            setCodeTheme={selectCodeTheme}
             signingOut={signingOut}
             onSignOut={() => void signOut()}
             catalogRepositories={catalog.data?.repositories ?? []}
-            onGitAccessOpenChange={setGitAccessOpen}
             onRepositoryCreated={() => catalog.retry()}
           />
           <main id="main" tabIndex={-1}>
@@ -490,15 +516,17 @@ export function App() {
               )
             ) : profileSettings ? (
               <ProfileSettings
+                session={session.data}
                 csrf={session.data.csrf ?? ""}
                 suggestedName={session.data.user?.name ?? ""}
-                section={
-                  savedReplies
-                    ? "saved-replies"
-                    : reviewAvailability
-                      ? "review-availability"
-                      : "profile"
-                }
+                section={settingsSection}
+                url={url}
+                theme={theme}
+                setTheme={setTheme}
+                codeTheme={codeTheme}
+                setCodeTheme={selectCodeTheme}
+                signingOut={signingOut}
+                onSignOut={() => void signOut()}
               />
             ) : actorRoute ? (
               <UserProfile

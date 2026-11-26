@@ -213,6 +213,44 @@ test("home dashboard renders GitHub-style layout, filters, feed, drawer, and com
   await expect(page).toHaveTitle("Dashboard · Crab");
   await expect(page.getByRole("heading", { name: /forhappy!/ })).toBeVisible();
 
+  // Simplified GitHub-style toolbar: no Git access, code theme, or standalone theme toggles
+  const header = page.locator(".global-header");
+  await expect(header.getByText("Git access", { exact: true })).toHaveCount(0);
+  await expect(header.locator('[aria-label^="Code theme:"]')).toHaveCount(0);
+  await expect(header.locator('[aria-label="Dark"]')).toHaveCount(0);
+  const searchButton = header.getByRole("button", {
+    name: "Search Crab",
+    exact: true,
+  });
+  await expect(searchButton).toBeVisible();
+  expect(
+    await searchButton.evaluate((el) => ({
+      justifyContent: getComputedStyle(el).justifyContent,
+      textAlign: getComputedStyle(el).textAlign,
+      width: el.getBoundingClientRect().width,
+    })),
+  ).toMatchObject({
+    justifyContent: "flex-start",
+    textAlign: "left",
+  });
+  expect((await searchButton.boundingBox())!.width).toBeLessThanOrEqual(220);
+
+  // User profile dropdown uses neutral popover foreground (not blue prose links) and passes axe
+  await header
+    .getByRole("button", { name: "Open user menu", exact: true })
+    .click();
+  const profileItem = page.getByRole("menuitem", {
+    name: "Your profile",
+    exact: true,
+  });
+  await expect(profileItem).toBeVisible();
+  const bodyColor = await page
+    .locator("body")
+    .evaluate((el) => getComputedStyle(el).color);
+  await expect(profileItem).toHaveCSS("color", bodyColor);
+  await expectNoAccessibilityViolations(page);
+  await page.keyboard.press("Escape");
+
   // Workspace search composer keeps a single outer focus boundary with no inner box
   const composerInput = page.getByLabel("Workspace search query");
   await composerInput.focus();
@@ -293,6 +331,7 @@ test("home dashboard renders GitHub-style layout, filters, feed, drawer, and com
     .getByRole("searchbox", { name: "Search Crab" });
   await expect(paletteInput).toBeVisible();
   await page.keyboard.press("Escape");
+  await expect(paletteInput).toHaveCount(0);
 
   // Accessibility in light + dark mode and mobile viewport
   await expectNoAccessibilityViolations(page);

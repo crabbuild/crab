@@ -40,7 +40,28 @@ export async function expectNoAccessibilityViolations(page: Page) {
   expect(result.violations).toEqual([]);
 }
 
+export async function selectTheme(
+  page: Page,
+  theme: "light" | "dark" | "auto",
+) {
+  const label =
+    theme === "light" ? "Light" : theme === "dark" ? "Dark" : "System";
+  const direct = page.locator(`[aria-label="${label}"]`);
+  if (await direct.isVisible()) {
+    await direct.click();
+  } else {
+    const userMenu = page.getByRole("button", {
+      name: "Open user menu",
+      exact: true,
+    });
+    await userMenu.click();
+    await page.getByRole("menuitemradio", { name: label, exact: true }).click();
+  }
+  if (theme === "light" || theme === "dark") {
+    await expect(page.locator("html")).toHaveCSS("color-scheme", theme);
+  }
+}
+
 export async function selectDarkTheme(page: Page) {
-  await page.locator('[aria-label="Dark"]').click();
-  await expect(page.locator("html")).toHaveCSS("color-scheme", "dark");
+  await selectTheme(page, "dark");
 }
