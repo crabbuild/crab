@@ -28,6 +28,13 @@ async function fixture(page: Page) {
       path = new URL(request.url()).pathname;
     if (path === "/api/notifications/unread")
       return route.fulfill({ json: { unread: false } });
+    if (
+      path === "/api/notifications" ||
+      path === "/api/organizations" ||
+      path === "/api/discussion-search" ||
+      path === "/api/personal-work"
+    )
+      return route.fulfill({ json: { items: [], next: null } });
     if (path === "/api/session")
       return route.fulfill({
         json: {

@@ -15,10 +15,10 @@ use crate::{
     app::{self, Error, Result},
     auth::Principal,
     cells::{
-        directory::IdentityKey,
+        directory::{ActorSummary, IdentityKey},
         repository::{
             SearchInput,
-            collaboration::SubjectKind,
+            collaboration::{SubjectKind, SubjectState},
             search::index::{
                 Direction, Sort,
                 work::{self, ListWorkspaceWork},
@@ -30,7 +30,7 @@ use crate::{
     server::Server,
 };
 
-use super::{catalog, discussion_search, read_admission};
+use super::{catalog, discussion_search, profiles::attribution::Authors, read_admission};
 
 const CONCURRENT_REPOSITORIES: usize = 8;
 
@@ -60,6 +60,7 @@ pub(super) struct Parameters {
     kind: Option<SubjectKind>,
     #[serde(default)]
     state: StateFilter,
+    sort: Option<Sort>,
     limit: Option<u8>,
     after: Option<String>,
 }
@@ -135,10 +136,29 @@ struct RepositoryLink {
 }
 
 #[derive(Serialize)]
+struct AuthorView {
+    name: String,
+    profile: Option<ActorSummary>,
+}
+
+struct PendingRow {
+    repository: RepositoryLink,
+    item: work::Item,
+}
+
+#[derive(Serialize)]
 struct Row {
     repository: RepositoryLink,
-    #[serde(flatten)]
-    item: work::Item,
+    kind: SubjectKind,
+    number: u64,
+    title: String,
+    state: SubjectState,
+    draft: bool,
+    created_at: u64,
+    updated_at: u64,
+    sort_value: u64,
+    comments: u64,
+    author: AuthorView,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -272,6 +292,7 @@ pub(super) async fn list(
             kind: Some(kind),
             search: SearchInput {
                 query: Some(query),
+                sort: params.sort.unwrap_or_default(),
                 limit: params.limit.unwrap_or(30),
                 ..Default::default()
             },
@@ -416,7 +437,7 @@ async fn page(
         if let Some(snapshot) = page.filter_snapshot {
             filter_snapshots.insert(repo.id, snapshot);
         }
-        items.extend(page.items.into_iter().map(|item| Row {
+        items.extend(page.items.into_iter().map(|item| PendingRow {
             repository: RepositoryLink {
                 id: repo.id,
                 owner: repo.config.owner.clone(),
@@ -440,11 +461,6 @@ async fn page(
     if position.is_some_and(|position| position.filter_snapshot != filter_snapshot) {
         return Err(Error::PageChanged);
     }
-    let current = scope(server, principal, account, request).await?;
-    app::account(principal)?;
-    if current.key != initial.key {
-        return Err(Error::PageChanged);
-    }
     let next = if items.len() > limit {
         items.truncate(limit);
         items
@@ -463,6 +479,35 @@ async fn page(
     } else {
         None
     };
+    let authors =
+        Authors::load(server, principal, items.iter().map(|row| &row.item.author)).await?;
+    let current = scope(server, principal, account, request).await?;
+    app::account(principal)?;
+    if current.key != initial.key {
+        return Err(Error::PageChanged);
+    }
+    let items = items
+        .into_iter()
+        .map(|row| {
+            let view = authors.view(&row.item.author);
+            Row {
+                repository: row.repository,
+                kind: row.item.kind,
+                number: row.item.number,
+                title: row.item.title,
+                state: row.item.state,
+                draft: row.item.draft,
+                created_at: row.item.created_at,
+                updated_at: row.item.updated_at,
+                sort_value: row.item.sort_value,
+                comments: row.item.comments,
+                author: AuthorView {
+                    name: view.name.to_owned(),
+                    profile: view.profile.cloned(),
+                },
+            }
+        })
+        .collect();
     Ok(Page { items, next })
 }
 

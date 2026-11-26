@@ -162,10 +162,15 @@ async fn personal_work_pages_across_current_grants_and_uses_typed_links() {
         StatusCode::CONFLICT
     );
     let current = h
-        .json(&format!("{ENDPOINT}?kind=issue&state=all"), &bob)
+        .json(
+            &format!("{ENDPOINT}?kind=issue&state=all&sort=updated"),
+            &bob,
+        )
         .await;
     assert_eq!(current["items"].as_array().unwrap().len(), 1);
     assert_eq!(current["items"][0]["repository"]["name"], "private");
+    assert_eq!(current["items"][0]["comments"], 0);
+    assert_eq!(current["items"][0]["author"]["name"], "Bob");
     h.close().await;
 }
 
@@ -318,6 +323,10 @@ async fn workspace_discussion_search_combines_types_and_rechecks_repository_scop
                 assert_eq!(result["items"].as_array().unwrap().len(), 1);
                 assert_eq!(result["items"][0]["title"], title);
                 assert_eq!(result["items"][0]["sort_value"], count);
+                if sort == "comments" {
+                    assert_eq!(result["items"][0]["comments"], count);
+                }
+                assert_eq!(result["items"][0]["author"]["name"], "Alice");
                 if offset == 2 {
                     assert_eq!(result["next"], Value::Null);
                 } else {

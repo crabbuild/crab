@@ -53,7 +53,7 @@ test("the owner picker scopes creation and import to the selected organization",
   await page.route("**/api/repos?*", (route) =>
     route.fulfill({ json: { repositories: [], next: null } }),
   );
-  await page.goto("/");
+  await page.goto("/-/repositories");
   await page.getByRole("button", { name: "Owner · Personal" }).click();
   await page.getByRole("button", { name: "Crab engineering" }).click();
   await page.getByRole("button", { name: "New repository" }).click();
@@ -184,7 +184,7 @@ test("new repository recovers one submission after a reload", async ({
     (route) =>
       route.fulfill({ json: { head: null, default_branch: "main", refs: [] } }),
   );
-  await page.goto("/");
+  await page.goto("/-/repositories");
   await page
     .getByRole("button", { name: "New repository", exact: true })
     .click();
@@ -319,7 +319,7 @@ test("a reloaded public import keeps its visibility and takes a fresh source tok
       },
     });
   });
-  await page.goto("/");
+  await page.goto("/-/repositories");
   await page
     .getByRole("button", { name: "Import from Git", exact: true })
     .click();

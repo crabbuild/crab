@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { RepoIcon } from "@primer/octicons-react";
 import { useMutation } from "@/components/discussion/mutations";
 import { Result } from "@/components/request/result";
@@ -267,24 +267,36 @@ export function CreateRepository({
   organization,
   csrf,
   onCreated,
+  open: controlledOpen,
+  onOpenChange: controlledOnOpenChange,
+  trigger,
 }: {
   organization?: { id: string; name: string; actor: string };
   csrf: string;
   onCreated: (repository: RepositoryAddress) => void;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  trigger?: ReactNode | null;
 }) {
-  const [open, setOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const open = controlledOpen ?? uncontrolledOpen;
+  const setOpen = controlledOnOpenChange ?? setUncontrolledOpen;
   const endpoint = organization
     ? `/api/organizations/${organization.id}/repositories/creation`
     : "/api/repos/creation";
   const destination = useRequest<Destination>(open ? endpoint : null);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button>
-          <RepoIcon data-icon="inline-start" />
-          New repository
-        </Button>
-      </DialogTrigger>
+      {trigger !== null && (
+        <DialogTrigger asChild>
+          {trigger ?? (
+            <Button>
+              <RepoIcon data-icon="inline-start" />
+              New repository
+            </Button>
+          )}
+        </DialogTrigger>
+      )}
       <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Create a repository</DialogTitle>

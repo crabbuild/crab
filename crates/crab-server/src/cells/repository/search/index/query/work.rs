@@ -1,6 +1,7 @@
 use super::*;
 use crate::cells::repository::{
-    collaboration::SubjectState, result_text, result_u64_from_row, validate_number,
+    RepositoryAuthor, collaboration::SubjectState, result_text, result_u64_from_row,
+    validate_number,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -31,6 +32,8 @@ pub(crate) struct Item {
     pub created_at: u64,
     pub updated_at: u64,
     pub sort_value: u64,
+    pub comments: u64,
+    pub author: RepositoryAuthor,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -104,9 +107,10 @@ impl Read for ListWorkspaceWork {
             let rows = context.query(
                 &format!(
                     "{} SELECT work.number, item.title, work.state, work.draft,
-                        work.created_at_ms, work.updated_at_ms, work.sort_value
+                        work.created_at_ms, work.updated_at_ms, work.sort_value,
+                        work.comments, item.author_issuer, item.author_subject, item.author_name
                      FROM (SELECT d.number, d.state, d.draft, d.created_at_ms, d.updated_at_ms,
-                           {column} AS sort_value
+                           d.comments, {column} AS sort_value
                            FROM discussion_index d {} WHERE {by_kind} AND ({predicate}) AND {boundary}
                            ORDER BY {column} {order}, d.number {order} LIMIT {limit}) work
                      JOIN {table} item ON item.number = work.number",
@@ -130,6 +134,12 @@ impl Read for ListWorkspaceWork {
                     created_at: result_u64_from_row(row, 4)?,
                     updated_at: result_u64_from_row(row, 5)?,
                     sort_value: result_u64_from_row(row, 6)?,
+                    comments: result_u64_from_row(row, 7)?,
+                    author: RepositoryAuthor {
+                        issuer: result_text(row, 8)?,
+                        subject: result_text(row, 9)?,
+                        name: result_text(row, 10)?,
+                    },
                 });
             }
         }

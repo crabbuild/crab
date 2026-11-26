@@ -69,7 +69,7 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
       },
     });
   });
-  await page.goto("/");
+  await page.goto("/-/repositories");
   await page.getByText("Git access", { exact: true }).click();
   await expectNoAccessibilityViolations(page);
   await selectDarkTheme(page);
