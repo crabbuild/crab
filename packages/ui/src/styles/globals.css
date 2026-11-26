@@ -3431,12 +3431,32 @@ main {
 }
 .account-settings {
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
-  gap: --spacing(8);
+  gap: --spacing(6);
   width: 100%;
-  max-width: 1024px;
+  max-width: 1200px;
   margin-inline: auto;
   padding: var(--page-block) var(--page-gutter);
+}
+.account-settings-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: --spacing(4);
+}
+.account-settings-body {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  align-items: start;
+  gap: --spacing(8);
+}
+.account-settings-nav {
+  display: grid;
+  gap: --spacing(0.5);
+  min-width: 0;
+}
+.account-settings-nav a:hover {
+  text-decoration: none;
 }
 .account-profile {
   width: 100%;
@@ -6787,9 +6807,9 @@ main {
     padding: --spacing(3);
   }
   .settings-layout,
-  .account-settings {
-    grid-template-columns: 1fr;
-    gap: --spacing(4);
+  .account-settings-body {
+    grid-template-columns: minmax(0, 1fr);
+    gap: --spacing(5);
   }
   .settings-nav {
     display: flex;
