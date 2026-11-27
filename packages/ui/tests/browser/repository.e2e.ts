@@ -4695,3 +4695,101 @@ test("repository header places View forks to the right of Search code and stays 
     await expectNoAccessibilityViolations(page);
   }
 });
+
+test("Danger Zone renders compact grouped rows with clear section spacing in light and dark themes", async ({
+  page,
+}) => {
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/session") {
+      return route.fulfill({
+        json: {
+          authenticated: true,
+          mode: "local",
+          user: {
+            issuer: "https://auth.example",
+            subject: "user-1",
+            name: "Alice",
+          },
+          csrf: "test-csrf",
+        },
+      });
+    }
+    if (url.pathname === "/api/notifications/unread") {
+      return route.fulfill({ json: { count: 0 } });
+    }
+    if (url.pathname === "/api/repos") {
+      return route.fulfill({
+        json: {
+          repositories: [
+            {
+              id: "00000000-0000-4000-8000-000000000099",
+              owner: "team",
+              name: "project",
+              description: "A repository for our team.",
+              visibility: "private",
+              organization_id: "00000000-0000-4000-8000-000000000100",
+              access: "write",
+              can_admin: true,
+              can_configure_visibility: true,
+              archive_version: 0,
+              archived: false,
+              protection_version: 0,
+              protected_branches: [],
+            },
+          ],
+        },
+      });
+    }
+    return route.fallback();
+  });
+
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.goto("/team/project/settings");
+
+  const dangerZone = page.locator(".danger-zone");
+  const dangerList = dangerZone.locator(".danger-zone-list");
+  const rows = dangerList.locator(".danger-zone-row");
+  await expect(rows).toHaveCount(3);
+
+  const prevSection = page
+    .locator(".settings-content > .settings-section")
+    .last();
+  const prevBox = await prevSection.boundingBox();
+  const dangerBox = await dangerZone.boundingBox();
+  expect(prevBox).not.toBeNull();
+  expect(dangerBox).not.toBeNull();
+  expect(dangerBox!.y - (prevBox!.y + prevBox!.height)).toBeGreaterThanOrEqual(
+    32,
+  );
+
+  const rowBoxes = await Promise.all(
+    [0, 1, 2].map((i) => rows.nth(i).boundingBox()),
+  );
+  for (const box of rowBoxes) {
+    expect(box).not.toBeNull();
+    expect(box!.height).toBeLessThanOrEqual(76);
+  }
+  expect(
+    Math.abs(rowBoxes[1]!.y - (rowBoxes[0]!.y + rowBoxes[0]!.height)),
+  ).toBeLessThanOrEqual(2);
+  expect(
+    Math.abs(rowBoxes[2]!.y - (rowBoxes[1]!.y + rowBoxes[1]!.height)),
+  ).toBeLessThanOrEqual(2);
+
+  await expectNoAccessibilityViolations(page);
+  await selectTheme(page, "dark");
+  await expectNoAccessibilityViolations(page);
+
+  await page
+    .getByRole("button", { name: "Archive this repository", exact: true })
+    .click();
+  await expect(page.locator(".archive-confirm")).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(390);
+  await expectNoAccessibilityViolations(page);
+});

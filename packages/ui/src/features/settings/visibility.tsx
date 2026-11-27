@@ -42,7 +42,12 @@ export function VisibilitySettings({
       </div>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogTrigger asChild>
-          <Button variant="outline" size="sm" disabled={repo.archived}>
+          <Button
+            variant="outline"
+            size="sm"
+            className="danger-zone-action"
+            disabled={repo.archived}
+          >
             Change visibility
           </Button>
         </DialogTrigger>

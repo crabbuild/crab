@@ -79,7 +79,8 @@ export function ArchiveSettings({
         {!confirming && (
           <Button
             size="sm"
-            variant="destructive"
+            variant="outline"
+            className="danger-zone-action"
             onClick={() => setConfirming(true)}
           >
             {repo.archived

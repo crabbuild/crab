@@ -3797,34 +3797,69 @@ main {
   padding: 0 --spacing(4) --spacing(4);
 }
 .danger-zone {
-  margin-block-start: --spacing(3);
+  margin-block: --spacing(6) --spacing(4);
 }
 .danger-zone > h2 {
-  margin-bottom: --spacing(2);
-  color: var(--destructive);
-  font-size: var(--text-2xl);
+  margin: 0 0 --spacing(3);
+  color: var(--foreground);
+  font-size: var(--text-xl);
+  font-weight: 600;
+}
+.danger-zone-list {
+  border: 1px solid var(--destructive-border);
+  border-radius: var(--radius);
+  background: var(--card);
+  overflow: hidden;
+}
+.danger-zone-list > * + * {
+  border-top: 1px solid var(--border);
 }
 .danger-zone-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: --spacing(4);
-  padding: --spacing(4);
-  border: 1px solid var(--destructive-border);
-  border-radius: var(--radius);
+  padding: --spacing(3) --spacing(4);
+}
+.danger-zone-row > div {
+  display: grid;
+  gap: --spacing(0.5);
+  min-width: 0;
+}
+.danger-zone-row strong {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--foreground);
 }
 .danger-zone-row p,
 .archive-confirm p {
+  margin: 0;
   color: var(--muted-foreground);
+}
+.danger-zone-row p {
+  font-size: var(--text-sm);
+  line-height: 1.4;
+}
+.danger-zone-action {
+  border-color: var(--border);
+  background: var(--secondary);
+  color: var(--destructive);
+  font-weight: 600;
+}
+.danger-zone-action:hover:not(:disabled) {
+  border-color: var(--destructive);
+  background: var(--destructive);
+  color: var(--destructive-foreground);
+}
+.danger-zone-action:focus-visible {
+  border-color: var(--destructive);
 }
 .archive-confirm {
   display: flex;
   align-items: flex-start;
   gap: --spacing(3);
-  padding: --spacing(4);
-  border: solid var(--destructive-border);
-  border-width: 0 1px 1px;
-  border-radius: 0 0 var(--radius) var(--radius);
+  padding: --spacing(3.5) --spacing(4);
   background: var(--destructive-muted);
 }
 .archive-confirm > svg {
@@ -6870,6 +6905,7 @@ main {
   .danger-zone-row {
     align-items: flex-start;
     flex-direction: column;
+    gap: --spacing(2.5);
   }
   .default-branch-current {
     flex-wrap: wrap;
