@@ -152,6 +152,19 @@ class WorkspaceDependencyTests(unittest.TestCase):
                 self.assertFalse(self.workspace_policy(owner, [edge], features | {"internal": ["crab-auth-store?/operator-cdn"]}))
         self.assertFalse(self.workspace_policy("crab-read", [edge], features))
 
+    def test_server_cdn_cache_stays_behind_the_provider_cdn_feature(self):
+        edge = {"name": "crab-cache", "kind": None, "optional": True,
+                "uses_default_features": False, "features": ["local-cache"]}
+        features = {"provider-cdn": ["dep:crab-auth-store", "crab-auth-store/operator-cdn",
+                                     "dep:crab-cache", "dep:crab-cache-store", "crab-cache-store/lfs"],
+                    "provider-cdn-qualification": ["provider-cdn", "crab-storage/provider-cdn-qualification"]}
+        self.assertTrue(self.workspace_policy("crab-server", [edge], features))
+        self.assertFalse(self.workspace_policy("crab-server", [edge | {"optional": False}], features))
+        self.assertFalse(self.workspace_policy("crab-server", [edge | {"features": []}], features))
+        self.assertFalse(self.workspace_policy("crab-server", [edge], features | {"default": ["dep:crab-cache"]}))
+        self.assertFalse(self.workspace_policy(
+            "crab-server", [edge], features | {"provider-cdn": features["provider-cdn"] + ["dep:crab-vfs"]}))
+
     def test_package_dependencies_cannot_require_private_crates_even_when_optional(self):
         classified = (GATES.PRIVATE_INTERNAL_PACKAGES | GATES.PUBLISHED_LIBRARY_PACKAGES
                       | set(GATES.SHIPPED_BINARY_PACKAGES))
