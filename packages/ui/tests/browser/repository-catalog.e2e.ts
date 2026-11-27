@@ -1,6 +1,6 @@
 import { chooseSelectOption } from "./select";
 import { expect, test } from "@playwright/test";
-import { expectNoAccessibilityViolations } from "./accessibility";
+import { expectNoAccessibilityViolations, selectTheme } from "./accessibility";
 
 test("repository search pages on the server and restores a stale continuation", async ({
   page,
@@ -173,6 +173,35 @@ test("repository search pages on the server and restores a stale continuation", 
   await expect(
     page.getByRole("link", { name: "team / toolbox" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("combobox", { name: "Archive status" }),
+  ).toHaveCount(0);
+  const searchButton = page.getByRole("button", {
+    name: "Search",
+    exact: true,
+  });
+  const advancedSearchButton = page.getByRole("button", {
+    name: "Advanced search",
+  });
+  const searchBox = await searchButton.boundingBox();
+  const advancedBox = await advancedSearchButton.boundingBox();
+  expect(searchBox).not.toBeNull();
+  expect(advancedBox).not.toBeNull();
+  expect(advancedBox!.x).toBeGreaterThanOrEqual(
+    searchBox!.x + searchBox!.width - 1,
+  );
+  await advancedSearchButton.click();
+  await expect(
+    page.getByRole("combobox", { name: "Archive status" }),
+  ).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+  await selectTheme(page, "dark");
+  await expectNoAccessibilityViolations(page);
+  await selectTheme(page, "light");
+  await advancedSearchButton.click();
+  await expect(
+    page.getByRole("combobox", { name: "Archive status" }),
+  ).toHaveCount(0);
   const search = page.getByRole("searchbox", { name: "Search repositories" });
   await search.fill("project");
   await search.press("Enter");
@@ -257,6 +286,7 @@ test("repository search pages on the server and restores a stale continuation", 
   await organizationSearch.fill("project");
   await organizationSearch.press("Enter");
   await expect(page.getByRole("link", { name: "org-project" })).toBeVisible();
+  await page.getByRole("button", { name: "Advanced search" }).click();
   await page.getByRole("button", { name: "Filter by property" }).click();
   await chooseSelectOption(
     page.getByRole("combobox", { name: "Property", exact: true }),

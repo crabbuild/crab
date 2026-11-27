@@ -639,11 +639,15 @@ main {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
   gap: --spacing(4);
-  margin-top: --spacing(6);
+  margin-top: --spacing(1);
 }
 .repo-card {
   min-width: 0;
   padding: --spacing(5);
+  transition: border-color 150ms ease;
+}
+.repo-card:hover {
+  border-color: var(--input-hover);
 }
 .repo-card-heading {
   display: flex;
@@ -674,14 +678,16 @@ main {
 .repo-card-heading > span {
   flex: 0 0 auto;
 }
-.repo-card p {
+.repo-card > p.muted {
   margin: --spacing(3) 0 0 --spacing(7);
   display: -webkit-box;
-  min-height: 42px;
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   overflow: hidden;
+}
+.repo-card > p:not(.muted) {
+  margin: --spacing(2) 0 0 --spacing(7);
 }
 .commit-list {
   margin: 0;

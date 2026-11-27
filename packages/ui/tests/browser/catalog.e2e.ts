@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { expectNoAccessibilityViolations } from "./accessibility";
+import { expectNoAccessibilityViolations, selectTheme } from "./accessibility";
 
 const owner = "alice";
 
@@ -61,7 +61,25 @@ test("the owner picker scopes creation and import to the selected organization",
   );
   await page.goto("/-/repositories");
   await page.getByRole("button", { name: "Owner · Personal" }).click();
-  await page.getByRole("button", { name: "Crab engineering" }).click();
+  const ownerDialog = page.getByRole("dialog", {
+    name: "Choose repository owner",
+  });
+  await expect(ownerDialog).toBeVisible();
+  await expect(
+    ownerDialog.getByRole("button", { name: /Personal/ }),
+  ).toBeVisible();
+  await expect(
+    ownerDialog.getByText(/Switching owner updates both/),
+  ).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+  await page.keyboard.press("Escape");
+  await selectTheme(page, "dark");
+  await page.getByRole("button", { name: "Owner · Personal" }).click();
+  await expectNoAccessibilityViolations(page);
+  await page.keyboard.press("Escape");
+  await selectTheme(page, "light");
+  await page.getByRole("button", { name: "Owner · Personal" }).click();
+  await ownerDialog.getByRole("button", { name: /Crab engineering/ }).click();
   await page.getByRole("button", { name: "Import from Git" }).click();
   await expect(page.getByLabel("Organization", { exact: true })).toHaveValue(
     "Crab engineering",

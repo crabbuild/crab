@@ -1,4 +1,4 @@
-import { TagIcon } from "lucide-react";
+import { SearchIcon, TagIcon } from "lucide-react";
 import {
   useEffect,
   useId,
@@ -20,6 +20,28 @@ export const catalogQueryLimit = 200;
 
 export function catalogTerms(query: string) {
   return query.matchAll(/(?:[^\s"]|"[^"]*(?:"|$))+/g);
+}
+
+const catalogFilterQualifier = /^(?:-?(?:archived|fork|is|sort):|-?props?\.)/i;
+
+export function countActiveCatalogFilters(query: string): number {
+  const activeKeys = new Set<string>();
+  for (const [term] of catalogTerms(query)) {
+    if (!catalogFilterQualifier.test(term)) continue;
+    const key = term.toLowerCase().startsWith("-props.")
+      ? term.slice(1).split(":", 1)[0]
+      : term.toLowerCase().startsWith("props.")
+        ? term.split(":", 1)[0]
+        : term.replace(/^-/, "").split(":", 1)[0];
+    activeKeys.add(key.toLowerCase());
+  }
+  return activeKeys.size;
+}
+
+export function stripCatalogFilters(query: string): string {
+  return Array.from(catalogTerms(query), ([term]) => term)
+    .filter((term) => !catalogFilterQualifier.test(term))
+    .join(" ");
 }
 
 export function propertyTerm(value: string) {
@@ -81,10 +103,12 @@ export function CatalogSearchInput({
   input,
   query,
   organization,
+  inputClassName,
 }: {
   input: RefObject<HTMLInputElement | null>;
   query: string;
   organization?: string;
+  inputClassName?: string;
 }) {
   const id = useId();
   const [draft, setDraft] = useState(query);
@@ -149,10 +173,16 @@ export function CatalogSearchInput({
   return (
     <div
       className={cn(
-        "relative max-w-md",
-        organization ? "min-w-0 flex-[1_0_100%] sm:flex-1" : "min-w-36 flex-1",
+        "relative min-w-0",
+        organization
+          ? "flex-[1_0_100%] sm:flex-1"
+          : "flex-[1_0_100%] sm:min-w-48 sm:flex-1",
       )}
     >
+      <SearchIcon
+        className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground"
+        aria-hidden="true"
+      />
       <Input
         ref={input}
         type={organization ? "text" : "search"}
@@ -172,6 +202,7 @@ export function CatalogSearchInput({
         }
         autoComplete="off"
         maxLength={catalogQueryLimit}
+        className={cn("pl-8", inputClassName)}
         value={draft}
         onFocus={(event) => {
           setFocused(true);
