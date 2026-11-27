@@ -98,7 +98,8 @@ impl CapsuleGitPack {
             object_count,
             external_delta_bases,
         };
-        validate_git_pack_input(&pack)?;
+        // Bytes clones share the same buffers; validation only reads lengths.
+        validate_git_pack_input(&PackInput::from(pack.clone()))?;
         Ok(pack)
     }
 
@@ -271,6 +272,177 @@ pub struct Capsule {
     footer: CapsuleFooter,
 }
 
+/// One section payload; only a streamed Git pack is detached from memory.
+enum SectionBody {
+    Bytes(Bytes),
+    Detached { length: u64, blake3: String },
+}
+
+impl SectionBody {
+    fn length(&self) -> u64 {
+        match self {
+            Self::Bytes(bytes) => bytes.len() as u64,
+            Self::Detached { length, .. } => *length,
+        }
+    }
+}
+
+struct PackInput {
+    pack: SectionBody,
+    index: Bytes,
+    reverse_index: Bytes,
+    locator: Bytes,
+    git_checksum: String,
+    object_count: u64,
+    external_delta_bases: Vec<String>,
+}
+
+impl From<CapsuleGitPack> for PackInput {
+    fn from(pack: CapsuleGitPack) -> Self {
+        Self {
+            pack: SectionBody::Bytes(pack.pack),
+            index: pack.index,
+            reverse_index: pack.reverse_index,
+            locator: pack.locator,
+            git_checksum: pack.git_checksum,
+            object_count: pack.object_count,
+            external_delta_bases: pack.external_delta_bases,
+        }
+    }
+}
+
+/// Section bodies in wire order with their authenticated footer.
+struct Layout {
+    bodies: Vec<SectionBody>,
+    footer: CapsuleFooter,
+    footer_bytes: Vec<u8>,
+    payload_bytes: u64,
+}
+
+impl Layout {
+    // Footer, footer length, footer hash and magic, as appended after the sections.
+    fn trailer(&self) -> Vec<u8> {
+        let mut trailer = Vec::with_capacity(self.footer_bytes.len() + CAPSULE_TRAILER_BYTES);
+        trailer.extend_from_slice(&self.footer_bytes);
+        trailer.extend_from_slice(&(self.footer_bytes.len() as u64).to_be_bytes());
+        trailer.extend_from_slice(blake3::hash(&self.footer_bytes).as_bytes());
+        trailer.extend_from_slice(CAPSULE_MAGIC);
+        trailer
+    }
+}
+
+/// Order sections and build the footer shared by in-memory and streamed capsules.
+fn layout(
+    transaction: &CapsuleTransaction,
+    git_packs: Vec<PackInput>,
+    sections: Vec<CapsuleSection>,
+) -> Result<Layout> {
+    let git_section_count = git_packs
+        .len()
+        .checked_mul(4)
+        .ok_or_else(|| contract_error("capsule Git pack section count overflowed"))?;
+    let payload_section_count = git_section_count
+        .checked_add(sections.len())
+        .ok_or_else(|| contract_error("capsule payload section count overflowed"))?;
+    if payload_section_count >= MAX_CAPSULE_SECTIONS {
+        return Err(contract_error(format!(
+            "capsule has too many payload sections (maximum {})",
+            MAX_CAPSULE_SECTIONS - 1
+        )));
+    }
+    if sections
+        .iter()
+        .any(|section| is_reserved_git_section(section.kind))
+    {
+        return Err(contract_error(
+            "caller payload cannot contain transaction or unbound Git sections",
+        ));
+    }
+    let transaction_bytes = transaction.encode()?;
+    let mut encoded = Vec::with_capacity(payload_section_count + 1);
+    encoded.push((
+        CapsuleSectionKind::RefTransaction,
+        SectionBody::Bytes(transaction_bytes),
+    ));
+    let mut descriptors = Vec::with_capacity(git_packs.len());
+    for pack in git_packs {
+        validate_git_pack_input(&pack)?;
+        let first = u32::try_from(encoded.len())
+            .map_err(|_| contract_error("capsule section index cannot be represented"))?;
+        encoded.push((CapsuleSectionKind::GitPack, pack.pack));
+        encoded.push((CapsuleSectionKind::GitIndex, SectionBody::Bytes(pack.index)));
+        encoded.push((
+            CapsuleSectionKind::GitReverseIndex,
+            SectionBody::Bytes(pack.reverse_index),
+        ));
+        encoded.push((
+            CapsuleSectionKind::GitObjectLocator,
+            SectionBody::Bytes(pack.locator),
+        ));
+        descriptors.push(CapsuleGitPackDescriptor {
+            pack_section: first,
+            index_section: first + 1,
+            reverse_index_section: first + 2,
+            locator_section: first + 3,
+            git_checksum: pack.git_checksum,
+            object_count: pack.object_count,
+            external_delta_bases: pack.external_delta_bases,
+        });
+    }
+    encoded.extend(
+        sections
+            .into_iter()
+            .map(|section| (section.kind, SectionBody::Bytes(section.bytes))),
+    );
+
+    let mut payload_bytes = 0_u64;
+    let mut locations = Vec::with_capacity(encoded.len());
+    for (kind, body) in &encoded {
+        let length = body.length();
+        if length == 0 {
+            return Err(contract_error("capsule sections must not be empty"));
+        }
+        let blake3 = match body {
+            SectionBody::Bytes(bytes) => blake3::hash(bytes).to_hex().to_string(),
+            SectionBody::Detached { blake3, .. } => {
+                validate_content_hash(blake3, "capsule section hash", "capsule-protocol capsule")?;
+                blake3.clone()
+            }
+        };
+        locations.push(CapsuleSectionLocation {
+            kind: *kind,
+            offset: payload_bytes,
+            length,
+            blake3,
+        });
+        payload_bytes = payload_bytes
+            .checked_add(length)
+            .ok_or_else(|| contract_error("capsule payload length overflowed"))?;
+    }
+
+    let footer = CapsuleFooter {
+        version: CAPSULE_VERSION,
+        base_root_digest: transaction.base_root_digest().to_owned(),
+        transaction_id: transaction.id()?,
+        sections: locations,
+        git_packs: descriptors,
+    };
+    let footer_bytes = serde_json::to_vec(&footer).map_err(|source| {
+        MetadataError::Internal(format!("capsule footer serialization failed: {source}"))
+    })?;
+    if footer_bytes.len() > MAX_CAPSULE_FOOTER_BYTES {
+        return Err(contract_error(format!(
+            "capsule footer exceeds {MAX_CAPSULE_FOOTER_BYTES} bytes"
+        )));
+    }
+    Ok(Layout {
+        bodies: encoded.into_iter().map(|(_, body)| body).collect(),
+        footer,
+        footer_bytes,
+        payload_bytes,
+    })
+}
+
 impl Capsule {
     /// Build and verify a capsule containing one canonical ref transaction and payload sections.
     pub fn build(
@@ -278,109 +450,28 @@ impl Capsule {
         git_packs: Vec<CapsuleGitPack>,
         sections: Vec<CapsuleSection>,
     ) -> Result<Self> {
-        let git_section_count = git_packs
-            .len()
-            .checked_mul(4)
-            .ok_or_else(|| contract_error("capsule Git pack section count overflowed"))?;
-        let payload_section_count = git_section_count
-            .checked_add(sections.len())
-            .ok_or_else(|| contract_error("capsule payload section count overflowed"))?;
-        if payload_section_count >= MAX_CAPSULE_SECTIONS {
-            return Err(contract_error(format!(
-                "capsule has too many payload sections (maximum {})",
-                MAX_CAPSULE_SECTIONS - 1
-            )));
-        }
-        if sections
-            .iter()
-            .any(|section| is_reserved_git_section(section.kind))
-        {
-            return Err(contract_error(
-                "caller payload cannot contain transaction or unbound Git sections",
-            ));
-        }
-        let transaction_bytes = transaction.encode()?;
-        let mut encoded_sections = Vec::with_capacity(payload_section_count + 1);
-        encoded_sections.push((CapsuleSectionKind::RefTransaction, transaction_bytes));
-        let mut descriptors = Vec::with_capacity(git_packs.len());
-        for pack in git_packs {
-            validate_git_pack_input(&pack)?;
-            let first = u32::try_from(encoded_sections.len())
-                .map_err(|_| contract_error("capsule section index cannot be represented"))?;
-            encoded_sections.push((CapsuleSectionKind::GitPack, pack.pack));
-            encoded_sections.push((CapsuleSectionKind::GitIndex, pack.index));
-            encoded_sections.push((CapsuleSectionKind::GitReverseIndex, pack.reverse_index));
-            encoded_sections.push((CapsuleSectionKind::GitObjectLocator, pack.locator));
-            descriptors.push(CapsuleGitPackDescriptor {
-                pack_section: first,
-                index_section: first + 1,
-                reverse_index_section: first + 2,
-                locator_section: first + 3,
-                git_checksum: pack.git_checksum,
-                object_count: pack.object_count,
-                external_delta_bases: pack.external_delta_bases,
-            });
-        }
-        encoded_sections.extend(
-            sections
-                .into_iter()
-                .map(|section| (section.kind, section.bytes)),
-        );
-
-        let mut payload_bytes = 0_usize;
-        let mut locations = Vec::with_capacity(encoded_sections.len());
-        for (kind, bytes) in &encoded_sections {
-            if bytes.is_empty() {
-                return Err(contract_error("capsule sections must not be empty"));
-            }
-            let offset = u64::try_from(payload_bytes).map_err(|_| {
-                contract_error("capsule section offset cannot be represented as u64")
-            })?;
-            let length = u64::try_from(bytes.len()).map_err(|_| {
-                contract_error("capsule section length cannot be represented as u64")
-            })?;
-            payload_bytes = payload_bytes
-                .checked_add(bytes.len())
-                .ok_or_else(|| contract_error("capsule payload length overflowed"))?;
-            locations.push(CapsuleSectionLocation {
-                kind: *kind,
-                offset,
-                length,
-                blake3: blake3::hash(bytes).to_hex().to_string(),
-            });
-        }
-
-        let footer = CapsuleFooter {
-            version: CAPSULE_VERSION,
-            base_root_digest: transaction.base_root_digest().to_owned(),
-            transaction_id: transaction.id()?,
-            sections: locations,
-            git_packs: descriptors,
-        };
-        let footer_bytes = serde_json::to_vec(&footer).map_err(|source| {
-            MetadataError::Internal(format!("capsule footer serialization failed: {source}"))
-        })?;
-        if footer_bytes.len() > MAX_CAPSULE_FOOTER_BYTES {
-            return Err(contract_error(format!(
-                "capsule footer exceeds {MAX_CAPSULE_FOOTER_BYTES} bytes"
-            )));
-        }
-        let footer_length = u64::try_from(footer_bytes.len())
-            .map_err(|_| contract_error("capsule footer length cannot be represented as u64"))?;
+        let layout = layout(
+            transaction,
+            git_packs.into_iter().map(PackInput::from).collect(),
+            sections,
+        )?;
+        let trailer = layout.trailer();
         // Size the complete wire object before copying large pack sections.
         // Appending even a small footer must not reallocate the entire payload.
-        let capacity = payload_bytes
-            .checked_add(footer_bytes.len())
-            .and_then(|bytes| bytes.checked_add(CAPSULE_TRAILER_BYTES))
+        let capacity = usize::try_from(layout.payload_bytes)
+            .ok()
+            .and_then(|bytes| bytes.checked_add(trailer.len()))
             .ok_or_else(|| contract_error("capsule encoded length overflowed"))?;
         let mut body = Vec::with_capacity(capacity);
-        for (_, bytes) in encoded_sections {
-            body.extend_from_slice(&bytes);
+        for section in layout.bodies {
+            match section {
+                SectionBody::Bytes(bytes) => body.extend_from_slice(&bytes),
+                SectionBody::Detached { .. } => {
+                    return Err(contract_error("in-memory capsule has a detached section"));
+                }
+            }
         }
-        body.extend_from_slice(&footer_bytes);
-        body.extend_from_slice(&footer_length.to_be_bytes());
-        body.extend_from_slice(blake3::hash(&footer_bytes).as_bytes());
-        body.extend_from_slice(CAPSULE_MAGIC);
+        body.extend_from_slice(&trailer);
         Self::decode(Bytes::from(body))
     }
 
@@ -571,7 +662,194 @@ impl Capsule {
     }
 }
 
+/// Sidecars and identity of a Git pack whose bytes are streamed, never resident.
+#[derive(Debug, Clone)]
+pub struct DetachedGitPack {
+    pub length: u64,
+    /// BLAKE3 of the complete pack bytes.
+    pub blake3: String,
+    pub index: Bytes,
+    pub reverse_index: Bytes,
+    pub locator: Bytes,
+    pub git_checksum: String,
+    pub object_count: u64,
+}
+
+/// A capsule whose only Git pack section is supplied as a byte stream.
+///
+/// Its wire bytes are `prefix ‖ pack ‖ suffix` and are byte-identical to
+/// [`Capsule::build`] for the same inputs. The pack is the second section.
+#[derive(Debug, Clone)]
+pub struct DetachedPackCapsule {
+    footer: CapsuleFooter,
+    prefix: Bytes,
+    suffix: Bytes,
+    pack_length: u64,
+    attached: Vec<Option<Bytes>>,
+    hash: String,
+    // Absorbed every capsule byte; a run continues it with its metadata.
+    hasher: blake3::Hasher,
+}
+
+impl DetachedPackCapsule {
+    /// Return the bytes preceding the pack: the canonical transaction section.
+    pub fn prefix(transaction: &CapsuleTransaction) -> Result<Bytes> {
+        transaction.encode()
+    }
+
+    /// Lay out a capsule around a streamed pack.
+    ///
+    /// `hasher` must have absorbed [`Self::prefix`] followed by exactly the
+    /// pack bytes described by `pack`; only the suffix is hashed here.
+    pub fn build(
+        transaction: &CapsuleTransaction,
+        pack: DetachedGitPack,
+        sections: Vec<CapsuleSection>,
+        mut hasher: blake3::Hasher,
+    ) -> Result<Self> {
+        let input = PackInput {
+            pack: SectionBody::Detached {
+                length: pack.length,
+                blake3: pack.blake3,
+            },
+            index: pack.index,
+            reverse_index: pack.reverse_index,
+            locator: pack.locator,
+            git_checksum: pack.git_checksum,
+            object_count: pack.object_count,
+            external_delta_bases: Vec::new(),
+        };
+        let layout = layout(transaction, vec![input], sections)?;
+        validate_footer_layout(&layout.footer, layout.payload_bytes)?;
+        let trailer = layout.trailer();
+        let mut bodies = layout.bodies.into_iter();
+        let Some(SectionBody::Bytes(prefix)) = bodies.next() else {
+            return Err(contract_error(
+                "detached capsule must start with its transaction",
+            ));
+        };
+        validate_transaction(&layout.footer, &prefix)?;
+        let Some(SectionBody::Detached {
+            length: pack_length,
+            ..
+        }) = bodies.next()
+        else {
+            return Err(contract_error(
+                "detached capsule pack must follow its transaction",
+            ));
+        };
+        let mut attached = vec![Some(prefix.clone()), None];
+        let mut suffix = Vec::new();
+        for body in bodies {
+            let SectionBody::Bytes(bytes) = body else {
+                return Err(contract_error(
+                    "detached capsule has more than one detached section",
+                ));
+            };
+            suffix.extend_from_slice(&bytes);
+            attached.push(Some(bytes));
+        }
+        suffix.extend_from_slice(&trailer);
+        hasher.update(&suffix);
+        Ok(Self {
+            hash: hasher.finalize().to_hex().to_string(),
+            footer: layout.footer,
+            prefix,
+            suffix: Bytes::from(suffix),
+            pack_length,
+            attached,
+            hasher,
+        })
+    }
+
+    /// Return the capsule's BLAKE3 object identity.
+    #[must_use]
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
+
+    /// Return the complete capsule length.
+    #[must_use]
+    pub fn len(&self) -> u64 {
+        self.prefix.len() as u64 + self.pack_length + self.suffix.len() as u64
+    }
+
+    /// Return whether the capsule is empty; a valid capsule never is.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Return the exact repository-root digest this capsule extends.
+    #[must_use]
+    pub fn base_root_digest(&self) -> &str {
+        &self.footer.base_root_digest
+    }
+
+    /// Return the canonical embedded ref transaction identity.
+    #[must_use]
+    pub fn transaction_id(&self) -> &str {
+        &self.footer.transaction_id
+    }
+
+    /// Return authenticated locations for all capsule sections.
+    #[must_use]
+    pub fn sections(&self) -> &[CapsuleSectionLocation] {
+        &self.footer.sections
+    }
+
+    /// Return the capsule's Git pack descriptor.
+    #[must_use]
+    pub fn git_packs(&self) -> &[CapsuleGitPackDescriptor] {
+        &self.footer.git_packs
+    }
+
+    /// Return one resident section; the detached pack section has no bytes here.
+    pub fn section_bytes(&self, section: u32) -> Result<Bytes> {
+        self.attached
+            .get(usize::try_from(section).map_err(|_| corrupt("section index overflowed"))?)
+            .and_then(Clone::clone)
+            .ok_or_else(|| contract_error("detached capsule section is not resident"))
+    }
+
+    pub(super) fn prefix_bytes(&self) -> &Bytes {
+        &self.prefix
+    }
+
+    pub(super) fn suffix_bytes(&self) -> &Bytes {
+        &self.suffix
+    }
+
+    pub(super) fn pack_length(&self) -> u64 {
+        self.pack_length
+    }
+
+    pub(super) fn hasher(&self) -> &blake3::Hasher {
+        &self.hasher
+    }
+}
+
 fn validate_footer(footer: &CapsuleFooter, body: &[u8]) -> Result<()> {
+    validate_footer_layout(footer, body.len() as u64)?;
+    for location in &footer.sections {
+        let start = usize::try_from(location.offset)
+            .map_err(|_| corrupt("capsule section offset cannot be represented"))?;
+        let end = usize::try_from(location.offset + location.length)
+            .map_err(|_| corrupt("capsule section end cannot be represented"))?;
+        let section = body
+            .get(start..end)
+            .ok_or_else(|| corrupt("capsule section range is out of bounds"))?;
+        if blake3::hash(section).to_hex().as_str() != location.blake3 {
+            return Err(corrupt("capsule section hash does not match"));
+        }
+    }
+    let transaction_end = usize::try_from(footer.sections[0].length)
+        .map_err(|_| corrupt("capsule transaction range cannot be represented"))?;
+    validate_transaction(footer, &body[..transaction_end])
+}
+
+/// Check footer structure, Git bindings and contiguous coverage of `payload` bytes.
+fn validate_footer_layout(footer: &CapsuleFooter, payload: u64) -> Result<()> {
     if footer.version != CAPSULE_VERSION {
         return Err(corrupt(format!(
             "capsule must use version {CAPSULE_VERSION}"
@@ -610,33 +888,19 @@ fn validate_footer(footer: &CapsuleFooter, body: &[u8]) -> Result<()> {
         if location.length == 0 || location.offset != expected_offset {
             return Err(corrupt("capsule sections must be non-empty and contiguous"));
         }
-        let end = location
+        expected_offset = location
             .offset
             .checked_add(location.length)
             .ok_or_else(|| corrupt("capsule section range overflowed"))?;
-        let start = usize::try_from(location.offset)
-            .map_err(|_| corrupt("capsule section offset cannot be represented"))?;
-        let end_usize = usize::try_from(end)
-            .map_err(|_| corrupt("capsule section end cannot be represented"))?;
-        let section = body
-            .get(start..end_usize)
-            .ok_or_else(|| corrupt("capsule section range is out of bounds"))?;
-        if blake3::hash(section).to_hex().as_str() != location.blake3 {
-            return Err(corrupt("capsule section hash does not match"));
-        }
-        expected_offset = end;
     }
-    if expected_offset != body.len() as u64 {
+    if expected_offset != payload {
         return Err(corrupt("capsule sections do not cover the complete body"));
     }
-    let transaction_location = &footer.sections[0];
-    let transaction_end = transaction_location
-        .offset
-        .checked_add(transaction_location.length)
-        .ok_or_else(|| corrupt("capsule transaction range overflowed"))?;
-    let transaction_end = usize::try_from(transaction_end)
-        .map_err(|_| corrupt("capsule transaction range cannot be represented"))?;
-    let transaction_bytes = &body[..transaction_end];
+    Ok(())
+}
+
+/// Bind the leading transaction section to the footer's identity and base.
+fn validate_transaction(footer: &CapsuleFooter, transaction_bytes: &[u8]) -> Result<()> {
     if blake3::hash(transaction_bytes).to_hex().as_str() != footer.transaction_id {
         return Err(corrupt(
             "capsule transaction identity does not match its section",
@@ -651,8 +915,8 @@ fn validate_footer(footer: &CapsuleFooter, body: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn validate_git_pack_input(pack: &CapsuleGitPack) -> Result<()> {
-    if pack.pack.is_empty()
+fn validate_git_pack_input(pack: &PackInput) -> Result<()> {
+    if pack.pack.length() == 0
         || pack.index.is_empty()
         || pack.reverse_index.is_empty()
         || pack.locator.is_empty()

@@ -45,7 +45,7 @@ pub use browse_retention::{
 };
 pub use capsule::{
     Capsule, CapsuleGitPack, CapsuleGitPackDescriptor, CapsuleSection, CapsuleSectionKind,
-    CapsuleSectionLocation,
+    CapsuleSectionLocation, DetachedGitPack, DetachedPackCapsule,
 };
 #[cfg(feature = "storage")]
 pub use captured_visibility::{
@@ -102,7 +102,7 @@ pub use root::{
 };
 pub use run::{
     CapsuleControl, CapsuleControlLocation, CapsuleRun, CapsuleRunAdmission, CapsuleRunControl,
-    MAX_CAPSULES_PER_RUN,
+    MAX_CAPSULES_PER_RUN, StreamedLeafRun,
 };
 #[cfg(feature = "storage")]
 pub use run::{CapsuleRunAdmissionReader, RunCatalogSource};

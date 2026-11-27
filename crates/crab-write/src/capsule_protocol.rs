@@ -17,6 +17,8 @@ pub use crab_metadata::capsule_protocol::RootSnapshot;
 
 // Bound backend admission fanout while retaining exact transaction edit order.
 const REF_PREPARATION_CONCURRENCY: usize = 32;
+// Matches the provider upload part size; 10,000 parts cover 160 GiB.
+const STREAMED_RUN_PART_BYTES: usize = 16 * 1024 * 1024;
 
 #[cfg(test)]
 mod publication_scaling_tests;
@@ -54,6 +56,19 @@ pub fn capsule_member_oids(capsule: &Capsule) -> Result<Vec<Vec<[u8; 20]>>> {
                 .collect()
         })
         .collect()
+}
+
+fn run_pointer(run: &CapsuleRun) -> Result<CapsulePointer> {
+    Ok(CapsulePointer::new(
+        run.hash(),
+        run.bytes().len() as u64,
+        run.control_offset(),
+        run.control_size(),
+        run.footer_hash(),
+        run.level(),
+        run.transaction_ids(),
+        run.newest_base_root_digest(),
+    )?)
 }
 
 /// Build a leaf run with exact admission when its Git indexes are parseable.
@@ -311,13 +326,22 @@ pub async fn prepare_publication_with_ref_head_bases(
     // other async work schedulable while encoding a large publication.
     let run = tokio::task::spawn_blocking(move || capsule_leaf_run(capsule)).await??;
     let leaf = &run;
+    let pointer = &run_pointer(&run)?;
     let generation = base.record().root().generation();
     let transaction_key = transaction_id.as_str();
     let prepared =
         futures_util::stream::iter(transaction.edits().iter().cloned().zip(snapshots).map(
             move |(edit, snapshot)| async move {
-                prepare_ref_successor(router, snapshot, &edit, transaction_key, leaf, generation)
-                    .await
+                prepare_ref_successor(
+                    router,
+                    snapshot,
+                    &edit,
+                    transaction_key,
+                    pointer,
+                    Some(leaf),
+                    generation,
+                )
+                .await
             },
         ))
         .buffered(REF_PREPARATION_CONCURRENCY)
@@ -366,6 +390,146 @@ pub async fn publish_prepared(
         refs,
         ..
     } = prepared;
+    publish_refs(router, base, &transaction, refs).await
+}
+
+/// Upload a streamed leaf run, then publish it through the same ref heads.
+///
+/// `body` must yield the run's exact wire bytes; the upload verifies them
+/// against the run's BLAKE3 identity before completing. The run is stored
+/// before any ref head is prepared, so frontier compaction reads it like any
+/// other source. Callers hold ref leases and GC fences exactly as for
+/// [`publish`], and check cancellation before calling.
+pub async fn publish_streamed(
+    router: &StoreLayout<Store>,
+    base: RootSnapshot,
+    transaction: &CapsuleTransaction,
+    run: &crab_metadata::capsule_protocol::StreamedLeafRun,
+    body: std::sync::Arc<dyn crab_storage::MultipartUploadSource>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<RootSnapshot> {
+    if let Some(fence) = base.record().root().gc_fence() {
+        return Err(WriteError::CapsuleGcFenced {
+            fence_id: fence.id().to_owned(),
+            expires_at_unix: fence.expires_at_unix(),
+        });
+    }
+    let transaction_id = transaction.id()?;
+    if transaction.base_root_digest() != base.record().digest()
+        || run.newest_base_root_digest() != base.record().digest()
+        || run.transaction_ids() != [transaction_id.clone()]
+    {
+        return Err(WriteError::CorruptObject {
+            path: "capsule-protocol streamed run".to_owned(),
+            reason:
+                "streamed run, transaction, and advertised root are not cryptographically bound"
+                    .to_owned(),
+        });
+    }
+    let root = base.record().root();
+    let snapshots = futures_util::stream::iter(
+        transaction
+            .edits()
+            .iter()
+            .cloned()
+            .map(|edit| async move { read_ref_head(router, root, edit.ref_name()).await }),
+    )
+    .buffered(REF_PREPARATION_CONCURRENCY)
+    .try_collect::<Vec<_>>()
+    .await?;
+    for (edit, snapshot) in transaction.edits().iter().zip(&snapshots) {
+        if snapshot.visible.oid() != edit.expected_old() {
+            return Err(WriteError::RefChanged {
+                ref_name: edit.ref_name().to_owned(),
+                path: router
+                    .capsule_ref_head_path(&crab_metadata::capsule_protocol::capsule_ref_name_key(
+                        edit.ref_name(),
+                    ))
+                    .to_string(),
+            });
+        }
+    }
+    let started = Instant::now();
+    let path = router.capsule_path(run.hash());
+    // A retried publication finds its own content-addressed run already stored.
+    let stored = match router.store().head(&path).await {
+        Ok(meta) => meta.size == run.size(),
+        Err(StorageError::NotFound { .. }) => false,
+        Err(error) => return Err(error.into()),
+    };
+    if !stored {
+        let hash: [u8; 32] = blake3::Hash::from_hex(run.hash())
+            .map_err(|_| WriteError::Internal("streamed run hash is not BLAKE3 hex".to_owned()))?
+            .into();
+        router
+            .store()
+            .put_multipart_source_retry(
+                &path,
+                body,
+                run.size(),
+                hash,
+                STREAMED_RUN_PART_BYTES,
+                cancel,
+                None,
+            )
+            .await?;
+    }
+    tracing::info!(
+        phase = "streamed_upload",
+        %transaction_id,
+        bytes = run.size(),
+        reused = stored,
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "Git capsule publication phase finished"
+    );
+    let pointer = &CapsulePointer::new(
+        run.hash(),
+        run.size(),
+        run.control_offset(),
+        run.control_size(),
+        run.footer_hash(),
+        run.level(),
+        run.transaction_ids(),
+        run.newest_base_root_digest(),
+    )?;
+    let generation = root.generation();
+    let transaction_key = transaction_id.as_str();
+    let prepared =
+        futures_util::stream::iter(transaction.edits().iter().cloned().zip(snapshots).map(
+            move |(edit, snapshot)| async move {
+                prepare_ref_successor(
+                    router,
+                    snapshot,
+                    &edit,
+                    transaction_key,
+                    pointer,
+                    None,
+                    generation,
+                )
+                .await
+            },
+        ))
+        .buffered(REF_PREPARATION_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+    let compacted = prepared
+        .iter()
+        .filter_map(|(_, compacted)| compacted.clone())
+        .collect::<Vec<_>>();
+    upload_immutable_runs(router, compacted).await?;
+    if cancel.is_cancelled() {
+        return Err(WriteError::Cancelled);
+    }
+    let refs = prepared.into_iter().map(|(prepared, _)| prepared).collect();
+    publish_refs(router, base, transaction, refs).await
+}
+
+async fn publish_refs(
+    router: &StoreLayout<Store>,
+    base: RootSnapshot,
+    transaction: &CapsuleTransaction,
+    refs: Vec<PreparedRefHead>,
+) -> Result<RootSnapshot> {
     let transaction_id = transaction.id()?;
 
     if refs.len() == 1 && transaction.plan_id().is_none() {
@@ -392,7 +556,7 @@ pub async fn publish_prepared(
             crab_metadata::capsule_protocol::prepare_capsule_plan(
                 router.store(),
                 router,
-                &transaction,
+                transaction,
                 &activation_id,
             )
             .await?,
@@ -597,13 +761,22 @@ pub async fn materialize_coordinated_repair(
         }
     }
     let leaf = &run;
+    let pointer = &run_pointer(&run)?;
     let generation = base.record().root().generation();
     let transaction_key = descriptor.transaction_id.as_str();
     let prepared =
         futures_util::stream::iter(transaction.edits().iter().cloned().zip(snapshots).map(
             move |(edit, snapshot)| async move {
-                prepare_ref_successor(router, snapshot, &edit, transaction_key, leaf, generation)
-                    .await
+                prepare_ref_successor(
+                    router,
+                    snapshot,
+                    &edit,
+                    transaction_key,
+                    pointer,
+                    Some(leaf),
+                    generation,
+                )
+                .await
             },
         ))
         .buffered(REF_PREPARATION_CONCURRENCY)
@@ -1144,23 +1317,16 @@ async fn prepare_ref_successor(
     snapshot: RefHeadSnapshot,
     edit: &crab_metadata::capsule_protocol::CapsuleRefEdit,
     transaction_id: &str,
+    leaf: &CapsulePointer,
     // The immutable leaf owns the full object/member admission map. Sharing it
-    // avoids copying repository-sized evidence once for every edited ref.
-    leaf: &CapsuleRun,
+    // avoids copying repository-sized evidence once for every edited ref. A
+    // streamed leaf is already stored, so compaction reads it like any source.
+    known_leaf: Option<&CapsuleRun>,
     generation: u64,
 ) -> Result<(PreparedRefHead, Option<CapsuleRun>)> {
     let mut frontier = snapshot.visible.frontier().to_vec();
-    frontier.push(CapsulePointer::new(
-        leaf.hash(),
-        leaf.bytes().len() as u64,
-        leaf.control_offset(),
-        leaf.control_size(),
-        leaf.footer_hash(),
-        leaf.level(),
-        leaf.transaction_ids(),
-        leaf.newest_base_root_digest(),
-    )?);
-    let compacted = compact_ref_frontier(router, &mut frontier, leaf).await?;
+    frontier.push(leaf.clone());
+    let compacted = compact_ref_frontier(router, &mut frontier, known_leaf).await?;
     if compacted.is_some() {
         let remaining = frontier
             .iter()
@@ -2190,6 +2356,101 @@ mod tests {
         .unwrap()
     }
 
+    struct MemorySource(Bytes);
+
+    #[async_trait::async_trait]
+    impl crab_storage::MultipartUploadSource for MemorySource {
+        async fn byte_len(&self) -> crab_storage::Result<u64> {
+            Ok(self.0.len() as u64)
+        }
+
+        async fn read_exact(&self, offset: u64, length: usize) -> crab_storage::Result<Bytes> {
+            Ok(self.0.slice(offset as usize..offset as usize + length))
+        }
+    }
+
+    #[tokio::test]
+    async fn streamed_publication_stores_the_canonical_run_and_publishes_every_ref() {
+        use crab_metadata::capsule_protocol::{
+            DetachedGitPack, DetachedPackCapsule, StreamedLeafRun,
+        };
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store, "repositories/streamed".to_owned());
+        let base = initialize(&router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let transaction = multi_ref_transaction(&base);
+        let pack = Bytes::from(vec![7; 3 * 1024 * 1024]);
+        let members = vec![vec![[4; 20]]];
+        let expected = CapsuleRun::leaf_with_member_oids(
+            Capsule::build(
+                &transaction,
+                vec![
+                    CapsuleGitPack::new(
+                        pack.clone(),
+                        Bytes::from_static(b"index"),
+                        Bytes::from_static(b"reverse"),
+                        Bytes::from_static(b"locator"),
+                        "4".repeat(40),
+                        1,
+                    )
+                    .unwrap(),
+                ],
+                Vec::new(),
+            )
+            .unwrap(),
+            members.clone(),
+        )
+        .unwrap();
+        let prefix = DetachedPackCapsule::prefix(&transaction).unwrap();
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&prefix);
+        hasher.update(&pack);
+        let detached = DetachedPackCapsule::build(
+            &transaction,
+            DetachedGitPack {
+                length: pack.len() as u64,
+                blake3: blake3::hash(&pack).to_hex().to_string(),
+                index: Bytes::from_static(b"index"),
+                reverse_index: Bytes::from_static(b"reverse"),
+                locator: Bytes::from_static(b"locator"),
+                git_checksum: "4".repeat(40),
+                object_count: 1,
+            },
+            Vec::new(),
+            hasher,
+        )
+        .unwrap();
+        let run = StreamedLeafRun::build(detached, members).unwrap();
+        let mut wire = prefix.to_vec();
+        wire.extend_from_slice(&pack);
+        wire.extend_from_slice(run.suffix());
+        let body = Arc::new(MemorySource(Bytes::from(wire)));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        publish_streamed(&router, base, &transaction, &run, body.clone(), &cancel)
+            .await
+            .unwrap();
+        let (stored, _) = router
+            .store()
+            .get_with_etag_bounded(&router.capsule_path(run.hash()), run.size())
+            .await
+            .unwrap();
+        assert_eq!(stored, *expected.bytes());
+        let root = open_root(&router).await.unwrap();
+        for edit in transaction.edits() {
+            let head = read_ref_head(&router, root.record().root(), edit.ref_name())
+                .await
+                .unwrap();
+            assert_eq!(head.visible.oid(), edit.new_oid());
+        }
+        // A retried attempt finds the immutable run and only races on ref heads.
+        let retry = publish_streamed(&router, root, &transaction, &run, body, &cancel).await;
+        assert!(matches!(
+            retry,
+            Err(WriteError::RefChanged { .. } | WriteError::CorruptObject { .. })
+        ));
+    }
+
     #[tokio::test]
     async fn large_publication_keeps_the_async_runtime_available() {
         let store = Store::new(Arc::new(InMemory::new()));
@@ -2756,7 +3017,8 @@ mod tests {
             snapshot,
             &transaction.edits()[0],
             &transaction_id,
-            &leaf,
+            &run_pointer(&leaf).unwrap(),
+            Some(&leaf),
             base.record().root().generation(),
         )
         .await
