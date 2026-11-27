@@ -235,7 +235,7 @@ jobs:
   repository-ui:
     name: Repository browser interactions (${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
-    # Each shard runs about 180 tests on two workers, roughly nine minutes on
+    # Each shard runs about 180 tests on two workers, roughly ten minutes on
     # hosted runners before setup.
     timeout-minutes: 20
     needs: changes
