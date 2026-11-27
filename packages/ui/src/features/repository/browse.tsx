@@ -4,9 +4,9 @@ import { Button } from "@/components/ui/button";
 import {
   BookIcon,
   FileDirectoryFillIcon,
-  FileIcon,
   GitCommitIcon,
 } from "@primer/octicons-react";
+import { FileTypeIcon } from "./file-type-icon";
 import {
   displayHex,
   endpoint,
@@ -229,7 +229,10 @@ export function Directory({
                               {entry.kind === "Tree" ? (
                                 <FileDirectoryFillIcon className="folder-icon" />
                               ) : (
-                                <FileIcon className="file-icon" />
+                                <FileTypeIcon
+                                  path={entry.path}
+                                  className="file-icon"
+                                />
                               )}
                               {entry.path.split("/").pop()}
                             </Link>

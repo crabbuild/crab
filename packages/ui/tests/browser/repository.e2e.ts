@@ -4793,3 +4793,97 @@ test("Danger Zone renders compact grouped rows with clear section spacing in lig
   ).toBeLessThanOrEqual(390);
   await expectNoAccessibilityViolations(page);
 });
+
+test("directory file table uses file-type-specific icons in light and dark themes", async ({
+  page,
+}) => {
+  await page.route("**/api/repos/team/project/tree?*", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("path_hex")) return route.fallback();
+    return route.fulfill({
+      json: {
+        items: [
+          {
+            path: "crates",
+            path_hex: pathHex("crates"),
+            kind: "Tree",
+            oid,
+            mode: "040000",
+          },
+          {
+            path: "allocations.md",
+            path_hex: pathHex("allocations.md"),
+            kind: "Blob",
+            oid,
+            mode: "100644",
+          },
+          {
+            path: "bindings.rs",
+            path_hex: pathHex("bindings.rs"),
+            kind: "Blob",
+            oid,
+            mode: "100644",
+          },
+          {
+            path: "app.ts",
+            path_hex: pathHex("app.ts"),
+            kind: "Blob",
+            oid,
+            mode: "100644",
+          },
+          {
+            path: "Cargo.toml",
+            path_hex: pathHex("Cargo.toml"),
+            kind: "Blob",
+            oid,
+            mode: "100644",
+          },
+        ],
+        next: null,
+        commit: oid,
+        directory_oid: oid,
+        generation: 1,
+      },
+    });
+  });
+
+  await page.goto("/team/project");
+  const fileTable = page.locator(".file-table");
+  await expect(fileTable).toBeVisible();
+
+  const spriteInfo = await page.evaluate(() => {
+    const sprites = document.querySelectorAll("#crab-file-type-icon-sprite");
+    const sprite = sprites[0];
+    const markdownSymbol = sprite?.querySelector("#file-tree-builtin-markdown");
+    const rustSymbol = sprite?.querySelector("#file-tree-builtin-rust");
+    return {
+      count: sprites.length,
+      markdownNs: markdownSymbol?.namespaceURI,
+      rustNs: rustSymbol?.namespaceURI,
+    };
+  });
+  expect(spriteInfo).toEqual({
+    count: 1,
+    markdownNs: "http://www.w3.org/2000/svg",
+    rustNs: "http://www.w3.org/2000/svg",
+  });
+
+  for (const [token, symbolName] of [
+    ["markdown", "file-tree-builtin-markdown"],
+    ["rust", "file-tree-builtin-rust"],
+    ["typescript", "file-tree-builtin-typescript"],
+    ["default", "file-tree-builtin-default"],
+  ] as const) {
+    const icon = fileTable.locator(`svg.file-icon[data-icon-token="${token}"]`);
+    await expect(icon).toBeVisible();
+    await expect(icon.locator("use")).toHaveAttribute("href", `#${symbolName}`);
+    const box = await icon.boundingBox();
+    expect(box).not.toBeNull();
+    expect(Math.round(box!.width)).toBe(16);
+    expect(Math.round(box!.height)).toBe(16);
+  }
+
+  await expectNoAccessibilityViolations(page);
+  await selectDarkTheme(page);
+  await expectNoAccessibilityViolations(page);
+});
