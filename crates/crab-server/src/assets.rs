@@ -30,7 +30,7 @@ pub(crate) async fn serve(request: Request) -> Response {
         [
             "-",
             "profile" | "notifications" | "code-search" | "discussion-search" | "organizations"
-            | "public" | "work" | "repositories" | "settings",
+            | "public" | "work" | "repositories" | "settings" | "new",
         ]
         | ["-", "notifications", "watched" | "subscriptions"]
         | ["-", "repositories", "personal"]
@@ -251,6 +251,12 @@ mod tests {
             ("/-/public?q=open-library", StatusCode::OK),
             ("/-/public/unknown", StatusCode::NOT_FOUND),
             ("/-/organizations", StatusCode::OK),
+            ("/-/new", StatusCode::OK),
+            (
+                "/-/new?organization=01900000-0000-7000-8000-000000000001",
+                StatusCode::OK,
+            ),
+            ("/-/new/unknown", StatusCode::NOT_FOUND),
             ("/-/organizations/new", StatusCode::OK),
             ("/-/organizations/new/unknown", StatusCode::NOT_FOUND),
             (
