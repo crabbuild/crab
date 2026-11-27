@@ -482,6 +482,7 @@ impl<'a> crab_sdk::results::Results<'a>
 pub fn crab_sdk::results::Results<'a>::blob(&self, alloc::string::String) -> crab_sdk::operation::Request<'a, alloc::vec::Vec<u8>, crab_sdk::operation::Options>
 pub fn crab_sdk::results::Results<'a>::read(&self, crab_workflow::results::reader::ResultsRead) -> crab_sdk::operation::Request<'a, crab_workflow::results::reader::ResultsResponse, crab_sdk::operation::Options>
 pub mod crab_sdk::storage
+pub use crab_sdk::storage::CdnPublicationFile
 pub struct crab_sdk::storage::AzureOptions
 impl crab_sdk::storage::AzureOptions
 pub fn crab_sdk::storage::AzureOptions::access_key(&str, &str, &str) -> crab_sdk::Result<Self>
@@ -490,9 +491,16 @@ pub fn crab_sdk::storage::AzureOptions::sas(&str, &str, &str) -> crab_sdk::Resul
 pub fn crab_sdk::storage::AzureOptions::with_endpoint(self, &str) -> Self
 impl core::fmt::Debug for crab_sdk::storage::AzureOptions
 pub fn crab_sdk::storage::AzureOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct crab_sdk::storage::CdnIssuerOptions(_)
+impl crab_sdk::storage::CdnIssuerOptions
+pub fn crab_sdk::storage::CdnIssuerOptions::new(&str, &str, &str, impl core::convert::AsRef<std::path::Path>) -> crab_sdk::Result<Self>
 pub struct crab_sdk::storage::ContentCache
 impl crab_sdk::storage::ContentCache
 pub fn crab_sdk::storage::ContentCache::new(&std::path::Path, impl core::convert::Into<core::option::Option<u64>>) -> crab_sdk::Result<Self>
+pub struct crab_sdk::storage::DirectCdnOptions
+impl crab_sdk::storage::DirectCdnOptions
+pub fn crab_sdk::storage::DirectCdnOptions::private_export(&str, &str, &str, crab_sdk::storage::CdnIssuerOptions, core::option::Option<&str>) -> crab_sdk::Result<Self>
+pub fn crab_sdk::storage::DirectCdnOptions::public_export(&str, &str, &str, &str, core::option::Option<crab_types::storage::CdnPublicationFile>) -> crab_sdk::Result<Self>
 pub struct crab_sdk::storage::DirectStoreOptions
 impl crab_sdk::storage::DirectStoreOptions
 pub fn crab_sdk::storage::DirectStoreOptions::azure(crab_sdk::storage::AzureOptions) -> Self
@@ -561,7 +569,9 @@ impl crab_sdk::ClientBuilder
 pub fn crab_sdk::ClientBuilder::build(self) -> crab_sdk::Result<crab_sdk::Client>
 impl crab_sdk::ClientBuilder
 pub fn crab_sdk::ClientBuilder::content_cache(self, crab_sdk::storage::ContentCache) -> Self
+pub fn crab_sdk::ClientBuilder::direct_cdn(self, crab_sdk::storage::DirectCdnOptions) -> Self
 pub fn crab_sdk::ClientBuilder::direct_store(self, crab_sdk::storage::DirectStoreOptions) -> Self
+pub fn crab_sdk::ClientBuilder::for_desktop_browsing(self) -> Self
 pub fn crab_sdk::ClientBuilder::local(self, crab_sdk::local::Options) -> Self
 pub fn crab_sdk::ClientBuilder::managed(self, crab_sdk::managed::Options) -> Self
 pub struct crab_sdk::Error
