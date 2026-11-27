@@ -1032,16 +1032,31 @@ recent deletions. Reuse the same request ID after a lost deletion response.
 
 The catalog page exposes **Import from Git** for an authenticated browser
 session. The workflow accepts a public or private repository from an
-allowlisted Git host, creates a new Crab repository, and copies its Git history
-and refs into the configured object store. It does not migrate Git LFS payloads;
-use the native Git/LFS workflow for repositories whose large files must be
-copied as well.
+allowlisted Git host and creates a new Crab repository with the source's
+branches (`refs/heads/*`), tags (`refs/tags/*`), and default branch. Other
+namespaces, such as provider pull-request refs (`refs/pull/*`) and notes, are
+not imported, and history reachable only from them is never fetched. Git LFS
+payloads named by imported pointer files are copied from the source's LFS batch
+API and verified by SHA-256 and size before any ref becomes visible.
+
+An import never clones to local disk. Crab fetches one pack over Git protocol v2
+smart HTTP and streams it into a staging object under
+`.crab/http-server/v1/git-imports/staging/` while it verifies every pack frame.
+It then reads the staged pack once more to reconstruct and identify every
+object, checks the same object rules as a push, and publishes the pack with its
+deltas intact. A resumed job reuses a complete staged pack instead of fetching
+it again, and a published import deletes it. An import accepts packs up to
+64 GiB with at most 10 million objects of up to 256 MiB each, and holds at most
+about 1 GiB of delta bases and read windows while it reconstructs objects.
 
 | Endpoint | Contract |
 | --- | --- |
-| `POST /api/imports/git` | Starts an asynchronous import. The JSON body is `{request_id?, source, owner, name, description?, visibility?, token?}`. `visibility` is `private` (default) or `public`. `source` is an HTTPS or SSH clone URL (or GitHub `owner/repository` shorthand) whose host appears in `import.allowed_hosts`. HTTPS tokens are sent as bearer headers and remain in memory. Browser requests require the session CSRF token. An exact request UUID replay returns the existing job. |
-| `GET /api/imports/git/{id}` | Reads the caller's job from object storage on any serving replica. States are `queued`, `running`, `succeeded`, `failed`, and `interrupted`. The response includes the saved `visibility`, `resumable`, and the destination link after success. |
+| `POST /api/imports/git` | Starts an asynchronous import. The JSON body is `{request_id?, source, owner, name, description?, visibility?, token?, mirror?}`. `visibility` is `private` (default) or `public`. `source` is an HTTPS clone URL, GitHub `owner/repository` shorthand, or a GitHub SSH URL (fetched over HTTPS), whose host appears in `import.allowed_hosts`. Plain HTTP is accepted only for a loopback host. HTTPS tokens are sent as bearer headers and remain in memory. `mirror: true` keeps the repository as a read-only pull mirror and accepts no token. Browser requests require the session CSRF token. An exact request UUID replay returns the existing job. |
+| `GET /api/imports/git/{id}` | Reads the caller's job from object storage on any serving replica. States are `queued`, `running`, `succeeded`, `failed`, and `interrupted`. The response includes the saved `visibility`, `mirror` when set, `resumable`, and the destination link after success. |
 | `POST /api/imports/git/{id}/resume` | Resumes a failed or interrupted job as the original account. Send the session CSRF token and a JSON body of `{}` or `{"token":"…"}` for a private HTTPS source. An active or completed job returns its existing status. |
+| `GET /api/repositories/{repository}/mirror` | Reads a pull mirror's upstream `source` and its last sync `status`: `checked_at_ms`, `synced_at_ms`, `updated_refs`, and `error`. Requires read access. |
+| `POST /api/repositories/{repository}/mirror/sync` | Syncs the mirror now and returns the same shape. Requires write access. A failed sync returns `502` with code `mirror_sync_failed` and its reason, and leaves every ref unchanged. |
+| `DELETE /api/repositories/{repository}/mirror` | Stops mirroring; the repository accepts pushes again. Requires admin access and returns `204`. |
 
 People with repository creation permission use **Import from Git** in the
 organization's **Repositories** tab or from the repository owner picker.
@@ -1071,17 +1086,40 @@ is recorded in the organization Cell for the exact prepared repository and
 snapshot, after repository Cell preparation. When authority ends before that
 decision, the destination remains private until a current owner resumes it.
 
+#### Read-only pull mirrors
+
+An import with `mirror: true` keeps following its upstream. Every 15 minutes,
+and on request, a sync lists the upstream's branches and tags, fetches only the
+objects the mirror lacks, and moves each changed ref to the upstream's value.
+New refs are created, rewritten refs are replaced, and refs deleted upstream
+are deleted. The default branch follows the upstream `HEAD`. A sync publishes
+through the same validation, visibility, and LFS checks as a push, as the
+`Git mirror` identity. It sends push webhooks, but it does not record push
+attribution or close issues that upstream commit messages name. Organization
+rulesets inherited by the repository still apply.
+
+Nothing else moves a mirror's refs. Git pushes are refused before any upload,
+and browser branch, file, merge, and default-branch changes return `403`. One
+lease per mirror serializes its syncs across replicas and with **stop
+mirroring**. A sync stages only the incremental pack, in the Cell local-disk
+budget, up to 8 GiB. Source credentials are never stored, so a mirror reads its
+upstream anonymously; mirror a source that allows anonymous reads. Each sync
+rechecks `import.allowed_hosts`, so removing a host stops its mirrors. Sync
+status records live under `.crab/http-server/v1/git-mirrors/`. Upgrade every
+serving replica before creating the first mirror: earlier builds cannot read a
+catalog that records one.
+
 Status records live under `.crab/http-server/v1/git-imports/` within the configured
 root. A worker updates the record every 15 seconds. After 60 seconds without
 an update, an unfinished job reports `interrupted`. The browser stores only
 the last job UUID for that account in the current tab and resumes status polling
 after a reload. Choose **Resume import** to continue with the same destination
 and job ID. If Git publication already committed, Crab can finish without
-contacting the source. Otherwise, it clones again and requires the same default
-branch and ref tips if the original attempt already pinned them. Supply a
-fresh source token if the clone needs one. Jobs from before resumable import
-support remain readable and have `resumable: false`. Upgrade serving replicas
-together before starting new imports.
+contacting the source. Otherwise, it lists the source again and requires the
+same default branch and ref tips if the original attempt already pinned them.
+Supply a fresh source token if the fetch needs one. Jobs from before resumable
+import support remain readable and have `resumable: false`. Upgrade serving
+replicas together before starting new imports.
 
 Configure additional Git hosts explicitly:
 
@@ -1090,26 +1128,28 @@ Configure additional Git hosts explicitly:
 allowed_hosts = ["github.com", "gitlab.com", "git.example.internal"]
 ```
 
-Hosts are exact, lower-case matches. The server accepts HTTPS and SSH clone
-URLs only; file paths, `git://`, embedded credentials, query strings, and
-fragments are rejected. Child Git commands disable inherited credential
-helpers and HTTP redirects. Keep outbound network policy enabled as a second
-boundary for private deployments.
+Hosts are exact, lower-case matches. The server fetches HTTPS clone URLs;
+GitHub SSH URLs and shorthand map to their HTTPS form, and plain HTTP is
+accepted only for loopback hosts. SSH URLs for other hosts, file paths,
+`git://`, embedded credentials, query strings, and fragments are rejected.
+Git fetches do not follow redirects; LFS downloads follow at most five HTTPS
+redirects. Keep outbound network policy enabled as a second boundary for
+private deployments.
 
 On success, the importing identity is the new repository's administrator for
 account-scoped imports in an authenticated deployment. A local-trust deployment
 uses the local operator. Crab pins the default branch and ref tips, reserves a
-destination, and publishes through the server's atomic Git receive. The catalog exposes the repository after it
+destination, and publishes every ref in one capsule under ref leases and
+organization ruleset checks. The catalog exposes the repository after it
 verifies all refs and finishes Cell initialization. Git browse indexes and
-attribution are then rebuilt in the background. Large mirrors, including
-provider pull-request refs, can take longer during verified visibility planning.
-Each server allows four concurrent imports. Cloning and publication have a
-30-minute command deadline. Transient publication failures retry with bounded
-backoff. A job that reserved a name retains that reservation for future resumes.
-The runtime image includes `git`. Each import reserves up to 8 GiB from the
-Cell local-disk budget while cloning and shrinks the reservation to the measured
-mirror plus a command margin. `TMPDIR` needs space for Git process scratch
-files. The server needs outbound access to the configured Git host or proxy.
+attribution are then rebuilt in the background. Each server allows four
+concurrent imports. A stalled source fails after two minutes without data. A
+job that reserved a name retains that reservation for future resumes. Imports
+from external hosts use no local disk. Forks of Crab repositories still copy
+through the runtime image's `git`: they reserve up to 8 GiB from the Cell
+local-disk budget while cloning, shrink the reservation to the measured mirror
+plus a command margin, and have a 30-minute command deadline. The server needs
+outbound access to the configured Git host or proxy.
 
 ### Public and private forks
 

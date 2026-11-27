@@ -464,6 +464,7 @@ pub async fn serve(config: Config) -> Result<()> {
                   let mentions = server.clone();
                   background.spawn(async move { self::mentions::sweep(mentions).await; Ok(()) });
                   background.spawn(background::sweep_notification_filing(server.clone()));
+                  background.spawn(crate::git_import::mirror::run(server.clone()));
                   if server.email.is_some() {
                       background.spawn(email::run(server.clone()));
                   }

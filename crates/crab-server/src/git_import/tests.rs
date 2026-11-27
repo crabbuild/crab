@@ -13,6 +13,8 @@ use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
 
 mod members;
+mod mirror;
+mod native;
 mod xet;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -45,6 +47,7 @@ async fn resumes_published_git_snapshot_after_worker_loss() {
     let request = ValidatedImport {
         fork_source: None,
         default_branch_only: false,
+        mirror: false,
         source: "https://127.0.0.1:1/offline-source.git".into(),
         owner: "team".into(),
         name: "imported".into(),
@@ -76,6 +79,7 @@ async fn resumes_published_git_snapshot_after_worker_loss() {
                 description: request.description,
                 visibility: request.visibility,
                 forked_from: None,
+                mirror: None,
             },
             MembershipActor {
                 issuer: actor.issuer,
@@ -379,6 +383,7 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
                 description: request.description,
                 visibility: request.visibility,
                 forked_from: None,
+                mirror: None,
             },
             MembershipActor {
                 issuer: h.provider.issuer.clone(),

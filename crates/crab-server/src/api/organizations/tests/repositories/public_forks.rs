@@ -190,6 +190,7 @@ async fn public_forks_keep_destination_grants_and_survive_upstream_changes() {
                 description: String::new(),
                 visibility: crate::catalog::visibility::Visibility::Public,
                 forked_from: Some(source_id),
+                mirror: None,
             },
             MembershipActor {
                 issuer: h.provider.issuer.clone(),

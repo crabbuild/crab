@@ -1194,7 +1194,7 @@ pub(crate) async fn membership(
             return Err(Error::NotFound);
         }
     }
-    if principal.is_local() || principal.import_grant().is_some() {
+    if principal.is_local() || principal.import_grant().is_some() || principal.is_mirror() {
         if !principal.can_read(repo.id) {
             return Err(Error::NotFound);
         }

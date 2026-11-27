@@ -161,6 +161,7 @@ export function GitImport({
   const [name, setName] = useState(defaultName);
   const [description, setDescription] = useState("");
   const [defaultBranchOnly, setDefaultBranchOnly] = useState(true);
+  const [mirror, setMirror] = useState(false);
   const [visibility, setVisibility] = useState<RepositoryVisibility>("private");
   const [properties, setProperties] = useState<PropertyOverrides>({});
   const incomplete = needsExplicitPropertyValues(definitions, properties);
@@ -321,6 +322,7 @@ export function GitImport({
       name: repositoryName.trim(),
       description: description.trim() || undefined,
       visibility: selectedVisibility ?? "private",
+      ...(!fork && mirror ? { mirror: true } : {}),
       ...(jobOrganization && Object.keys(properties).length
         ? { properties }
         : {}),
@@ -354,7 +356,7 @@ export function GitImport({
             {
               ...fields,
               request_id,
-              token: token || undefined,
+              token: (!mirror && token) || undefined,
             },
             csrf,
             organizationId,
@@ -413,9 +415,9 @@ export function GitImport({
               )
             ) : (
               <>
-                Crab copies Git history and refs from an allowed Git host into
-                your object storage. An HTTPS token is only needed for private
-                repositories and is never stored.
+                Crab copies branches, tags, and Git LFS files from an allowed
+                Git host straight into your object storage. An HTTPS token is
+                only needed for private repositories and is never stored.
               </>
             )}
           </p>
@@ -560,19 +562,22 @@ export function GitImport({
               disabled={fixedDestination}
             />
           </label>
-          {!forkJob && (!job || job.resumable) && (
-            <label>
-              Source token <span className="muted">(HTTPS private repos)</span>
-              <Input
-                type="password"
-                value={token}
-                onChange={(event) => setToken(event.target.value)}
-                placeholder="Optional personal access token"
-                autoComplete="new-password"
-                disabled={running || submitting}
-              />
-            </label>
-          )}
+          {!forkJob &&
+            !(job ? job.mirror : mirror) &&
+            (!job || job.resumable) && (
+              <label>
+                Source token{" "}
+                <span className="muted">(HTTPS private repos)</span>
+                <Input
+                  type="password"
+                  value={token}
+                  onChange={(event) => setToken(event.target.value)}
+                  placeholder="Optional personal access token"
+                  autoComplete="new-password"
+                  disabled={running || submitting}
+                />
+              </label>
+            )}
           {!forkJob && (
             <Field>
               <FieldLabel htmlFor="git-import-visibility">
@@ -613,6 +618,27 @@ export function GitImport({
             </label>
           )}
         </div>
+        {!forkJob && (
+          <Field orientation="horizontal">
+            <Checkbox
+              id="git-import-mirror"
+              aria-describedby="git-import-mirror-help"
+              checked={job ? (job.mirror ?? false) : mirror}
+              disabled={!!job || running || submitting}
+              onCheckedChange={(checked) => setMirror(checked === true)}
+            />
+            <FieldContent>
+              <FieldLabel htmlFor="git-import-mirror">
+                Keep as a read-only mirror
+              </FieldLabel>
+              <FieldDescription id="git-import-mirror-help">
+                Crab follows the source&apos;s branches and tags every 15
+                minutes. Pushes and browser edits are refused, and the source
+                must allow reads without a token.
+              </FieldDescription>
+            </FieldContent>
+          </Field>
+        )}
         {forkJob && (
           <Field orientation="horizontal">
             <Checkbox

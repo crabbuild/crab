@@ -2,6 +2,7 @@
 
 pub(crate) mod archive;
 pub(crate) mod git;
+pub(crate) mod git_host;
 pub(crate) mod http;
 pub(crate) mod server;
 

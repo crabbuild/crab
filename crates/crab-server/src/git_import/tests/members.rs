@@ -148,6 +148,7 @@ async fn member_import_preserves_destination_policy_and_creator_during_owner_rec
             description: request.description.clone(),
             visibility: request.visibility,
             forked_from: None,
+            mirror: None,
         },
     )
     .await

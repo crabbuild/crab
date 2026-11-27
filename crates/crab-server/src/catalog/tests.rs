@@ -676,6 +676,7 @@ async fn import_reservation_rejects_an_existing_repository() {
                 description: String::new(),
                 visibility: visibility::Visibility::Private,
                 forked_from: None,
+                mirror: None,
             },
             MembershipActor {
                 issuer: "issuer".into(),

@@ -34,6 +34,8 @@ pub(crate) struct Repository {
     pub(crate) property_seed: Option<Uuid>,
     pub(crate) forked_from: Option<Uuid>,
     pub(crate) public_fork: bool,
+    /// Upstream clone URL of a read-only pull mirror.
+    pub(crate) mirror: Option<String>,
     pub(crate) topics: Vec<String>,
     pub(crate) config: RepositoryConfig,
     pub(crate) store: Store,
@@ -140,6 +142,7 @@ impl Repository {
             property_seed: None,
             forked_from: None,
             public_fork: false,
+            mirror: None,
             topics: Vec::new(),
             config,
             store: layout.store().clone(),
