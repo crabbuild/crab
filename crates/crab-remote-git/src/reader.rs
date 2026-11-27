@@ -712,7 +712,8 @@ impl RemoteGitReader {
         // bytes are not a locator, visibility proof, or verified Git object.
         self.pack_path_range(pack_id, start, end)?;
         let options = self.runtime.options();
-        let cache_enabled = options.max_object_cache_entries > 0
+        let cache_enabled = self.runtime.pack_windows_enabled()
+            && options.max_object_cache_entries > 0
             && options.max_object_cache_bytes >= crate::runtime::PACK_WINDOW_BYTES as usize;
         let pack_size = self.inventory.get(pack_id).map(|pack| pack.pack_size);
         let mut window = None;
