@@ -30,8 +30,16 @@ async fn a_foreign_private_fork_keeps_destination_ownership_and_inherits_source_
             app::mutation_identity().unwrap(),
             BootstrapInput {
                 actor: bob_actor,
+                handle: crate::catalog::derive_organization_handle(
+                    "release-engineering",
+                    destination,
+                ),
                 name: "Release engineering".into(),
                 description: String::new(),
+                website: String::new(),
+                email: String::new(),
+                location: String::new(),
+                avatar: None,
             },
         )
         .await
@@ -209,7 +217,7 @@ async fn a_foreign_private_fork_keeps_destination_ownership_and_inherits_source_
         .unwrap()
     };
     let job = completed(&job_path, &bob).await;
-    let namespace = crate::catalog::organization_namespace(destination);
+    let namespace = crate::catalog::derive_organization_handle("release-engineering", destination);
     assert_eq!(job["repository"]["owner"], namespace);
     let detail = format!("/api/repos?owner={namespace}&name=library");
     let fork = h.json(&detail, &bob).await["repositories"][0].clone();

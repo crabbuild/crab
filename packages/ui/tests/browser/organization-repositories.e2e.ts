@@ -8,7 +8,7 @@ test("organization repository creation recovers its owner-scoped request after r
   const alice = "01900000-0000-7000-8000-000000000011";
   const bob = "01900000-0000-7000-8000-000000000012";
   const property = "01900000-0000-7000-8000-000000000013";
-  const owner = `org-${organization.replaceAll("-", "")}`;
+  const owner = "crab-engineering";
   const repository = {
     id: "01900000-0000-7000-8000-000000000014",
     owner,
@@ -47,12 +47,29 @@ test("organization repository creation recovers its owner-scoped request after r
           },
         },
       });
+    if (pathname === `/api/organizations/by-handle/${owner}`) {
+      if (!organizationVisible) return route.fulfill({ status: 404 });
+      return route.fulfill({
+        json: {
+          organization: {
+            id: organization,
+            handle: owner,
+            name: "Crab Engineering",
+            description: "",
+            version: 1,
+          },
+          actor,
+          role,
+        },
+      });
+    }
     if (pathname === orgApi) {
       if (!organizationVisible) return route.fulfill({ status: 404 });
       return route.fulfill({
         json: {
           organization: {
             id: organization,
+            handle: owner,
             name: "Crab Engineering",
             description: "",
             version: 1,
@@ -216,9 +233,7 @@ test("organization repository creation recovers its owner-scoped request after r
   await banner
     .getByRole("link", { name: "Crab Engineering", exact: true })
     .click();
-  await expect(page).toHaveURL(
-    new RegExp(`/crab-engineering--${organization}\\?tab=repositories$`),
-  );
+  await expect(page).toHaveURL(new RegExp(`/${owner}\\?tab=repositories$`));
 
   actor = bob;
   role = "member";
@@ -300,6 +315,7 @@ test("an eligible member imports with the allowed visibility and an owner can re
         json: {
           organization: {
             id: organization,
+            handle: owner,
             name: "Crab Engineering",
             description: "",
             version: 1,

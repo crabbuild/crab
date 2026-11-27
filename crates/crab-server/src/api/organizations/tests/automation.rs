@@ -319,6 +319,7 @@ async fn automation_follows_renames_and_a_returned_repository_requires_a_new_gra
                     id: offer,
                     requester: person.clone(),
                     recipient: Recipient::Organization { id: target },
+                    destination_handle: None,
                     recipient_label: "Qualification destination".into(),
                     name: name.into(),
                     version: state.repository_by_id(repository).unwrap().name_version(),

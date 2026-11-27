@@ -82,21 +82,25 @@ export function resolveAvatar(
   return { variant, seed, colors };
 }
 
-// Organizations have no stored picture. Seeding by the stable UUID keeps the
-// square identicon unchanged across renames, like a GitHub organization avatar.
+// Default to a stable pixel identicon seeded from the organization UUID until
+// an owner customizes the organization avatar.
 export function OrganizationAvatar({
   id,
+  avatar,
   size = 32,
   className,
 }: {
   id: string;
+  avatar?: AvatarConfig | null;
   size?: number;
   className?: string;
 }) {
   return (
     <UserAvatar
       name={id}
-      avatar={{ variant: "pixel", seed: id, colors: DEFAULT_AVATAR_COLORS }}
+      avatar={
+        avatar ?? { variant: "pixel", seed: id, colors: DEFAULT_AVATAR_COLORS }
+      }
       size={size}
       square
       className={className}

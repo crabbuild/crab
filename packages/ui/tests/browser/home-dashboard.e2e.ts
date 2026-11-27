@@ -82,6 +82,7 @@ test("home dashboard renders GitHub-style layout, filters, feed, drawer, and com
               can_create_public: true,
               organization: {
                 id: orgId,
+                handle: "crabbuild",
                 name: "crabbuild",
                 description: "Crab engineering",
                 version: 1,

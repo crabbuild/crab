@@ -267,6 +267,7 @@ export function ProfileSettings({
                       >
                         <OrganizationAvatar
                           id={entry.organization.id}
+                          avatar={entry.organization.avatar}
                           size={16}
                         />
                         <span className="truncate">

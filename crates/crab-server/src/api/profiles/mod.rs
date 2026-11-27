@@ -270,7 +270,7 @@ async fn namespace_available(server: &Server, identity: &IdentityKey, handle: &s
         .await
         .map_err(|error| app::Error::Membership(Box::new(error)))?;
     let account = crate::catalog::personal_namespace(&identity.issuer, &identity.subject);
-    if document.namespace_bound_to(handle, Some(&account)) {
+    if document.namespace_bound_to(handle, &crate::catalog::NamespaceOwner::Personal(account)) {
         Ok(())
     } else {
         Err(app::Error::ProfileHandleTaken)

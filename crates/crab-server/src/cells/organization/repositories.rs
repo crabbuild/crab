@@ -59,7 +59,7 @@ impl Read for GetCreationOptions {
         let organization = record(context)?.ok_or(Error::NotInitialized)?;
         let policy = repository_policy::load(context)?;
         Ok(CreationOptions {
-            owner: organization_namespace(organization.id),
+            owner: organization.handle,
             visibilities: policy.creation_visibilities(current.role).to_vec(),
             default_branch: policy.default_branch,
             properties: properties::creation_fields(context, current.role)?,

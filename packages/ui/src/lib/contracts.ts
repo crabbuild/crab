@@ -86,7 +86,7 @@ export type ReviewAvailabilityChoice = "available" | "thirty_minutes" | "one_hou
 export type OrganizationRole = "member" | "owner";
 
 // prettier-ignore
-export type Organization = { id: string, name: string, description: string, version: number, created_at_ms: number, updated_at_ms: number, };
+export type Organization = { id: string, handle: string, name: string, description: string, website?: string, email?: string, location?: string, avatar?: AvatarConfig, version: number, created_at_ms: number, updated_at_ms: number, };
 
 // prettier-ignore
 export type InvitationState = "pending" | "accepted" | "declined" | "cancelled" | "expired";

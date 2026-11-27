@@ -282,6 +282,12 @@ pub(in crate::cells) fn dispatch_read(
             invoke_read::<saved_replies::ListSavedReplies>(context, input)
         }
         organizations::Candidates::ID => invoke_read::<organizations::Candidates>(context, input),
+        organizations::ResolveOrganizationHandle::ID => {
+            invoke_read::<organizations::ResolveOrganizationHandle>(context, input)
+        }
+        organizations::GetOrganizationHandle::ID => {
+            invoke_read::<organizations::GetOrganizationHandle>(context, input)
+        }
         _ => Err(Error::Invalid("unknown directory query")),
     }
 }
@@ -299,6 +305,9 @@ pub(in crate::cells) fn dispatch_mutation(
         RegisterAccounts::ID => invoke_mutation::<RegisterAccounts>(context, input),
         organizations::RecordCandidate::ID => {
             invoke_mutation::<organizations::RecordCandidate>(context, input)
+        }
+        organizations::ClaimOrganizationHandle::ID => {
+            invoke_mutation::<organizations::ClaimOrganizationHandle>(context, input)
         }
         CreateProfile::ID => invoke_mutation::<CreateProfile>(context, input),
         EditProfile::ID => invoke_mutation::<EditProfile>(context, input),

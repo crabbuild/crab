@@ -1100,7 +1100,14 @@ async fn organization_repository_ownership_survives_creator_revocation_without_a
     ));
     let pending = catalog
         .reserve_browser_repository(
-            BrowserNamespace::Organization(id),
+            BrowserNamespace::Organization {
+                id,
+                owner: h.json(&format!("/api/organizations/{id}"), &alice).await["organization"]
+                    ["handle"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            },
             crate::catalog::BrowserCreation {
                 request_id,
                 name: "widget".into(),
@@ -1276,7 +1283,7 @@ async fn organization_repository_ownership_survives_creator_revocation_without_a
     .unwrap();
     let renamed = h.json(&root, &bob).await;
     h.write(Method::PATCH, &root, &bob,
-        json!({"version":renamed["organization"]["version"],"name":"Renamed team","description":""}))
+        json!({"version":renamed["organization"]["version"],"handle":renamed["organization"]["handle"],"name":"Renamed team","description":""}))
         .await.error_for_status().unwrap();
     let visible = h.json(&listed, &bob).await;
     assert_eq!(visible["repositories"][0]["owner"], owner);

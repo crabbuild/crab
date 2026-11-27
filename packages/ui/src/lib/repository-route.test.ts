@@ -148,6 +148,11 @@ describe("GitHub repository addresses", () => {
       { section: "members" },
     ],
     [
+      { view: "settings", section: "properties" },
+      "/team/repo.name/settings/properties",
+      { view: "settings", section: "properties" },
+    ],
+    [
       { view: "create", rev: "main", path: hex("src") },
       "/team/repo.name/new/main/src",
       { view: "create" },
@@ -238,6 +243,7 @@ describe("GitHub repository addresses", () => {
 
   it.each([
     "/team/repo.name/unknown",
+    "/team/repo.name/properties",
     "/team/repo.name/results",
     "/team/repo.name/results?report=frozen-report",
     "/team/repo.name/blob/main",

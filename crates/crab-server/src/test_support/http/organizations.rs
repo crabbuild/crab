@@ -66,14 +66,31 @@ pub(crate) async fn bootstrap_on(
         .await
         .unwrap();
     cells.initialize(Address::Organization(id)).await.unwrap();
+    let handle = format!("crab-eng-{}", &id.simple().to_string()[..8]);
+    cells
+        .command::<crate::cells::directory::organizations::ClaimOrganizationHandle>(
+            Address::Directory,
+            app::mutation_identity().unwrap(),
+            crate::cells::directory::organizations::HandleClaimInput {
+                organization: id,
+                handle: handle.clone(),
+            },
+        )
+        .await
+        .unwrap();
     cells
         .command::<Bootstrap>(
             Address::Organization(id),
             app::mutation_identity().unwrap(),
             BootstrapInput {
                 actor: actors[0],
+                handle,
                 name: "Crab engineering".into(),
                 description: "Organization authority".into(),
+                website: String::new(),
+                email: String::new(),
+                location: String::new(),
+                avatar: None,
             },
         )
         .await

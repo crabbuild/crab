@@ -837,6 +837,7 @@ async fn organization_audit_retains_each_side_of_a_transfer_and_survives_root_re
                 id: offer,
                 requester: actor(),
                 recipient: transfer::Recipient::Organization { id: current },
+                destination_handle: None,
                 recipient_label: "Destination".into(),
                 name: "renamed-on-transfer".into(),
                 version: 0,

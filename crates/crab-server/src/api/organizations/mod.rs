@@ -89,6 +89,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .merge(repository_policy::routes())
         .merge(teams::routes())
         .route("/api/organizations", get(discovery::list).post(create))
+        .route("/api/organizations/by-handle/{handle}", get(own_by_handle))
         .route("/api/organizations/{id}", get(own).patch(edit))
         .route("/api/organizations/{id}/members", get(members))
         .route(
@@ -114,12 +115,8 @@ pub(super) fn read_error(error: crate::cells::Error) -> Error {
         other => Error::Cell(other),
     }
 }
-async fn own(
-    State(server): State<Arc<Server>>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<OrganizationView>> {
-    let actor = actor(&server, &principal).await?;
+async fn load_own(server: &Server, principal: &Principal, id: Uuid) -> Result<OrganizationView> {
+    let actor = actor(server, principal).await?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     let landing = cells
         .query::<organization::discovery::GetLanding>(target(id)?, None, Caller { actor })
@@ -132,22 +129,129 @@ async fn own(
     else {
         return Err(Error::NotFound);
     };
-    app::account(&principal)?;
-    Ok(Json(OrganizationView {
+    app::account(principal)?;
+    Ok(OrganizationView {
         organization: view.organization,
         role: view.role,
         can_create,
         actor,
-    }))
+    })
 }
+
+async fn own(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<OrganizationView>> {
+    Ok(Json(load_own(&server, &principal, id).await?))
+}
+
+async fn own_by_handle(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path(handle): Path<String>,
+) -> Result<Json<OrganizationView>> {
+    let handle = handle.trim().to_ascii_lowercase();
+    if !crate::catalog::valid_organization_handle(&handle) {
+        return Err(Error::NotFound);
+    }
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let Some(id) = app::query_output(
+        cells
+            .query::<crate::cells::directory::organizations::ResolveOrganizationHandle>(
+                Address::Directory,
+                None,
+                handle,
+            )
+            .await,
+    )?
+    else {
+        return Err(Error::NotFound);
+    };
+    Ok(Json(load_own(&server, &principal, id).await?))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateRequest {
     id: Uuid,
+    handle: String,
     name: String,
     #[serde(default)]
     description: String,
+    #[serde(default)]
+    website: String,
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    location: String,
+    #[serde(default)]
+    avatar: Option<crate::cells::directory::avatar::AvatarConfig>,
 }
+
+async fn ensure_handle_available(server: &Server, handle: &str, organization: Uuid) -> Result<()> {
+    if let Some(catalog) = server.catalog() {
+        let (document, _) = catalog
+            .load_snapshot()
+            .await
+            .map_err(|error| Error::Membership(Box::new(error)))?;
+        if !document.namespace_bound_to(
+            handle,
+            &crate::catalog::NamespaceOwner::Organization(organization),
+        ) {
+            return Err(Error::ProfileHandleTaken);
+        }
+    }
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let claimed_org = app::query_output(
+        cells
+            .query::<crate::cells::directory::organizations::ResolveOrganizationHandle>(
+                Address::Directory,
+                None,
+                handle.to_owned(),
+            )
+            .await,
+    )?;
+    if claimed_org.is_some_and(|owner| owner != organization) {
+        return Err(Error::ProfileHandleTaken);
+    }
+    let resolved_users = app::query_output(
+        cells
+            .query::<crate::cells::directory::ResolveHandles>(
+                Address::Directory,
+                None,
+                vec![handle.to_owned()],
+            )
+            .await,
+    )?;
+    if matches!(resolved_users.as_slice(), [Some(_)]) {
+        return Err(Error::ProfileHandleTaken);
+    }
+    Ok(())
+}
+
+async fn claim_handle(cells: &CellClient, organization: Uuid, handle: &str) -> Result<()> {
+    use crate::cells::directory::organizations::{
+        ClaimOrganizationHandle, HandleClaimInput, HandleClaimOutcome,
+    };
+    let outcome = app::command_output(
+        cells
+            .command::<ClaimOrganizationHandle>(
+                Address::Directory,
+                app::mutation_identity()?,
+                HandleClaimInput {
+                    organization,
+                    handle: handle.to_owned(),
+                },
+            )
+            .await,
+    )?;
+    match outcome {
+        HandleClaimOutcome::Claimed => Ok(()),
+        HandleClaimOutcome::Taken => Err(Error::ProfileHandleTaken),
+    }
+}
+
 // A signed-in account founds an organization and becomes its first owner. The
 // browser supplies the fresh UUID, so a retry replays the same bootstrap rather
 // than founding a second organization; a different intent for it conflicts.
@@ -157,14 +261,24 @@ async fn create(
     Json(input): Json<CreateRequest>,
 ) -> Result<Json<organization::Organization>> {
     let address = target(input.id)?;
-    organization::details(&input.name, &input.description)
-        .map_err(|_| Error::Invalid("Organization name or description is invalid"))?;
+    let handle = input.handle.trim().to_ascii_lowercase();
+    organization::validate_profile(
+        &handle,
+        &input.name,
+        &input.description,
+        &input.website,
+        &input.email,
+        &input.location,
+        input.avatar.as_ref(),
+    )
+    .map_err(Error::Invalid)?;
     let identity = app::account(&principal)?;
     let actor = crate::repository::access::actor_id(&server, identity)
         .await?
         .ok_or(Error::Invalid(
             "Create your public profile before creating an organization",
         ))?;
+    ensure_handle_available(&server, &handle, input.id).await?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     // Discovery must know the candidate before ownership commits, or an
     // interrupted creation could leave an owner unable to find the organization.
@@ -178,21 +292,39 @@ async fn create(
                 app::mutation_identity()?,
                 BootstrapInput {
                     actor,
+                    handle: handle.clone(),
                     name: input.name,
                     description: input.description,
+                    website: input.website,
+                    email: input.email,
+                    location: input.location,
+                    avatar: input.avatar,
                 },
             )
             .await,
     )?;
-    Ok(Json(applied(outcome)?))
+    let organization = applied(outcome)?;
+    claim_handle(&cells, organization.id, &organization.handle).await?;
+    Ok(Json(organization))
 }
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EditRequest {
     version: u64,
+    handle: String,
     name: String,
     description: String,
+    #[serde(default)]
+    website: String,
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    location: String,
+    #[serde(default)]
+    avatar: Option<crate::cells::directory::avatar::AvatarConfig>,
 }
+
 async fn edit(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
@@ -200,23 +332,54 @@ async fn edit(
     Json(input): Json<EditRequest>,
 ) -> Result<Json<organization::Organization>> {
     let actor = actor(&server, &principal).await?;
+    let address = target(id)?;
+    let handle = input.handle.trim().to_ascii_lowercase();
+    organization::validate_profile(
+        &handle,
+        &input.name,
+        &input.description,
+        &input.website,
+        &input.email,
+        &input.location,
+        input.avatar.as_ref(),
+    )
+    .map_err(Error::Invalid)?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let role = cells
+        .query::<GetOrganization>(address, None, Caller { actor })
+        .await
+        .map_err(read_error)?
+        .output
+        .map(|result| result.role);
+    match role {
+        Some(Role::Owner) => {}
+        Some(Role::Member) => return Err(Error::Cell(crate::cells::Error::AccessDenied)),
+        None => return Err(Error::NotFound),
+    }
+    ensure_handle_available(&server, &handle, id).await?;
     app::account(&principal)?;
     let result = app::command_output(
         cells
             .command::<Edit>(
-                target(id)?,
+                address,
                 app::mutation_identity()?,
                 EditInput {
                     actor,
                     version: input.version,
+                    handle,
                     name: input.name,
                     description: input.description,
+                    website: input.website,
+                    email: input.email,
+                    location: input.location,
+                    avatar: input.avatar,
                 },
             )
             .await,
     )?;
-    Ok(Json(applied(result)?))
+    let updated = applied(result)?;
+    claim_handle(&cells, updated.id, &updated.handle).await?;
+    Ok(Json(updated))
 }
 fn applied<T>(outcome: ChangeOutcome<T>) -> Result<T> {
     match outcome {

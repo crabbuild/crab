@@ -187,9 +187,7 @@ impl CatalogDocument {
             .deleted_repositories
             .iter()
             .map(|entry| &entry.repository)
-            .filter(|repo| {
-                self.namespace_bound_to(&repo.owner, repo.personal_namespace().as_deref())
-            })
+            .filter(|repo| self.namespace_bound_to(&repo.owner, &repo.namespace_owner()))
             .map(|repo| repo.id)
             .collect();
         self.deleted_repositories.retain(|entry| {
@@ -362,8 +360,7 @@ impl CatalogStore {
             if !names.insert((
                 record.owner.to_ascii_lowercase(),
                 record.name.to_ascii_lowercase(),
-            )) || !document
-                .namespace_bound_to(&record.owner, record.personal_namespace().as_deref())
+            )) || !document.namespace_bound_to(&record.owner, &record.namespace_owner())
             {
                 return Err(CatalogError::NameUnavailable);
             }

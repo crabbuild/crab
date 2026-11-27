@@ -345,7 +345,7 @@ test("owners target repositories and repository admins see inherited rules as re
     inherited.getByRole("button", { name: "Edit Release policy" }),
   ).toHaveCount(0);
   await expect(page.getByRole("button", { name: "New ruleset" })).toBeVisible();
-  await page.goto("/team/project/properties");
+  await page.goto("/team/project/settings/properties");
   await expect(
     page.getByRole("heading", { name: "Repository properties" }),
   ).toBeVisible();

@@ -22,13 +22,11 @@ import type { Commands } from "./teams/commands";
 export { OrganizationInvitation } from "./invitations";
 
 export function OrganizationPage({
-  id,
   own,
   url,
   csrf,
   commands,
 }: {
-  id: string;
   own: Loaded<OrganizationView> & { retry: () => void };
   url: URL;
   csrf: string;
@@ -40,7 +38,8 @@ export function OrganizationPage({
     <Result state={own} timingLabel="Organization">
       {({ organization, role, actor, can_create }) => {
         const owner = role === "owner";
-        const endpoint = `/api/organizations/${id}`;
+        const organizationId = organization.id;
+        const endpoint = `/api/organizations/${organizationId}`;
         if (owner && url.searchParams.get("setup") === "members")
           return (
             <OrganizationSetup
@@ -115,7 +114,7 @@ export function OrganizationPage({
                 />
               ) : tab === "repositories" ? (
                 <OrganizationRepositories
-                  id={id}
+                  id={organizationId}
                   name={organization.name}
                   actor={actor}
                   canCreate={owner || can_create}
@@ -125,7 +124,7 @@ export function OrganizationPage({
                 />
               ) : tab === "teams" ? (
                 <Teams
-                  id={id}
+                  id={organizationId}
                   actor={actor}
                   owner={owner}
                   url={url}

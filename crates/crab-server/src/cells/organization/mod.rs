@@ -77,11 +77,37 @@ impl Role {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub(crate) struct Organization {
     pub id: Uuid,
+    pub handle: String,
     pub name: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub website: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub email: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub location: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub avatar: Option<super::directory::avatar::AvatarConfig>,
     pub version: u64,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+}
+
+pub(super) const PROFILE_DOC_KEY: &str = "organization/v1/profile";
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct OrganizationProfileExtras {
+    pub handle: String,
+    #[serde(default)]
+    pub website: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub location: String,
+    #[serde(default)]
+    pub avatar: Option<super::directory::avatar::AvatarConfig>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -157,10 +183,23 @@ fn record(context: &Transaction<'_>) -> Result<Option<Organization>> {
             let [id, name, description, version, created, updated] = row.as_slice() else {
                 return Err(Error::Invalid("organization record is invalid"));
             };
+            let id = uuid(id)?;
+            let name = text(name)?;
+            let extras = context
+                .document::<OrganizationProfileExtras>(PROFILE_DOC_KEY)?
+                .unwrap_or_else(|| OrganizationProfileExtras {
+                    handle: crate::catalog::derive_organization_handle(&name, id),
+                    ..Default::default()
+                });
             Ok(Organization {
-                id: uuid(id)?,
-                name: text(name)?,
+                id,
+                handle: extras.handle,
+                name,
                 description: text(description)?,
+                website: extras.website,
+                email: extras.email,
+                location: extras.location,
+                avatar: extras.avatar,
                 version: uint(version)?,
                 created_at_ms: uint(created)?,
                 updated_at_ms: uint(updated)?,
@@ -228,6 +267,10 @@ pub(crate) enum Action {
     Edited {
         name: bool,
         description: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        handle: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        profile: bool,
     },
     Membership {
         member: Uuid,
@@ -274,7 +317,20 @@ fn append_event(context: &Transaction<'_>, actor: Option<Uuid>, action: Action) 
         },
     )
 }
-pub(crate) fn details(name: &str, description: &str) -> Result<()> {
+pub(crate) fn validate_profile(
+    handle: &str,
+    name: &str,
+    description: &str,
+    website: &str,
+    email: &str,
+    location: &str,
+    avatar: Option<&super::directory::avatar::AvatarConfig>,
+) -> std::result::Result<(), &'static str> {
+    if !crate::catalog::valid_organization_handle(handle) {
+        return Err(
+            "Organization handle must contain 1–39 lowercase letters, digits or single hyphens and cannot use a reserved name",
+        );
+    }
     if name.is_empty()
         || name.trim() != name
         || name.chars().count() > 100
@@ -282,9 +338,43 @@ pub(crate) fn details(name: &str, description: &str) -> Result<()> {
         || description.len() > 4000
         || description.contains('\0')
     {
-        return Err(Error::Invalid(
-            "organization name or description is invalid",
-        ));
+        return Err("Organization name or description is invalid");
+    }
+    if !website.is_empty() {
+        let valid_scheme = website.starts_with("https://") || website.starts_with("http://");
+        if !valid_scheme
+            || website.chars().count() > 256
+            || website
+                .chars()
+                .any(|ch| ch.is_whitespace() || ch.is_control())
+        {
+            return Err("Website URL must start with http:// or https:// without whitespace");
+        }
+    }
+    if !email.is_empty() {
+        if email.trim() != email
+            || email.chars().count() > 254
+            || email
+                .chars()
+                .any(|ch| ch.is_whitespace() || ch.is_control())
+            || !email.contains('@')
+            || !email
+                .split('@')
+                .nth(1)
+                .is_some_and(|host| host.contains('.'))
+        {
+            return Err("Organization contact email must be a valid email address");
+        }
+    }
+    if !location.is_empty()
+        && (location.trim() != location
+            || location.chars().count() > 100
+            || location.chars().any(char::is_control))
+    {
+        return Err("Organization location must be 1–100 characters without control characters");
+    }
+    if let Some(avatar) = avatar {
+        avatar.validate()?;
     }
     Ok(())
 }

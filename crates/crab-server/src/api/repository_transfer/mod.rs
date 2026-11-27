@@ -273,7 +273,7 @@ async fn target(
     input: Target,
     requester: &MembershipActor,
     renaming: bool,
-) -> Result<(Recipient, String)> {
+) -> Result<(Recipient, String, Option<String>)> {
     match input {
         Target::Account { handle } => {
             let handle = handle.trim().trim_start_matches('@').to_ascii_lowercase();
@@ -298,12 +298,13 @@ async fn target(
                     },
                 },
                 format!("@{handle}"),
+                None,
             ))
         }
-        Target::Organization { id } => Ok((
-            Recipient::Organization { id },
-            destination_organization(server, id, requester, renaming).await?,
-        )),
+        Target::Organization { id } => {
+            let (handle, name) = destination_organization(server, id, requester, renaming).await?;
+            Ok((Recipient::Organization { id }, name, Some(handle)))
+        }
     }
 }
 
@@ -312,7 +313,7 @@ async fn destination_organization(
     id: Uuid,
     requester: &MembershipActor,
     renaming: bool,
-) -> Result<String> {
+) -> Result<(String, String)> {
     let denied = || Error::RepositoryTransferDestinationCreationRequired;
     let actor = access::actor_id(server, key(requester))
         .await?
@@ -330,7 +331,7 @@ async fn destination_organization(
     if renaming && view.role != Role::Owner {
         return Err(Error::RepositoryTransferDestinationOwnerRequired);
     }
-    Ok(view.organization.name)
+    Ok((view.organization.handle, view.organization.name))
 }
 
 fn now() -> Result<i64> {
@@ -415,7 +416,7 @@ async fn propose(
             if settings::load_lifecycle(server, source).await?.archived {
                 return Err(Error::Archived);
             }
-            let (recipient, recipient_label) =
+            let (recipient, recipient_label, destination_handle) =
                 target(server, input.recipient, &requester, renaming).await?;
             account(&principal)?;
             if cancel.is_cancelled() {
@@ -433,6 +434,7 @@ async fn propose(
                         requester,
                         recipient,
                         recipient_label,
+                        destination_handle,
                         name: input.name,
                         version: input.version,
                     },
@@ -607,7 +609,11 @@ async fn accept(
         }
         let renaming = offer.name != record.name;
         if let Some(destination) = destination {
-            destination_organization(server, destination, &offer.requester, renaming).await?;
+            let (handle, _) =
+                destination_organization(server, destination, &offer.requester, renaming).await?;
+            if handle != offer.destination_owner() {
+                return Err(Error::PageChanged);
+            }
         }
         settings::require_no_issue_reservations(server, source).await?;
         if renaming {

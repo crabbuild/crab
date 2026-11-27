@@ -27,6 +27,7 @@ async fn organization_audit_filters_and_exports_committed_events_for_owners() {
         &f.alice,
         json!({
             "version":current["organization"]["version"],
+            "handle":current["organization"]["handle"],
             "name":"Audit qualification",
             "description":"",
         }),
@@ -190,8 +191,13 @@ async fn audit_export_follows_the_original_snapshot_beyond_its_record_limit() {
                 EditInput {
                     actor: f.owner_id,
                     version: revision + index,
+                    handle: crate::catalog::derive_organization_handle("org", f.organization),
                     name: format!("Organization revision {index}"),
                     description: String::new(),
+                    website: String::new(),
+                    email: String::new(),
+                    location: String::new(),
+                    avatar: None,
                 },
             )
             .await
