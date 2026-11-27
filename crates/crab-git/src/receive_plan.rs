@@ -11,6 +11,9 @@ use crate::{
     pointer_detect::PointerKind,
 };
 
+mod received;
+pub use received::{Received, ReceivedObject, VerifiedObjects};
+
 type Result<T> = std::result::Result<T, ReceivePlanError>;
 type SourceError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -188,8 +191,8 @@ struct TreeEntry {
     oid: ObjectId,
     mode: u16,
 }
-struct Validator<'a, S, C> {
-    incoming: &'a IncomingPack,
+struct Validator<'a, R, S, C> {
+    incoming: &'a R,
     source: &'a mut S,
     nodes: HashMap<ObjectId, Node>,
     trusted: HashMap<ObjectId, Option<Kind>>,
@@ -206,8 +209,8 @@ struct Validator<'a, S, C> {
 /// publication, prove every returned pointer dependency, and bind the result to
 /// the same pinned generation. Quarantine integrity alone is insufficient.
 /// Object sources execute synchronously; run this operation on a blocking worker.
-pub fn validate<S: GraphSource, C: Fn() -> bool>(
-    incoming: &IncomingPack,
+pub fn validate<R: Received, S: GraphSource, C: Fn() -> bool>(
+    incoming: &R,
     base: &BTreeMap<String, ObjectId>,
     updates: &[RefUpdate],
     policy: impl Fn(&str) -> RefPolicy,
@@ -274,12 +277,12 @@ pub fn validate<S: GraphSource, C: Fn() -> bool>(
     let mut validator = Validator::new(incoming, source, limits, cancelled);
     // Validate all received objects, including unreachable objects. Otherwise a
     // syntactically corrupt object could be published for a later ref update.
-    for object in incoming.objects() {
-        validator.load(object.oid)?;
+    for (oid, _) in incoming.objects() {
+        validator.load(oid)?;
     }
     let mut roots = incoming
         .objects()
-        .map(|object| (object.oid, Some(object.kind)))
+        .map(|(oid, kind)| (oid, Some(kind)))
         .collect::<Vec<_>>();
     for update in updates {
         if let Some(oid) = update.new {
@@ -355,13 +358,8 @@ pub fn validate<S: GraphSource, C: Fn() -> bool>(
     })
 }
 
-impl<'a, S: GraphSource, C: Fn() -> bool> Validator<'a, S, C> {
-    fn new(
-        incoming: &'a IncomingPack,
-        source: &'a mut S,
-        limits: GraphLimits,
-        cancelled: C,
-    ) -> Self {
+impl<'a, R: Received, S: GraphSource, C: Fn() -> bool> Validator<'a, R, S, C> {
+    fn new(incoming: &'a R, source: &'a mut S, limits: GraphLimits, cancelled: C) -> Self {
         Self {
             incoming,
             source,
@@ -411,16 +409,43 @@ impl<'a, S: GraphSource, C: Fn() -> bool> Validator<'a, S, C> {
             return Ok(node.clone());
         }
         self.step()?;
-        if let Some(object) = self.incoming.object(&oid) {
-            if object.size > self.limits.max_object_bytes {
+        if let Some(size) = self.incoming.size(&oid) {
+            if size > self.limits.max_object_bytes {
                 return Err(ReceivePlanError::Limit("object bytes"));
             }
-            if (object.size as u64) > self.limits.max_read_bytes.saturating_sub(self.bytes) {
+            if (size as u64) > self.limits.max_read_bytes.saturating_sub(self.bytes) {
                 return Err(ReceivePlanError::Limit("total object bytes"));
             }
         }
-        let object = match self.incoming.read_object(&oid)? {
-            Some(object) => object,
+        let object = match self.incoming.load(&oid)?.map(ReceivedObject::into_inner) {
+            Some(received::Inner::Verified {
+                node,
+                size,
+                pointer,
+            }) => {
+                // The receiver computed this identity from the bytes it parsed
+                // with the same rules; account for the work it stands in for.
+                if observe.is_some() && node.kind == Kind::Commit {
+                    return Err(ReceivePlanError::Invalid {
+                        oid,
+                        reason: "verified commits carry no message to observe",
+                    });
+                }
+                for _ in 0..node.tree.len() {
+                    self.step()?;
+                }
+                self.bytes = self
+                    .bytes
+                    .checked_add(size as u64)
+                    .filter(|bytes| *bytes <= self.limits.max_read_bytes)
+                    .ok_or(ReceivePlanError::Limit("total object bytes"))?;
+                if !matches!(pointer, PointerKind::NotAPointer) {
+                    self.pointers.insert(oid, pointer);
+                }
+                self.nodes.insert(oid, node.clone());
+                return Ok(node);
+            }
+            Some(received::Inner::Bytes(object)) => object,
             None => self
                 .source
                 .read(&oid)

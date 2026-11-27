@@ -29,7 +29,7 @@ impl PathHash {
     }
 }
 
-impl<S: GraphSource, C: Fn() -> bool> Validator<'_, S, C> {
+impl<R: Received, S: GraphSource, C: Fn() -> bool> Validator<'_, R, S, C> {
     pub(super) fn changed_path_hashes(
         &mut self,
         updates: &[RefUpdate],

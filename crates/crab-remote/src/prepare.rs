@@ -960,6 +960,111 @@ pub async fn prepare_capsule_with_commit_observer(
     options: Options<impl Fn(&str) -> RefPolicy + Send + 'static>,
     mut commit_observer: Option<(String, Box<receive_plan::CommitObserver<'static>>)>,
 ) -> Result<Prepared> {
+    let prepared_repository = repository.clone();
+    let inspect_visible_tip = options.inspect_visible_tip;
+    with_source(
+        &repository,
+        visibility,
+        inspect_visible_tip,
+        cancel,
+        move |source, base, flag, cancel| {
+            let incoming = match input {
+                None => IncomingPack::empty(&space)?,
+                Some(mut input) => {
+                    if input.fill_buf()?.is_empty()
+                        && updates.iter().all(|update| update.new.is_none())
+                    {
+                        IncomingPack::empty(&space)?
+                    } else {
+                        incoming_pack::quarantine(
+                            input,
+                            &space,
+                            options.pack,
+                            || cancel.is_cancelled(),
+                            |oid| source.read(oid),
+                        )?
+                    }
+                }
+            };
+            let (plan, visibility) = plan_refs(
+                &incoming,
+                base,
+                &updates,
+                &visibility_bases,
+                source,
+                &options.policy,
+                options.graph,
+                &mut commit_observer,
+                cancel,
+            )?;
+            let pack = incoming.prepare(space.path(), options.pack.max_pack_bytes, flag)?;
+            Ok(Prepared {
+                repository: prepared_repository,
+                layout: options.layout,
+                plan,
+                visibility,
+                pack,
+                content: None,
+                updates,
+            })
+        },
+    )
+    .await
+}
+
+/// Validate objects verified while a fetched pack streamed, and plan visibility.
+///
+/// Applies the graph, policy, and exact visibility rules of [`prepare_capsule`]
+/// without a quarantine or a prepared pack; the caller publishes the fetched
+/// pack itself. Run it against the view the publication will commit to.
+pub async fn plan_verified(
+    repository: RemoteGitRepository,
+    visibility: GitVisibilityIndex,
+    received: receive_plan::VerifiedObjects,
+    updates: Vec<RefUpdate>,
+    cancel: &CancellationToken,
+    options: Options<impl Fn(&str) -> RefPolicy + Send + 'static>,
+) -> Result<(ValidatedRefUpdates, BTreeMap<String, GitVisibilityEdit>)> {
+    with_source(
+        &repository,
+        visibility,
+        options.inspect_visible_tip,
+        cancel,
+        move |source, base, _, cancel| {
+            plan_refs(
+                &received,
+                base,
+                &updates,
+                &BTreeMap::new(),
+                source,
+                &options.policy,
+                options.graph,
+                &mut None,
+                cancel,
+            )
+        },
+    )
+    .await
+}
+
+/// Run `work` on a blocking worker with a proof-bound source for `repository`.
+///
+/// The reader operation closes before this returns, after `work` and on every
+/// error, so callers may release scratch space, leases, and fences afterwards.
+async fn with_source<T: Send + 'static>(
+    repository: &RemoteGitRepository,
+    visibility: GitVisibilityIndex,
+    inspect_visible_tip: Option<ObjectId>,
+    cancel: &CancellationToken,
+    work: impl FnOnce(
+        &mut Source<'_>,
+        &BTreeMap<String, ObjectId>,
+        &Arc<AtomicBool>,
+        &CancellationToken,
+    ) -> Result<T>
+    + Send
+    + 'static,
+) -> Result<T> {
     let base: BTreeMap<_, _> = repository
         .refs()
         .entries
@@ -989,152 +1094,14 @@ pub async fn prepare_capsule_with_commit_observer(
             proof,
             refs: base.keys().cloned().collect(),
             prior: None,
-            inspect_visible_tip: options.inspect_visible_tip,
+            inspect_visible_tip,
             handle: handle.clone(),
         };
-        let result = (|| {
-            if cancel.is_cancelled() {
-                return Err(Error::Cancelled);
-            }
-            let incoming = match input {
-                None => IncomingPack::empty(&space)?,
-                Some(mut input) => {
-                    if input.fill_buf()?.is_empty()
-                        && updates.iter().all(|update| update.new.is_none())
-                    {
-                        IncomingPack::empty(&space)?
-                    } else {
-                        incoming_pack::quarantine(
-                            input,
-                            &space,
-                            options.pack,
-                            || cancel.is_cancelled(),
-                            |oid| source.read(oid),
-                        )?
-                    }
-                }
-            };
-            let started = Instant::now();
-            let plan = receive_plan::validate(
-                &incoming,
-                &base,
-                &updates,
-                &options.policy,
-                &mut source,
-                options.graph,
-                || cancel.is_cancelled(),
-            )?;
-            tracing::info!(
-                phase = "graph",
-                objects = incoming.received_objects(),
-                refs = updates.len(),
-                elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
-                "Git receive phase completed"
-            );
-            let started = Instant::now();
-            let mut visibility = BTreeMap::new();
-            let mut count = 0usize;
-            for update in &updates {
-                let Some(new) = update.new else {
-                    continue;
-                };
-                let observer = commit_observer
-                    .as_mut()
-                    .filter(|(reference, _)| reference == &update.name);
-                if let Some((name, tip)) = visibility_bases.get(&update.name)
-                    && base.get(name) != Some(tip)
-                {
-                    return Err(Error::Request(
-                        "Visibility base changed during receive admission; retry",
-                    ));
-                }
-                source.prior = match (observer.is_some(), visibility_bases.get(&update.name)) {
-                    // Commit observation compares with this exact ref. A graph
-                    // borrowed from another ref can include newly published commits.
-                    (true, _) => update.old.map(|old| (update.name.clone(), old)),
-                    (false, Some((name, tip))) => Some((name.clone(), *tip)),
-                    (false, None) => {
-                        update
-                            .old
-                            .map(|old| (update.name.clone(), old))
-                            .or_else(|| {
-                                // New refs at an existing tip can reuse that exact
-                                // committed ref closure instead of walking the graph.
-                                base.iter()
-                                    .find(|(name, tip)| **tip == new && source.contains_ref(name))
-                                    .map(|(name, tip)| (name.clone(), *tip))
-                            })
-                    }
-                };
-                let proof = receive_plan::plan_visibility_with_commits(
-                    &incoming,
-                    new,
-                    &mut source,
-                    options.graph,
-                    || cancel.is_cancelled(),
-                    observer.map(|(_, observe)| observe.as_mut()),
-                )?;
-                let evidence = match proof {
-                    RefVisibility::Additive { added, .. }
-                        if update.old.is_none()
-                            || source
-                                .prior
-                                .as_ref()
-                                .is_some_and(|(name, _)| name != &update.name) =>
-                    {
-                        // A different ref can disappear before canonical replay.
-                        // Copy its pinned closure into replacement evidence so an
-                        // acknowledged ref never borrows that mutable lifetime.
-                        let mut objects = source.prior_objects(options.graph.max_graph_steps)?;
-                        objects.extend(added.into_iter().map(|oid| oid.to_string()));
-                        GitVisibilityEdit::from_replacement_objects(
-                            update.old.map(|oid| oid.to_string()),
-                            new.to_string(),
-                            objects,
-                        )
-                    }
-                    RefVisibility::Additive { base, added } => {
-                        GitVisibilityEdit::from_delta_objects(
-                            Some(base.to_string()),
-                            new.to_string(),
-                            added.into_iter().map(|oid| oid.to_string()).collect(),
-                            vec![],
-                        )
-                    }
-                    RefVisibility::Replacement { objects } => {
-                        GitVisibilityEdit::from_replacement_objects(
-                            update.old.map(|oid| oid.to_string()),
-                            new.to_string(),
-                            objects.into_iter().map(|oid| oid.to_string()).collect(),
-                        )
-                    }
-                };
-                count = count.saturating_add(evidence.added.len());
-                if count > options.graph.max_graph_steps {
-                    return Err(Error::Request(
-                        "Combined ref visibility exceeds the graph object limit",
-                    ));
-                }
-                visibility.insert(update.name.clone(), evidence);
-            }
-            tracing::info!(
-                phase = "visibility",
-                objects = count,
-                refs = visibility.len(),
-                elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
-                "Git receive phase completed"
-            );
-            let pack = incoming.prepare(space.path(), options.pack.max_pack_bytes, &flag)?;
-            Ok(Prepared {
-                repository,
-                layout: options.layout,
-                plan,
-                visibility,
-                pack,
-                content: None,
-                updates,
-            })
-        })();
+        let result = if cancel.is_cancelled() {
+            Err(Error::Cancelled)
+        } else {
+            work(&mut source, &base, &flag, &cancel)
+        };
         drop(source);
         let close = handle.block_on(operation.finish(Ok(())));
         match (result, close) {
@@ -1151,4 +1118,123 @@ pub async fn prepare_capsule_with_commit_observer(
     // Drain the cancellation observer after the blocking worker closes its reader.
     let _ = watcher.await;
     work?
+}
+
+/// Validate one ref batch and plan exact visibility evidence for every new tip.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "receive and fetched-pack planning share every validation input"
+)]
+fn plan_refs<R: receive_plan::Received>(
+    incoming: &R,
+    base: &BTreeMap<String, ObjectId>,
+    updates: &[RefUpdate],
+    visibility_bases: &BTreeMap<String, (String, ObjectId)>,
+    source: &mut Source<'_>,
+    policy: &impl Fn(&str) -> RefPolicy,
+    graph: GraphLimits,
+    commit_observer: &mut Option<(String, Box<receive_plan::CommitObserver<'static>>)>,
+    cancel: &CancellationToken,
+) -> Result<(ValidatedRefUpdates, BTreeMap<String, GitVisibilityEdit>)> {
+    let started = Instant::now();
+    let plan = receive_plan::validate(incoming, base, updates, policy, source, graph, || {
+        cancel.is_cancelled()
+    })?;
+    tracing::info!(
+        phase = "graph",
+        objects = incoming.objects().count(),
+        refs = updates.len(),
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "Git receive phase completed"
+    );
+    let started = Instant::now();
+    let mut visibility = BTreeMap::new();
+    let mut count = 0usize;
+    for update in updates {
+        let Some(new) = update.new else {
+            continue;
+        };
+        let observer = commit_observer
+            .as_mut()
+            .filter(|(reference, _)| reference == &update.name);
+        if let Some((name, tip)) = visibility_bases.get(&update.name)
+            && base.get(name) != Some(tip)
+        {
+            return Err(Error::Request(
+                "Visibility base changed during receive admission; retry",
+            ));
+        }
+        source.prior = match (observer.is_some(), visibility_bases.get(&update.name)) {
+            // Commit observation compares with this exact ref. A graph
+            // borrowed from another ref can include newly published commits.
+            (true, _) => update.old.map(|old| (update.name.clone(), old)),
+            (false, Some((name, tip))) => Some((name.clone(), *tip)),
+            (false, None) => {
+                update
+                    .old
+                    .map(|old| (update.name.clone(), old))
+                    .or_else(|| {
+                        // New refs at an existing tip can reuse that exact
+                        // committed ref closure instead of walking the graph.
+                        base.iter()
+                            .find(|(name, tip)| **tip == new && source.contains_ref(name))
+                            .map(|(name, tip)| (name.clone(), *tip))
+                    })
+            }
+        };
+        let proof = receive_plan::plan_visibility_with_commits(
+            incoming,
+            new,
+            source,
+            graph,
+            || cancel.is_cancelled(),
+            observer.map(|(_, observe)| observe.as_mut()),
+        )?;
+        let evidence = match proof {
+            RefVisibility::Additive { added, .. }
+                if update.old.is_none()
+                    || source
+                        .prior
+                        .as_ref()
+                        .is_some_and(|(name, _)| name != &update.name) =>
+            {
+                // A different ref can disappear before canonical replay.
+                // Copy its pinned closure into replacement evidence so an
+                // acknowledged ref never borrows that mutable lifetime.
+                let mut objects = source.prior_objects(graph.max_graph_steps)?;
+                objects.extend(added.into_iter().map(|oid| oid.to_string()));
+                GitVisibilityEdit::from_replacement_objects(
+                    update.old.map(|oid| oid.to_string()),
+                    new.to_string(),
+                    objects,
+                )
+            }
+            RefVisibility::Additive { base, added } => GitVisibilityEdit::from_delta_objects(
+                Some(base.to_string()),
+                new.to_string(),
+                added.into_iter().map(|oid| oid.to_string()).collect(),
+                vec![],
+            ),
+            RefVisibility::Replacement { objects } => GitVisibilityEdit::from_replacement_objects(
+                update.old.map(|oid| oid.to_string()),
+                new.to_string(),
+                objects.into_iter().map(|oid| oid.to_string()).collect(),
+            ),
+        };
+        count = count.saturating_add(evidence.added.len());
+        if count > graph.max_graph_steps {
+            return Err(Error::Request(
+                "Combined ref visibility exceeds the graph object limit",
+            ));
+        }
+        visibility.insert(update.name.clone(), evidence);
+    }
+    tracing::info!(
+        phase = "visibility",
+        objects = count,
+        refs = visibility.len(),
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "Git receive phase completed"
+    );
+    Ok((plan, visibility))
 }
