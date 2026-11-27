@@ -482,7 +482,7 @@ export function GlobalHeader({
                 <Button
                   variant="ghost"
                   size="icon-sm"
-                  className="size-8 rounded-full border border-border p-0 hover:ring-2 hover:ring-ring/25"
+                  className="size-9 overflow-hidden rounded-full border border-border p-0 hover:ring-2 hover:ring-ring/25"
                   aria-label={signingOut ? "Signing out…" : "Open user menu"}
                   title={userName}
                   disabled={signingOut}
@@ -493,7 +493,7 @@ export function GlobalHeader({
                     <UserAvatar
                       name={userName}
                       avatar={avatar}
-                      size={32}
+                      size={36}
                       className="border-0"
                     />
                   )}

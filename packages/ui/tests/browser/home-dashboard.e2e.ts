@@ -235,10 +235,17 @@ test("home dashboard renders GitHub-style layout, filters, feed, drawer, and com
   });
   expect((await searchButton.boundingBox())!.width).toBeLessThanOrEqual(220);
 
-  // User profile dropdown uses neutral popover foreground (not blue prose links) and passes axe
-  await header
-    .getByRole("button", { name: "Open user menu", exact: true })
-    .click();
+  // User profile button renders a full-bleed large SVG avatar and neutral dropdown links
+  const userMenuButton = header.getByRole("button", {
+    name: "Open user menu",
+    exact: true,
+  });
+  const avatarBox = await userMenuButton.locator("svg").boundingBox();
+  expect(avatarBox).not.toBeNull();
+  expect(avatarBox!.width).toBeGreaterThanOrEqual(34);
+  expect(avatarBox!.height).toBeGreaterThanOrEqual(34);
+
+  await userMenuButton.click();
   const profileItem = page.getByRole("menuitem", {
     name: "Your profile",
     exact: true,
