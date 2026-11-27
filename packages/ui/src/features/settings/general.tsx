@@ -6,6 +6,7 @@ import { short } from "@/lib/format";
 import { AlertIcon, GitBranchIcon, PencilIcon } from "@primer/octicons-react";
 import { useMemo, useState } from "react";
 import { ArchiveSettings } from "./archive";
+import { AttributesSettings } from "./attributes";
 import { DescriptionSettings } from "./description";
 import { DeleteRepositorySettings } from "./delete-repository";
 import { ForkingSettings } from "./forking";
@@ -48,6 +49,11 @@ export function GeneralSettings({
         onRepositoryChanged={onRepositoryChanged}
       />
       <TopicSettings
+        repo={repo}
+        csrf={csrf}
+        onRepositoryChanged={onRepositoryChanged}
+      />
+      <AttributesSettings
         repo={repo}
         csrf={csrf}
         onRepositoryChanged={onRepositoryChanged}

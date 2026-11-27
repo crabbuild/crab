@@ -106,6 +106,8 @@ pub(crate) enum Error {
     RepositoryDescriptionChanged,
     #[error("The repository topics changed. Reload the topics before saving")]
     RepositoryTopicsChanged,
+    #[error("Repository attributes changed. Reload and try again")]
+    RepositoryAttributesChanged,
     #[error("Repository creation failed")]
     RepositorySetup(#[source] Box<crate::Error>),
     #[error("This list changed; reload from the first page")]
@@ -816,6 +818,11 @@ impl IntoResponse for Error {
                 StatusCode::CONFLICT,
                 "repository_topics_changed",
                 "The repository topics changed. Reload the topics before saving",
+            ),
+            Self::RepositoryAttributesChanged => (
+                StatusCode::CONFLICT,
+                "repository_attributes_changed",
+                "Repository attributes changed. Reload and try again",
             ),
             Self::RepositorySetup(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,

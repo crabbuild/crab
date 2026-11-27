@@ -1,4 +1,4 @@
-import { RepoIcon } from "@primer/octicons-react";
+import { LawIcon, LinkIcon, RepoIcon } from "@primer/octicons-react";
 import { SettingsIcon } from "lucide-react";
 import { useRef, type ReactNode } from "react";
 import { RelativeTime } from "@/components/discussion/time";
@@ -6,6 +6,7 @@ import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { formatHomepageLabel } from "@/features/settings/attributes";
 import { endpoint, navigate, useRequest, type Repository } from "@/lib/api";
 import type { RepositoryAccess } from "@/lib/contracts";
 import { repositoryRoleLabels } from "@/lib/repository-roles";
@@ -17,7 +18,16 @@ import { TopicLinks } from "./topic-links";
 
 type Entry = Pick<
   Repository,
-  "id" | "owner" | "name" | "description" | "archived" | "topics" | "visibility"
+  | "id"
+  | "owner"
+  | "name"
+  | "description"
+  | "homepage"
+  | "license"
+  | "is_template"
+  | "archived"
+  | "topics"
+  | "visibility"
 >;
 type Page = {
   repositories: (Entry & {
@@ -217,6 +227,9 @@ export function BrowseRepositories({
                       {repo.archived && (
                         <Badge variant="outline">Archived</Badge>
                       )}
+                      {repo.is_template && (
+                        <Badge variant="outline">Template</Badge>
+                      )}
                       {repo.fork && !forks && (
                         <Badge variant="outline">Fork</Badge>
                       )}
@@ -282,9 +295,27 @@ export function BrowseRepositories({
                       names={repo.topics}
                       href={(topic) => href(`topic:${topic}`)}
                     />
-                    {(repo.created_at_ms !== undefined ||
+                    {(repo.license ||
+                      repo.homepage ||
+                      repo.created_at_ms !== undefined ||
                       repo.metadata_updated_at_ms !== undefined) && (
-                      <p className="mt-2 flex flex-wrap gap-x-3 text-xs text-muted-foreground">
+                      <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                        {repo.license && (
+                          <span className="inline-flex items-center gap-1">
+                            <LawIcon size={14} /> {repo.license} license
+                          </span>
+                        )}
+                        {repo.homepage && (
+                          <a
+                            href={repo.homepage}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 hover:text-foreground hover:underline"
+                          >
+                            <LinkIcon size={14} />{" "}
+                            {formatHomepageLabel(repo.homepage)}
+                          </a>
+                        )}
                         {repo.created_at_ms !== undefined && (
                           <span>
                             Created <RelativeTime value={repo.created_at_ms} />

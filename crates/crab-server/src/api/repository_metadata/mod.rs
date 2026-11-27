@@ -12,8 +12,8 @@ use crate::{
     app::{self, Error, Result},
     auth::Principal,
     catalog::{
-        CatalogDocument, CatalogError, CatalogStore, description::Description, forking::Forking,
-        topics::Topics,
+        CatalogDocument, CatalogError, CatalogStore, attributes::Attributes,
+        description::Description, forking::Forking, topics::Topics,
     },
     repository::{Repository, settings},
     server::Server,
@@ -28,6 +28,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route(
             "/api/repositories/{repository}/topics",
             get(read_topics).put(write_topics),
+        )
+        .route(
+            "/api/repositories/{repository}/attributes",
+            get(read_attributes).put(write_attributes),
         )
         .route("/api/repositories/{repository}/forking", put(write_forking))
         .layer(DefaultBodyLimit::max(4096))
@@ -147,6 +151,57 @@ async fn write_topics(
         .repository_by_id(repository)
         .ok_or(Error::NotFound)?
         .topics
+        .clone();
+    server
+        .install_catalog(published)
+        .await
+        .map_err(|error| Error::RepositorySetup(Box::new(error)))?;
+    Ok(Json(result))
+}
+
+async fn read_attributes(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path(repository): Path<Uuid>,
+) -> Result<Json<Attributes>> {
+    let (_, document, _) = authorized(&server, &principal, repository, Principal::can_read).await?;
+    let record = document
+        .repository_by_id(repository)
+        .ok_or(Error::NotFound)?;
+    Ok(Json(record.attributes.clone()))
+}
+
+async fn write_attributes(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path(repository): Path<Uuid>,
+    Json(mut input): Json<Attributes>,
+) -> Result<Json<Attributes>> {
+    let (catalog, document, active) =
+        authorized(&server, &principal, repository, Principal::can_maintain).await?;
+    input.normalize().map_err(app::repository_access_error)?;
+    let record = document
+        .repository_by_id(repository)
+        .ok_or(Error::NotFound)?;
+    let current = &record.attributes;
+    if (input.homepage != current.homepage
+        || input.license != current.license
+        || input.is_template != current.is_template)
+        && settings::load_lifecycle(&server, &active).await?.archived
+    {
+        return Err(Error::Archived);
+    }
+    let published = catalog
+        .change_attributes(document.version, repository, input)
+        .await
+        .map_err(|error| match error {
+            CatalogError::Conflict => Error::RepositoryAttributesChanged,
+            error => app::repository_access_error(error),
+        })?;
+    let result = published
+        .repository_by_id(repository)
+        .ok_or(Error::NotFound)?
+        .attributes
         .clone();
     server
         .install_catalog(published)

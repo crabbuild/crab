@@ -34,6 +34,8 @@ import {
   GitPullRequestIcon,
   HistoryIcon,
   IssueOpenedIcon,
+  LawIcon,
+  LinkIcon,
   SidebarCollapseIcon,
   TagIcon,
   ProjectIcon,
@@ -53,6 +55,10 @@ import { CreateFile, DeleteFile, EditFile, UploadFiles } from "./files/editor";
 import { FileNavigation } from "./files/navigation";
 import { LatestCommit } from "./latest-commit";
 import { ForkSync } from "./fork-sync";
+import {
+  EditAboutDialog,
+  formatHomepageLabel,
+} from "@/features/settings/attributes";
 import { RepositoryRefControls, RepositoryToolbar } from "./toolbar";
 import { TopicLinks } from "./topic-links";
 import { RecentPushes } from "@/features/pull-requests/recent-pushes";
@@ -1201,30 +1207,69 @@ export function RepositoryPage({
                               className="repository-about"
                               aria-label="About this repository"
                             >
-                              <h2>About</h2>
+                              <div className="mb-3 flex items-center justify-between gap-2">
+                                <h2 className="m-0!">About</h2>
+                                {!publicReader &&
+                                  (repo.can_admin || repo.can_maintain) &&
+                                  !repo.archived && (
+                                    <EditAboutDialog
+                                      repo={repo}
+                                      csrf={csrf}
+                                      onRepositoryChanged={onRepositoryChanged}
+                                    />
+                                  )}
+                              </div>
                               <p>
                                 {repo.description || "No description provided."}
                               </p>
+                              {repo.homepage && (
+                                <div className="about-links mb-3">
+                                  <a
+                                    href={repo.homepage}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="font-medium text-foreground!"
+                                  >
+                                    <LinkIcon />
+                                    <span className="truncate">
+                                      {formatHomepageLabel(repo.homepage)}
+                                    </span>
+                                  </a>
+                                </div>
+                              )}
                               <TopicLinks names={repo.topics} />
-                              {!publicReader && (
+                              {(repo.license || !publicReader) && (
                                 <div className="about-links">
-                                  <Link
-                                    href={repoHref(repo, {
-                                      view: "activity",
-                                    })}
-                                  >
-                                    <HistoryIcon /> Activity
-                                  </Link>
-                                  <Link
-                                    href={repoHref(repo, { view: "issues" })}
-                                  >
-                                    <IssueOpenedIcon /> Issues
-                                  </Link>
-                                  <Link
-                                    href={repoHref(repo, { view: "releases" })}
-                                  >
-                                    <TagIcon /> Releases
-                                  </Link>
+                                  {repo.license && (
+                                    <span className="flex items-center gap-2 text-muted-foreground">
+                                      <LawIcon /> {repo.license} license
+                                    </span>
+                                  )}
+                                  {!publicReader && (
+                                    <>
+                                      <Link
+                                        href={repoHref(repo, {
+                                          view: "activity",
+                                        })}
+                                      >
+                                        <HistoryIcon /> Activity
+                                      </Link>
+                                      <Link
+                                        href={repoHref(repo, {
+                                          view: "issues",
+                                        })}
+                                      >
+                                        <IssueOpenedIcon /> Issues
+                                      </Link>
+                                      <Link
+                                        href={repoHref(repo, {
+                                          view: "releases",
+                                        })}
+                                      >
+                                        <TagIcon /> Releases
+                                      </Link>
+                                    </>
+                                  )}
                                 </div>
                               )}
                               {data.refs.some((ref) =>

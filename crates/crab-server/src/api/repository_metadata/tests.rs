@@ -158,3 +158,117 @@ async fn native_browser_maintainer_edits_topics_description_and_merge_options() 
     browser.run(&["close"]).await;
     h.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repository_attributes_round_trip_validate_conflict_and_publish_to_catalog() {
+    let store =
+        crab_storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
+    let h = Harness::new_with_store_and_prefix(false, false, store, "repository-attributes").await;
+    h.initialize_directory().await;
+    let repo = h.server.repositories.values()[0].id;
+    let catalog = h.server.catalog().unwrap();
+    catalog.mark_cell_ready(repo).await.unwrap();
+    let alice = h.login().await;
+    let endpoint = format!("/api/repositories/{repo}/attributes");
+    assert_eq!(h.json(&endpoint, &alice).await, json!({"version": 0}));
+
+    for invalid in [
+        json!({"homepage": "ftp://crab.build", "license": "MIT", "is_template": false, "version": 0}),
+        json!({"homepage": "https://crab.build/with space", "license": "MIT", "is_template": false, "version": 0}),
+        json!({"homepage": "", "license": "MIT\n", "is_template": false, "version": 0}),
+        json!({"homepage": "", "license": "MIT!", "is_template": false, "version": 0}),
+    ] {
+        assert_eq!(
+            h.write(reqwest::Method::PUT, &endpoint, &alice, invalid)
+                .await
+                .status(),
+            reqwest::StatusCode::BAD_REQUEST
+        );
+    }
+
+    let saved: serde_json::Value = h
+        .write(
+            reqwest::Method::PUT,
+            &endpoint,
+            &alice,
+            json!({
+                "homepage": " https://crab.build/docs ",
+                "license": " Apache-2.0 ",
+                "is_template": true,
+                "version": 0
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        saved,
+        json!({
+            "homepage": "https://crab.build/docs",
+            "license": "Apache-2.0",
+            "is_template": true,
+            "version": 1
+        })
+    );
+
+    let conflict = h
+        .write(
+            reqwest::Method::PUT,
+            &endpoint,
+            &alice,
+            json!({
+                "homepage": "https://crab.build",
+                "license": "MIT",
+                "is_template": false,
+                "version": 0
+            }),
+        )
+        .await;
+    assert_eq!(conflict.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(
+        conflict.json::<serde_json::Value>().await.unwrap()["error"]["code"],
+        "repository_attributes_changed"
+    );
+
+    let detail = &h.json("/api/repos?owner=team&name=private", &alice).await["repositories"][0];
+    assert_eq!(detail["homepage"], "https://crab.build/docs");
+    assert_eq!(detail["license"], "Apache-2.0");
+    assert_eq!(detail["is_template"], true);
+
+    let browse = &h.json("/api/repos?q=private", &alice).await["repositories"][0];
+    assert_eq!(browse["homepage"], "https://crab.build/docs");
+    assert_eq!(browse["license"], "Apache-2.0");
+    assert_eq!(browse["is_template"], true);
+
+    h.write(
+        reqwest::Method::PUT,
+        "/api/repos/team/private/settings/archive",
+        &alice,
+        json!({"expected_version": 0, "archived": true, "repository": "team/private"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let archived = h
+        .write(
+            reqwest::Method::PUT,
+            &endpoint,
+            &alice,
+            json!({
+                "homepage": "https://crab.build/changed",
+                "license": "MIT",
+                "is_template": false,
+                "version": 1
+            }),
+        )
+        .await;
+    assert_eq!(archived.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(
+        archived.json::<serde_json::Value>().await.unwrap()["error"]["code"],
+        "repository_archived"
+    );
+    h.close().await;
+}

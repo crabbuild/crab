@@ -4887,3 +4887,150 @@ test("directory file table uses file-type-specific icons in light and dark theme
   await selectDarkTheme(page);
   await expectNoAccessibilityViolations(page);
 });
+
+test("edits repository about details and settings attributes in light and dark themes", async ({
+  page,
+}) => {
+  const repoId = "00000000-0000-4000-8000-000000000099";
+  let description = "A repository for our team.";
+  let descriptionVersion = 1;
+  let homepage = "";
+  let license = "";
+  let isTemplate = false;
+  let attributesVersion = 0;
+
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/repos") {
+      return route.fulfill({
+        json: {
+          repositories: [
+            {
+              id: repoId,
+              owner: "team",
+              name: "project",
+              description,
+              ...(homepage ? { homepage } : {}),
+              ...(license ? { license } : {}),
+              ...(isTemplate ? { is_template: true } : {}),
+              access: "write",
+              can_admin: true,
+              archive_version: 0,
+              archived: false,
+              protection_version: 0,
+              protected_branches: [],
+            },
+          ],
+          next: null,
+        },
+      });
+    }
+    if (url.pathname === `/api/repositories/${repoId}/description`) {
+      if (route.request().method() === "GET") {
+        return route.fulfill({
+          json: { description, version: descriptionVersion },
+        });
+      }
+      if (route.request().method() === "PUT") {
+        const body = route.request().postDataJSON() as {
+          description: string;
+          version: number;
+        };
+        expect(body.version).toBe(descriptionVersion);
+        description = body.description;
+        descriptionVersion += 1;
+        return route.fulfill({
+          json: { description, version: descriptionVersion },
+        });
+      }
+    }
+    if (url.pathname === `/api/repositories/${repoId}/attributes`) {
+      const attributesPayload = () => ({
+        ...(homepage ? { homepage } : {}),
+        ...(license ? { license } : {}),
+        ...(isTemplate ? { is_template: true } : {}),
+        version: attributesVersion,
+      });
+      if (route.request().method() === "GET") {
+        return route.fulfill({ json: attributesPayload() });
+      }
+      if (route.request().method() === "PUT") {
+        const body = route.request().postDataJSON() as {
+          homepage: string;
+          license: string;
+          is_template: boolean;
+          version: number;
+        };
+        expect(body.version).toBe(attributesVersion);
+        homepage = body.homepage;
+        license = body.license;
+        isTemplate = body.is_template;
+        attributesVersion += 1;
+        return route.fulfill({ json: attributesPayload() });
+      }
+    }
+    return route.fallback();
+  });
+
+  await page.goto("/team/project");
+  const about = page.locator(".repository-about");
+  await expect(about).toBeVisible();
+
+  await about.getByRole("button", { name: "Edit repository details" }).click();
+  const dialog = page.getByRole("dialog", { name: "Edit repository details" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel("Description").fill("Fast serverless Git objects");
+  await dialog.getByLabel("Website").fill("https://crab.build/docs");
+  await dialog.getByLabel("License", { exact: true }).fill("MIT");
+  await dialog.getByLabel("Template repository").check();
+  await dialog.getByRole("button", { name: "Save changes" }).click();
+  await expect(dialog).toBeHidden();
+
+  await expect(about).toContainText("Fast serverless Git objects");
+  await expect(
+    about.getByRole("link", { name: "crab.build/docs" }),
+  ).toHaveAttribute("href", "https://crab.build/docs");
+  await expect(about).toContainText("MIT license");
+  await expect(
+    page.locator(".global-repository").getByText("Template", { exact: true }),
+  ).toBeVisible();
+
+  await expectNoAccessibilityViolations(page);
+  await selectDarkTheme(page);
+  await expectNoAccessibilityViolations(page);
+
+  await selectTheme(page, "light");
+  await page.goto("/team/project/settings");
+  const detailsSection = page.getByRole("region", {
+    name: "Repository details",
+  });
+  await expect(detailsSection).toContainText(
+    "crab.build/docs · MIT license · Template repository",
+  );
+
+  await detailsSection.getByRole("button", { name: "Edit details" }).click();
+  const settingsDialog = page.getByRole("dialog", {
+    name: "Edit repository details",
+  });
+  await expect(settingsDialog).toBeVisible();
+  await chooseSelectOption(
+    settingsDialog.getByRole("combobox", { name: "License preset" }),
+    "Apache-2.0",
+  );
+  await expect(
+    settingsDialog.getByLabel("License", { exact: true }),
+  ).toHaveValue("Apache-2.0");
+  await settingsDialog.getByLabel("Template repository").uncheck();
+  await settingsDialog.getByRole("button", { name: "Save changes" }).click();
+  await expect(settingsDialog).toBeHidden();
+
+  await expect(detailsSection).toContainText(
+    "crab.build/docs · Apache-2.0 license",
+  );
+  await expect(
+    page.locator(".global-repository").getByText("Template", { exact: true }),
+  ).toBeHidden();
+  await expectNoAccessibilityViolations(page);
+  await selectDarkTheme(page);
+  await expectNoAccessibilityViolations(page);
+});

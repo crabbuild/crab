@@ -52,6 +52,9 @@ export interface Repository {
   owner: string;
   name: string;
   description: string;
+  homepage?: string;
+  license?: string;
+  is_template?: boolean;
   topics?: string[];
   access: "read" | "write";
   can_admin: boolean;

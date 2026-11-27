@@ -116,6 +116,9 @@ pub(super) async fn list(
         forking,
         visibility,
         topics,
+        homepage,
+        license,
+        is_template,
         ..
     } in matches
     {
@@ -168,10 +171,22 @@ pub(super) async fn list(
         if !topics.is_empty() {
             view["topics"] = json!(topics);
         }
+        if !homepage.is_empty() {
+            view["homepage"] = json!(homepage);
+        }
+        if !license.is_empty() {
+            view["license"] = json!(license);
+        }
+        if is_template {
+            view["is_template"] = json!(true);
+        }
         if repository.forked_from.is_some()
             || (!principal.is_local()
                 && (repository.owning_organization().is_some()
                     || !topics.is_empty()
+                    || !homepage.is_empty()
+                    || !license.is_empty()
+                    || is_template
                     || visibility.is_public()))
         {
             recheck.insert(repository.id);
@@ -211,6 +226,21 @@ pub(super) async fn list(
                 } else {
                     fields.insert("topics".into(), json!(visible.topics));
                 }
+                if visible.homepage.is_empty() {
+                    fields.remove("homepage");
+                } else {
+                    fields.insert("homepage".into(), json!(visible.homepage));
+                }
+                if visible.license.is_empty() {
+                    fields.remove("license");
+                } else {
+                    fields.insert("license".into(), json!(visible.license));
+                }
+                if visible.is_template {
+                    fields.insert("is_template".into(), json!(true));
+                } else {
+                    fields.remove("is_template");
+                }
                 if let Some(source) = fresh.forked_from.and_then(|id| current.get(&id)) {
                     let source = &source.repository;
                     fields.insert("forked_from".into(), json!({
@@ -228,6 +258,9 @@ pub(super) async fn list(
 pub(super) struct VisibleRepository {
     pub(super) repository: Arc<crate::repository::Repository>,
     pub(super) topics: Vec<String>,
+    pub(super) homepage: String,
+    pub(super) license: String,
+    pub(super) is_template: bool,
     pub(super) metadata_updated_at_ms: Option<u64>,
     pub(super) team_access: Option<RepositoryAccess>,
     pub(super) team_access_inherited: bool,
@@ -403,6 +436,17 @@ pub(super) async fn visible_matching(
                 || repository.topics.clone(),
                 |record| record.topics.names.clone(),
             ),
+            homepage: record.map_or_else(
+                || repository.homepage.clone(),
+                |record| record.attributes.homepage.clone(),
+            ),
+            license: record.map_or_else(
+                || repository.license.clone(),
+                |record| record.attributes.license.clone(),
+            ),
+            is_template: record.map_or(repository.is_template, |record| {
+                record.attributes.is_template
+            }),
             metadata_updated_at_ms: record.and_then(|record| record.metadata_updated_at_ms),
             repository,
             principal: current,

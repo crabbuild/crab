@@ -288,6 +288,7 @@ export function GlobalHeader({
                 )}
               </h1>
               {repo.archived && <Badge variant="outline">Archived</Badge>}
+              {repo.is_template && <Badge variant="outline">Template</Badge>}
               {repo.visibility === "public" && (
                 <Badge variant="outline">Public</Badge>
               )}
