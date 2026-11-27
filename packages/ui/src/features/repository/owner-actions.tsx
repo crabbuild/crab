@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { RepoIcon } from "@primer/octicons-react";
 import { ChevronDownIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -9,6 +10,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { Link } from "@/components/navigation/link";
 import { GitImport } from "@/features/imports";
 import {
   OrganizationChoices,
@@ -16,7 +18,6 @@ import {
 } from "@/features/organizations/choices";
 import { navigate } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
-import { CreateRepository } from "./create";
 
 export function RepositoryOwnerActions({
   account,
@@ -75,20 +76,18 @@ export function RepositoryOwnerActions({
         </Dialog>
       )}
       {(!selected || selected.can_create) && (
-        <CreateRepository
-          key={`create-${organization?.id ?? "personal"}`}
-          organization={
-            organization
-              ? {
-                  id: organization.id,
-                  name: organization.name,
-                  actor: selected.actor,
-                }
-              : undefined
-          }
-          csrf={csrf}
-          onCreated={onCreated}
-        />
+        <Button asChild>
+          <Link
+            href={
+              organization
+                ? `/-/new?${new URLSearchParams({ organization: organization.id })}`
+                : "/-/new"
+            }
+          >
+            <RepoIcon data-icon="inline-start" />
+            New repository
+          </Link>
+        </Button>
       )}
       {(!selected || selected.can_create) && (
         <GitImport

@@ -590,6 +590,69 @@ async fn retrying_create_returns_the_existing_record() {
     assert_eq!(first, second);
 }
 
+async fn reserve_personal(
+    catalog: &CatalogStore,
+    namespace: BrowserNamespace,
+    name: &str,
+) -> Result<CatalogRecord, CatalogError> {
+    catalog
+        .reserve_browser_repository(
+            namespace,
+            BrowserCreation {
+                request_id: Uuid::now_v7(),
+                name: name.into(),
+                description: String::new(),
+                visibility: visibility::Visibility::Private,
+                properties: BTreeMap::new(),
+            },
+            actor(),
+            Vec::new(),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn personal_namespaces_belong_to_one_account() {
+    let catalog = catalog();
+    let account = |owner: &str, subject: &str| BrowserNamespace::ManagedPersonal {
+        owner: owner.into(),
+        actor: MembershipActor {
+            issuer: actor().issuer,
+            subject: subject.into(),
+        },
+    };
+    reserve_personal(&catalog, account("alice", "alice-id"), "notes")
+        .await
+        .unwrap();
+    reserve_personal(&catalog, account("alice", "alice-id"), "tools")
+        .await
+        .unwrap();
+    reserve_personal(
+        &catalog,
+        BrowserNamespace::Personal("team".into()),
+        "project",
+    )
+    .await
+    .unwrap();
+    for namespace in [
+        account("alice", "bob-id"),
+        account("ALICE", "bob-id"),
+        BrowserNamespace::Personal("alice".into()),
+        account("team", "alice-id"),
+    ] {
+        assert!(matches!(
+            reserve_personal(&catalog, namespace, "claimed").await,
+            Err(CatalogError::Conflict)
+        ));
+    }
+    for owner in ["api", organization_namespace(Uuid::now_v7()).as_str()] {
+        assert!(matches!(
+            reserve_personal(&catalog, account(owner, "alice-id"), "routed").await,
+            Err(CatalogError::Invalid(_))
+        ));
+    }
+}
+
 #[tokio::test]
 async fn import_reservation_rejects_an_existing_repository() {
     let catalog = catalog();

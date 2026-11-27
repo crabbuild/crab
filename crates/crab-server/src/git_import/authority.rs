@@ -18,7 +18,7 @@ use crate::{
     },
     repository::{
         Repository,
-        access::{actor_id, organization_grants, organization_role},
+        access::{actor_id, organization_grants, organization_role, username},
         settings::{RulesetScope, with_ruleset_lease},
     },
     server::Server,
@@ -61,20 +61,10 @@ impl ImportAccount {
         } else {
             (None, None)
         };
-        let personal_handle = if !principal.is_local()
-            && let Some(cells) = server.cells()
-            && let Ok(Some(profile)) = app::query_output(
-                cells
-                    .query::<crate::cells::directory::GetOwnProfile>(Address::Directory, None, key)
-                    .await,
-            )
-            && !crate::catalog::is_personal_namespace(&profile.handle)
-            && !crate::catalog::is_organization_namespace(&profile.handle)
-            && profile.handle != "local"
-        {
-            Some(profile.handle)
-        } else {
+        let personal_handle = if principal.is_local() {
             None
+        } else {
+            username(server, key).await
         };
         let identity = app::actor(principal).map_err(|_| ImportError::NotFound)?;
         Ok(Self {
@@ -84,6 +74,13 @@ impl ImportAccount {
             organization_role,
             personal_handle,
             local: principal.is_local(),
+        })
+    }
+
+    /// The owner address of this account's new personal repositories.
+    pub(super) fn personal_owner(&self) -> String {
+        self.personal_handle.clone().unwrap_or_else(|| {
+            crate::catalog::personal_namespace(&self.identity.issuer, &self.identity.subject)
         })
     }
 
@@ -216,12 +213,15 @@ impl ImportAccount {
             issuer: self.identity.issuer.clone(),
             subject: self.identity.subject.clone(),
         };
-        if owner != crate::catalog::personal_namespace(&identity.issuer, &identity.subject) {
+        if owner != crate::catalog::personal_namespace(&identity.issuer, &identity.subject)
+            && self.personal_handle.as_deref() != Some(owner)
+        {
             return Err(ImportError::DestinationChanged);
         }
         Ok(BrowserNamespace::PersonalFork {
             organization: source.organization.ok_or(ImportError::NotFound)?,
             owner: identity,
+            address: owner.into(),
         })
     }
 }

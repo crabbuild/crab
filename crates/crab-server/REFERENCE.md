@@ -734,11 +734,22 @@ searches during construction completed eight pages at 56 ms p95.
 
 ### Create a repository in the browser
 
-Choose **New repository** in the catalog to provision an empty private Git
-repository with `main` as its default branch. The server derives the personal
-namespace from the verified issuer and subject. Profile edits leave the
-namespace stable. The local operator uses the `local` namespace. User
-sessions can import into their own personal namespace.
+Choose **New repository** to open the `/-/new` page. Pick the owner, either
+your personal account or an organization that allows you to create
+repositories. The page provisions an empty Git repository with `main` as its
+default branch. Your profile username names your personal namespace, so a
+repository is addressed as `username/repository`. Without a username, Crab uses
+the `user-<id>` namespace derived from your verified issuer and subject; set a
+username in **Settings → Profile** to use it for new repositories. Personal
+forks and transfers to your account use the same namespace. The catalog binds
+each personal repository to the verified account, not to the username. A
+repository keeps its address when you rename your username. The former
+username stays reserved for your account while it still holds your
+repositories, and one owner address never mixes repositories of different
+accounts. Usernames cannot match a server route such as `api` or `git`, an
+organization or account-derived namespace, or `local`. The local operator uses
+the `local` namespace. User sessions can import into their own personal
+namespace.
 
 `GET /api/repos/creation` returns `{owner, default_branch}`.
 `POST /api/repos/creation` accepts `{request_id, name, description}` and
@@ -875,11 +886,11 @@ Exact `owner` plus `name` lookups return the repository detail needed by
 repository pages and settings. Search and exact lookup options are mutually
 exclusive.
 
-`GET /api/repos/personal` searches the current account's personal namespace.
-`GET /api/actors/{actor}/repositories` searches a public profile's personal
-namespace. The viewer needs read access to each returned repository in either
-view. The server resolves the namespace from the Directory identity and keeps
-it stable across profile changes.
+`GET /api/repos/personal` searches the current account's personal
+repositories. `GET /api/actors/{actor}/repositories` searches a public
+profile's personal repositories. The viewer needs read access to each returned
+repository in either view. Both views follow the catalog's account binding, so
+repositories under a former username are still included.
 
 `GET /api/organizations/{id}/teams/{team}/repositories` requires visibility
 of the team and returns readable repositories with a grant for that team. The
@@ -972,8 +983,10 @@ Acceptance retains the repository UUID, storage placement, Git history,
 collaboration records, and direct collaborators. Former organization team and
 SSO group grants are removed. The destination organization uses its current
 access policies, or the destination personal account gains administrator
-access. Existing URLs redirect after checking current access until the former
-address is reclaimed. Issue a fresh Git token for the destination owner after
+access. A personal destination is the recipient's username named in the offer.
+If the recipient changes that username first, acceptance fails and the
+requester creates a new offer. Existing URLs redirect after checking current
+access until the former address is reclaimed. Issue a fresh Git token for the destination owner after
 acceptance. That token can follow the authorized redirect from the old remote.
 
 `GET /api/repositories/{repository}/transfer` returns the current name version,

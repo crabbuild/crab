@@ -18,7 +18,7 @@ use crate::{
         Address,
         directory::{
             self, ActorProfile, CreateProfile, CreateProfileInput, EditProfile, EditProfileInput,
-            GetActor, GetOwnProfile, LookupIdentities, ProfileOutcome,
+            GetActor, GetOwnProfile, IdentityKey, LookupIdentities, ProfileOutcome,
             avatar::{AvatarConfig, GetOwnAvatar, SetAvatarInput, SetOwnAvatar},
         },
     },
@@ -204,6 +204,7 @@ async fn create(
     if input.request_id.is_nil() {
         return Err(app::Error::Invalid("Profile submission ID is invalid"));
     }
+    namespace_available(&server, &identity, &input.handle).await?;
     let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
     let input = CreateProfileInput {
         submission_id: input.request_id,
@@ -231,6 +232,14 @@ async fn edit(
         return Err(app::Error::Invalid("Profile version is invalid"));
     }
     let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
+    let current = app::query_output(
+        cells
+            .query::<GetOwnProfile>(Address::Directory, None, identity.clone())
+            .await,
+    )?;
+    if current.is_none_or(|profile| profile.handle != input.handle) {
+        namespace_available(&server, &identity, &input.handle).await?;
+    }
     let input = EditProfileInput {
         identity,
         version: input.version,
@@ -245,6 +254,29 @@ async fn edit(
     app::account(&principal)?;
     Ok(Json(saved(outcome)?))
 }
+/// Rejects a username that cannot name this account's personal namespace.
+///
+/// Repositories keep their address when a username changes. Its namespace
+/// stays with the former owner until those repositories move away.
+async fn namespace_available(server: &Server, identity: &IdentityKey, handle: &str) -> Result<()> {
+    if !crate::catalog::valid_account_namespace(handle) {
+        return Err(app::Error::Invalid("This username is reserved"));
+    }
+    let Some(catalog) = server.catalog() else {
+        return Ok(());
+    };
+    let (document, _) = catalog
+        .load_snapshot()
+        .await
+        .map_err(|error| app::Error::Membership(Box::new(error)))?;
+    let account = crate::catalog::personal_namespace(&identity.issuer, &identity.subject);
+    if document.namespace_bound_to(handle, Some(&account)) {
+        Ok(())
+    } else {
+        Err(app::Error::ProfileHandleTaken)
+    }
+}
+
 fn saved(outcome: ProfileOutcome) -> Result<ActorProfile> {
     match outcome {
         ProfileOutcome::Saved(profile) => Ok(profile),

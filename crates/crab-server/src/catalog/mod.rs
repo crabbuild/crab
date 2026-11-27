@@ -307,6 +307,17 @@ impl Default for CatalogDocument {
 }
 
 impl CatalogDocument {
+    /// Whether every repository at this owner address belongs to `account`.
+    ///
+    /// `account` is the owning account's stable namespace key, or `None` for
+    /// unmanaged and organization owners. An unused address is available.
+    pub(crate) fn namespace_bound_to(&self, owner: &str, account: Option<&str>) -> bool {
+        self.repositories
+            .iter()
+            .filter(|record| record.owner.eq_ignore_ascii_case(owner))
+            .all(|record| record.personal_namespace().as_deref() == account)
+    }
+
     pub(crate) fn membership_snapshot(
         &self,
         record: &CatalogRecord,
@@ -375,6 +386,7 @@ impl CatalogDocument {
         }
         let mut names = HashSet::new();
         let mut prefixes = HashSet::new();
+        let mut namespaces = HashMap::new();
         for record in &self.repositories {
             if record.placement_generation == 0
                 || !record.timestamps_valid()
@@ -394,17 +406,29 @@ impl CatalogDocument {
             if let Some(owner) = &record.fork_owner
                 && (record.forked_from.is_none()
                     || !valid_actor(owner)
-                    || record.owner != personal_namespace(&owner.issuer, &owner.subject))
+                    || !valid_account_address(&record.owner))
             {
                 return Err(CatalogError::Invalid("personal fork owner is invalid"));
             }
             if let Some(owner) = &record.personal_owner
                 && (record.organization.is_some()
                     || !valid_actor(owner)
-                    || is_organization_namespace(&record.owner))
+                    || !valid_account_address(&record.owner))
             {
                 return Err(CatalogError::Invalid(
                     "personal repository owner is invalid",
+                ));
+            }
+            // A username can be renamed and later claimed by someone else. One
+            // owner address must never mix repositories of different accounts.
+            let account = record.personal_namespace();
+            if *namespaces
+                .entry(record.owner.to_lowercase())
+                .or_insert_with(|| account.clone())
+                != account
+            {
+                return Err(CatalogError::Invalid(
+                    "a personal namespace belongs to one account",
                 ));
             }
             if record
@@ -496,6 +520,27 @@ pub(crate) fn personal_namespace(issuer: &str, subject: &str) -> String {
     format!("user-{}", &hex[..32])
 }
 
+/// The one personal namespace of a local server, which has no accounts.
+pub(crate) const LOCAL_NAMESPACE: &str = "local";
+
+/// Whether an owner address can hold an account's personal repositories.
+///
+/// Server routes and organization namespaces never name a personal account.
+fn valid_account_address(owner: &str) -> bool {
+    crate::config::valid_repository_component(owner)
+        && !crate::config::reserved_owner(owner)
+        && !is_organization_namespace(owner)
+}
+
+/// Whether a profile username can address its account's personal repositories.
+///
+/// Account-derived and local namespaces stay reserved for their own fallbacks.
+pub(crate) fn valid_account_namespace(username: &str) -> bool {
+    valid_account_address(username)
+        && !is_personal_namespace(username)
+        && username != LOCAL_NAMESPACE
+}
+
 pub(crate) fn is_personal_namespace(owner: &str) -> bool {
     owner
         .to_ascii_lowercase()
@@ -524,6 +569,7 @@ pub(crate) enum BrowserNamespace {
     PersonalFork {
         organization: Uuid,
         owner: MembershipActor,
+        address: String,
     },
 }
 
@@ -563,9 +609,10 @@ impl BrowserNamespace {
             Self::Personal(owner) | Self::ManagedPersonal { owner, .. } => Ok((owner, None)),
             Self::PersonalFork {
                 organization,
-                owner,
+                address,
+                ..
             } if members.is_empty() => Ok((
-                personal_namespace(&owner.issuer, &owner.subject),
+                address,
                 Some(OrganizationAccess {
                     id: organization,
                     teams: Vec::new(),
@@ -1524,6 +1571,9 @@ impl CatalogStore {
                 } else {
                     Err(CatalogError::Conflict)
                 };
+            }
+            if !document.namespace_bound_to(&record.owner, record.personal_namespace().as_deref()) {
+                return Err(CatalogError::Conflict);
             }
             if is_organization_namespace(&record.owner) {
                 if record.organization.is_none() {

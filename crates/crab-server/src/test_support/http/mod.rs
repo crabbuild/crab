@@ -199,6 +199,19 @@ impl Harness {
             .unwrap();
     }
 
+    /// Creates the profile whose username names the session's personal namespace.
+    pub(crate) async fn choose_username(&self, cookie: &str, handle: &str) {
+        self.write(
+            reqwest::Method::POST,
+            "/api/profile",
+            cookie,
+            serde_json::json!({"request_id":Uuid::now_v7(),"handle":handle,"name":handle}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    }
+
     pub(crate) async fn assignee_id(&self, cookie: &str, name: &str) -> Value {
         let catalog = self.json("/api/repos/team/private/assignees", cookie).await;
         catalog["items"]

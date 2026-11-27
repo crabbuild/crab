@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
+import { expectNoAccessibilityViolations } from "./accessibility";
 
-const owner = "user-7456000bc221ab0a67cd7d50464b5393";
+const owner = "alice";
 
 async function session(page: Page) {
   await page.route("**/api/session", (route) =>
@@ -56,78 +57,86 @@ test("the owner picker scopes creation and import to the selected organization",
   await page.goto("/-/repositories");
   await page.getByRole("button", { name: "Owner · Personal" }).click();
   await page.getByRole("button", { name: "Crab engineering" }).click();
-  await page.getByRole("button", { name: "New repository" }).click();
-  await expect(page.getByRole("dialog")).toContainText(
-    "owned by Crab engineering",
-  );
-  await expect(page.getByRole("radio", { name: "Public" })).toBeChecked();
-  await expect(page.getByRole("radio", { name: "Private" })).toHaveCount(0);
-  await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Import from Git" }).click();
   await expect(page.getByLabel("Organization", { exact: true })).toHaveValue(
     "Crab engineering",
   );
+  await page.keyboard.press("Escape");
+  await page.getByRole("link", { name: "New repository" }).click();
+  await expect(page).toHaveURL(`/-/new?organization=${id}`);
+  await expect(page.getByLabel("Owner")).toContainText("Crab engineering");
+  await expect(page.getByRole("radio", { name: "Public" })).toBeChecked();
+  await expect(page.getByRole("radio", { name: "Private" })).toHaveCount(0);
 });
 
-test("personal import retries namespace resolution before submitting", async ({
+test("the new repository page names personal repositories by username", async ({
   page,
 }) => {
   await session(page);
-  let namespaceAvailable = false;
-  let submitted = false;
-  await page.route("**/api/repos/personal?*", (route) =>
-    route.fulfill({ json: { repositories: [], next: null } }),
+  await page.route("**/api/organizations", (route) =>
+    route.fulfill({ json: { next: null, items: [] } }),
   );
   await page.route("**/api/repos/creation", (route) =>
-    namespaceAvailable
-      ? route.fulfill({
-          json: {
-            owner,
-            default_branch: "main",
-            visibilities: ["private", "public"],
-          },
-        })
-      : route.fulfill({
-          status: 503,
-          json: { error: { message: "Namespace lookup is unavailable" } },
-        }),
-  );
-  await page.route("**/api/imports/git", (route) => {
-    const input = route.request().postDataJSON();
-    expect(input).toMatchObject({
-      source: "https://github.com/example/notes.git",
-      owner,
-      name: "notes",
-      visibility: "private",
-    });
-    submitted = true;
-    return route.fulfill({
-      status: 202,
+    route.fulfill({
       json: {
-        ...input,
-        id: input.request_id,
-        state: "queued",
-        message: "Queued for import",
-        resumable: false,
+        owner,
+        default_branch: "main",
+        visibilities: ["private", "public"],
       },
-    });
-  });
+    }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/repos",
+    (route) => {
+      const name = new URL(route.request().url()).searchParams.get("name");
+      return route.fulfill({
+        json: {
+          repositories:
+            name === "notes" ? [{ id: "existing", owner, name: "notes" }] : [],
+        },
+      });
+    },
+  );
+  await page.goto("/-/new");
+  await expect(page.getByLabel("Owner")).toContainText(owner);
+  await expect(page.getByRole("radio", { name: "Private" })).toBeChecked();
+  const name = page.getByLabel("Repository name");
+  await name.fill("my library");
+  await expect(
+    page.getByText("Your new repository will be created as my-library."),
+  ).toBeVisible();
+  await expect(
+    page.getByText(`${owner}/my-library is available.`),
+  ).toBeVisible();
+  await name.fill("notes");
+  await expect(
+    page.getByText(`The repository ${owner}/notes already exists`),
+  ).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+});
 
-  await page.goto("/-/repositories/personal");
-  await page.getByRole("button", { name: "Import from Git" }).click();
-  await page
-    .getByLabel("Git source")
-    .fill("https://github.com/example/notes.git");
-  const start = page.getByRole("button", { name: "Start import" });
-  await expect(start).toBeDisabled();
-  await expect(page.getByText("Namespace lookup is unavailable")).toBeVisible();
-  namespaceAvailable = true;
-  await page.getByRole("button", { name: "Retry namespace lookup" }).click();
-  const namespace = page.getByLabel("Personal namespace");
-  await expect(namespace).toHaveValue(owner);
-  await expect(namespace).toBeDisabled();
-  await start.click();
-  await expect.poll(() => submitted).toBe(true);
+test("the new repository page suggests a username for an account namespace", async ({
+  page,
+}) => {
+  await session(page);
+  const fallback = "user-7456000bc221ab0a67cd7d50464b5393";
+  await page.route("**/api/organizations", (route) =>
+    route.fulfill({ json: { next: null, items: [] } }),
+  );
+  await page.route("**/api/repos/creation", (route) =>
+    route.fulfill({
+      json: {
+        owner: fallback,
+        default_branch: "main",
+        visibilities: ["private", "public"],
+      },
+    }),
+  );
+  await page.goto("/-/new");
+  await expect(
+    page.getByRole("link", { name: "Settings › Profile" }),
+  ).toHaveAttribute("href", "/-/settings/profile");
+  await expect(page.getByLabel("Repository name")).toBeEditable();
 });
 
 test("new repository recovers one submission after a reload", async ({
@@ -185,9 +194,8 @@ test("new repository recovers one submission after a reload", async ({
       route.fulfill({ json: { head: null, default_branch: "main", refs: [] } }),
   );
   await page.goto("/-/repositories");
-  await page
-    .getByRole("button", { name: "New repository", exact: true })
-    .click();
+  await page.getByRole("link", { name: "New repository", exact: true }).click();
+  await expect(page).toHaveURL("/-/new");
   await page.getByLabel("Repository name").fill("my-library");
   await page.getByLabel("Description (optional)").fill("First repository");
   await page
@@ -197,9 +205,6 @@ test("new repository recovers one submission after a reload", async ({
     page.getByText("The response was lost.", { exact: false }),
   ).toBeVisible();
   await page.reload();
-  await page
-    .getByRole("button", { name: "New repository", exact: true })
-    .click();
   await expect(page.getByLabel("Repository name")).toHaveValue("my-library");
   await expect(page.getByLabel("Description (optional)")).toHaveValue(
     "First repository",

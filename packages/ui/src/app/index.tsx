@@ -9,6 +9,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SignIn } from "@/features/auth/sign-in";
 import { HomeDashboard } from "@/features/home";
+import { NewRepository } from "@/features/repository/create";
 import { RepositoryOwnerActions } from "@/features/repository/owner-actions";
 import { PersonalWork } from "@/features/personal-work";
 import { Notifications } from "@/features/notifications";
@@ -159,6 +160,7 @@ export function App() {
   const personalRepositories = url.pathname === "/-/repositories/personal";
   const publicRepositories = url.pathname === "/-/public";
   const organizations = url.pathname === "/-/organizations";
+  const newRepository = url.pathname === "/-/new";
   const homeDashboard =
     url.pathname === "/" &&
     !url.searchParams.has("q") &&
@@ -181,6 +183,7 @@ export function App() {
     transferId ||
     organizationRoute ||
     organizations ||
+    newRepository ||
     notifications ||
     myWork ||
     workSearch ||
@@ -293,30 +296,33 @@ export function App() {
       ? `${repositoryOrganization?.name ?? repo.owner}/${repo.name} · Crab`
       : homeDashboard
         ? "Dashboard · Crab"
-        : profileSettings
-          ? "Settings · Crab"
-          : subscriptions
-            ? "Subscriptions · Crab"
-            : watched
-              ? "Watched repositories · Crab"
-              : inbox
-                ? "Notifications · Crab"
-                : transferId
-                  ? "Repository transfer · Crab"
-                  : projectWorkspace
-                    ? "Projects · Crab"
-                    : codeSearch
-                      ? "Search code · Crab"
-                      : myWork
-                        ? "My work · Crab"
-                        : workSearch
-                          ? "Search issues and pull requests · Crab"
-                          : "Repositories · Crab";
+        : newRepository
+          ? "New repository · Crab"
+          : profileSettings
+            ? "Settings · Crab"
+            : subscriptions
+              ? "Subscriptions · Crab"
+              : watched
+                ? "Watched repositories · Crab"
+                : inbox
+                  ? "Notifications · Crab"
+                  : transferId
+                    ? "Repository transfer · Crab"
+                    : projectWorkspace
+                      ? "Projects · Crab"
+                      : codeSearch
+                        ? "Search code · Crab"
+                        : myWork
+                          ? "My work · Crab"
+                          : workSearch
+                            ? "Search issues and pull requests · Crab"
+                            : "Repositories · Crab";
   }, [
     authenticated,
     publicView,
     repo,
     homeDashboard,
+    newRepository,
     profileSettings,
     repositoryOrganization,
     watched,
@@ -427,7 +433,6 @@ export function App() {
             signingOut={signingOut}
             onSignOut={() => void signOut()}
             catalogRepositories={catalog.data?.repositories ?? []}
-            onRepositoryCreated={() => catalog.retry()}
           />
           <main id="main" tabIndex={-1}>
             {(teamCommands.intent ||
@@ -448,7 +453,6 @@ export function App() {
                 session={session.data}
                 avatar={currentAvatar}
                 url={url}
-                onRepositoryCreated={() => catalog.retry()}
               />
             ) : myWork ? (
               <PersonalWork key={teamAccount} url={url} />
@@ -501,6 +505,13 @@ export function App() {
               <div className="px-4 py-6 sm:px-8">
                 <OrganizationDirectory key={teamAccount} />
               </div>
+            ) : newRepository ? (
+              <NewRepository
+                key={teamAccount}
+                session={session.data}
+                avatar={currentAvatar}
+                url={url}
+              />
             ) : organizationRoute ? (
               organizationRoute[2]?.startsWith("/projects") ? (
                 <OrganizationProjects

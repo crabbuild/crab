@@ -183,6 +183,15 @@ impl CatalogDocument {
             })
             .map(|repo| (repo.id, repo.ownership_epoch))
             .collect();
+        let available: HashSet<_> = self
+            .deleted_repositories
+            .iter()
+            .map(|entry| &entry.repository)
+            .filter(|repo| {
+                self.namespace_bound_to(&repo.owner, repo.personal_namespace().as_deref())
+            })
+            .map(|repo| repo.id)
+            .collect();
         self.deleted_repositories.retain(|entry| {
             let repo = &entry.repository;
             if entry.retired_for_removal
@@ -190,6 +199,7 @@ impl CatalogDocument {
                 && repo.fork_owner.as_ref() == Some(owner)
                 && let Some(epoch) = archived.get(&repo.id)
                 && repo.forked_from.and_then(|id| upstream.get(&id)) == Some(epoch)
+                && available.contains(&repo.id)
                 && names.insert((repo.owner.to_lowercase(), repo.name.to_lowercase()))
             {
                 restored.push(repo.clone());
@@ -352,7 +362,9 @@ impl CatalogStore {
             if !names.insert((
                 record.owner.to_ascii_lowercase(),
                 record.name.to_ascii_lowercase(),
-            )) {
+            )) || !document
+                .namespace_bound_to(&record.owner, record.personal_namespace().as_deref())
+            {
                 return Err(CatalogError::NameUnavailable);
             }
             document.release_alias(&record.owner, &record.name);

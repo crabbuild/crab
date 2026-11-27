@@ -73,7 +73,7 @@ pub(super) async fn list(
         .filter(|row| row.principal.can_write(row.repository.id))
         .map(|row| Fork {
             id: row.repository.id,
-            owned: row.repository.config.owner == namespace,
+            owned: row.repository.personal_namespace.as_deref() == Some(namespace.as_str()),
             owner: row.repository.config.owner.clone(),
             name: row.repository.config.name.clone(),
         })

@@ -631,10 +631,7 @@ async fn start_fork(
         default_branch_only: input.default_branch_only,
         owner: match organization {
             Some(id) => crate::catalog::organization_namespace(id),
-            None => crate::catalog::personal_namespace(
-                &account.identity.issuer,
-                &account.identity.subject,
-            ),
+            None => account.personal_owner(),
         },
         name,
         description: source::description(&input.description)?,

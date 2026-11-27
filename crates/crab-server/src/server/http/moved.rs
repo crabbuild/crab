@@ -24,7 +24,7 @@ pub(super) fn web_address(uri: &Uri) -> Option<(&str, &str)> {
     let name = segments.next()?;
     (valid_repository_component(owner)
         && valid_repository_component(name)
-        && !matches!(owner, "-" | "api" | "assets" | "auth" | "git"))
+        && !crate::config::reserved_owner(owner))
     .then_some((owner, name))
 }
 

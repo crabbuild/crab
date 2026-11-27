@@ -66,6 +66,33 @@ test("organization repository creation recovers its owner-scoped request after r
       return route.fulfill({
         json: { items: [], next: null, revision: 1, can_manage: true },
       });
+    if (pathname === "/api/organizations")
+      return route.fulfill({
+        json: {
+          next: null,
+          items: [
+            {
+              kind: "member",
+              actor,
+              role,
+              can_create: role === "owner",
+              organization: {
+                id: organization,
+                name: "Crab Engineering",
+                description: "",
+              },
+            },
+          ],
+        },
+      });
+    if (pathname === "/api/repos/creation")
+      return route.fulfill({
+        json: {
+          owner: "alice",
+          default_branch: "main",
+          visibilities: ["private", "public"],
+        },
+      });
     if (pathname === `${orgApi}/repositories/creation`) {
       expect(role).toBe("owner");
       if (request.method() === "GET")
@@ -136,21 +163,18 @@ test("organization repository creation recovers its owner-scoped request after r
     page.getByRole("heading", { name: "Organization repositories" }),
   ).toBeVisible();
   await expectNoAccessibilityViolations(page);
-  await page.getByRole("button", { name: "New repository" }).click();
-  await expect(page.getByRole("dialog")).toContainText(
-    "owned by Crab Engineering",
-  );
-  await expect(page.getByRole("dialog")).toContainText("Default branch trunk");
+  await page.getByRole("link", { name: "New repository" }).click();
+  await expect(page).toHaveURL(`/-/new?organization=${organization}`);
+  const form = page.getByRole("main");
+  await expect(page.getByLabel("Owner")).toContainText("Crab Engineering");
+  await expect(form).toContainText("in the Crab Engineering organization");
+  await expect(form).toContainText("Its default branch will be trunk.");
+  await expectNoAccessibilityViolations(page);
   await expect
     .poll(() =>
-      page.getByRole("dialog").evaluate((dialog) => {
-        const bounds = dialog.getBoundingClientRect();
-        return (
-          dialog.scrollWidth <= dialog.clientWidth &&
-          bounds.top >= 0 &&
-          bounds.bottom <= window.innerHeight
-        );
-      }),
+      page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
     )
     .toBe(true);
   await page.getByLabel("Repository name").fill("widgets");
@@ -173,11 +197,10 @@ test("organization repository creation recovers its owner-scoped request after r
 
   actor = bob;
   await page.reload();
-  await page.getByRole("button", { name: "New repository" }).click();
+  await expect(page.getByLabel("Owner")).toContainText("Crab Engineering");
   await expect(page.getByLabel("Repository name")).toHaveValue("");
   actor = alice;
   await page.reload();
-  await page.getByRole("button", { name: "New repository" }).click();
   await expect(page.getByLabel("Repository name")).toHaveValue("widgets");
   await expect(page.getByLabel("Description (optional)")).toHaveValue(
     "Team repository",
@@ -203,9 +226,9 @@ test("organization repository creation recovers its owner-scoped request after r
   await expect(
     page.getByText("No repositories are visible to you in this organization."),
   ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "New repository" }),
-  ).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "New repository" })).toHaveCount(
+    0,
+  );
   directRead = true;
   await page.reload();
   await expect(page.getByRole("link", { name: "widgets" })).toHaveAttribute(

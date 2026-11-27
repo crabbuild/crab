@@ -6,7 +6,7 @@ use uuid::Uuid;
 use super::{
     CatalogDocument, CatalogError, CatalogRecord, CatalogStore, MembershipActor,
     MembershipAuditEvent, OrganizationAccess, RepositoryApplicationState, organization_namespace,
-    personal_namespace, valid_actor,
+    personal_namespace, valid_account_namespace, valid_actor,
 };
 use crate::{RepositoryAccess, RepositoryMember, config::valid_repository_component};
 
@@ -20,13 +20,6 @@ pub(crate) enum Recipient {
 }
 
 impl Recipient {
-    pub(crate) fn namespace(&self) -> String {
-        match self {
-            Self::Account { identity } => personal_namespace(&identity.issuer, &identity.subject),
-            Self::Organization { id } => organization_namespace(*id),
-        }
-    }
-
     fn valid(&self) -> bool {
         match self {
             Self::Account { identity } => valid_actor(identity),
@@ -79,6 +72,21 @@ pub(crate) enum Decision {
 }
 
 impl Offer {
+    /// The owner address the repository moves to on acceptance.
+    ///
+    /// An account offer is labelled `@username`; that username is the
+    /// destination both people confirmed, so it is never re-derived later.
+    pub(crate) fn destination_owner(&self) -> String {
+        match &self.recipient {
+            Recipient::Account { .. } => self
+                .recipient_label
+                .strip_prefix('@')
+                .unwrap_or_default()
+                .to_owned(),
+            Recipient::Organization { id } => organization_namespace(*id),
+        }
+    }
+
     pub(crate) fn created_at_ms(&self) -> i64 {
         self.expires_at_ms.saturating_sub(LIFETIME_MS)
     }
@@ -107,9 +115,11 @@ impl Offer {
             && valid_repository_component(&self.from_owner)
             && valid_repository_component(&self.from_name)
             && valid_repository_component(&self.name)
+            && (matches!(self.recipient, Recipient::Organization { .. })
+                || valid_account_namespace(&self.destination_owner()))
             && !self
                 .from_owner
-                .eq_ignore_ascii_case(&self.recipient.namespace())
+                .eq_ignore_ascii_case(&self.destination_owner())
             && self.expires_at_ms > 0
     }
 }
@@ -279,7 +289,7 @@ impl CatalogStore {
             {
                 return Err(CatalogError::Conflict);
             }
-            let namespace = offer.recipient.namespace();
+            let namespace = offer.destination_owner();
             if let Recipient::Organization { id } = offer.recipient
                 && document.pending_membership_changes.contains_key(&id)
             {
@@ -287,12 +297,21 @@ impl CatalogStore {
                 // must not land between the departing member's two commits.
                 return Err(CatalogError::Conflict);
             }
+            let account = match &offer.recipient {
+                Recipient::Account { identity } => {
+                    Some(personal_namespace(&identity.issuer, &identity.subject))
+                }
+                Recipient::Organization { .. } => None,
+            };
             if let Recipient::Organization { id } = offer.recipient
                 && document.repositories.iter().any(|record| {
                     record.owner.eq_ignore_ascii_case(&namespace)
                         && record.organization_id() != Some(id)
                 })
             {
+                return Err(CatalogError::NameUnavailable);
+            }
+            if !document.namespace_bound_to(&namespace, account.as_deref()) {
                 return Err(CatalogError::NameUnavailable);
             }
             let new = document.relocate(repository, namespace, offer.name.clone(), id)?;

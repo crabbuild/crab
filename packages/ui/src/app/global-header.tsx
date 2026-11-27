@@ -62,7 +62,6 @@ import {
 } from "@/components/ui/tooltip";
 import { signInHref } from "@/features/auth/sign-in";
 import { NotificationLink } from "@/features/notifications";
-import { CreateRepository } from "@/features/repository/create";
 import { navigate, useRequest, type Repository } from "@/lib/api";
 import type { AvatarConfig, Organization, Session } from "@/lib/contracts";
 import { organizationHref } from "@/lib/organization-route";
@@ -91,7 +90,6 @@ export function GlobalHeader({
   signingOut,
   onSignOut,
   catalogRepositories,
-  onRepositoryCreated,
 }: {
   session: Session;
   avatar?: AvatarConfig | null;
@@ -106,11 +104,9 @@ export function GlobalHeader({
   signingOut: boolean;
   onSignOut: () => void;
   catalogRepositories: Repository[];
-  onRepositoryCreated?: () => void;
 }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [createOpen, setCreateOpen] = useState(false);
   const [searchText, setSearchText] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -360,11 +356,13 @@ export function GlobalHeader({
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-52 p-1.5">
                 <DropdownMenuItem
+                  asChild
                   className="h-8.5 gap-2 rounded-md px-2"
-                  onSelect={() => setCreateOpen(true)}
                 >
-                  <RepoIcon size={15} aria-hidden="true" />
-                  New repository
+                  <Link href="/-/new">
+                    <RepoIcon size={15} aria-hidden="true" />
+                    New repository
+                  </Link>
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   asChild
@@ -957,19 +955,6 @@ export function GlobalHeader({
           </div>
         </DialogContent>
       </Dialog>
-
-      {authenticated && (
-        <CreateRepository
-          open={createOpen}
-          onOpenChange={setCreateOpen}
-          trigger={null}
-          csrf={session.csrf ?? ""}
-          onCreated={(created) => {
-            onRepositoryCreated?.();
-            navigate(repoHref(created));
-          }}
-        />
-      )}
     </>
   );
 }

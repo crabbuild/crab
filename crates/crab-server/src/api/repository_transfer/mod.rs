@@ -107,7 +107,7 @@ impl View {
                 name: offer.from_name.clone(),
             },
             to: Location {
-                owner: offer.recipient.namespace(),
+                owner: offer.destination_owner(),
                 name: offer.name.clone(),
             },
             recipient: offer.recipient_label.clone(),
@@ -590,6 +590,14 @@ async fn accept(
             return Err(Error::Archived);
         }
         if !can_receive(server, &offer.recipient, &actor).await? {
+            return Err(Error::PageChanged);
+        }
+        // The confirmed address names the recipient's username. After a
+        // rename it could belong to someone else, so the offer must be redone.
+        if destination.is_none()
+            && access::username(server, key(&actor)).await.as_deref()
+                != Some(offer.destination_owner().as_str())
+        {
             return Err(Error::PageChanged);
         }
         match source_access(server, record, &offer.requester).await? {

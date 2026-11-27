@@ -10,6 +10,7 @@ async fn personal_fork_is_retired_on_removal_and_restored_only_with_previous_acc
     let alice = h.login().await;
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
+    h.choose_username(&bob, "bob").await;
     *h.provider.mode.lock().await = "outsider".into();
     let outsider = h.login().await;
     let org = format!("/api/organizations/{organization}");
@@ -146,7 +147,7 @@ async fn personal_fork_is_retired_on_removal_and_restored_only_with_previous_acc
     })
     .await
     .unwrap();
-    let namespace = crate::catalog::personal_namespace(&h.provider.issuer, "bob-id");
+    let namespace = "bob";
     assert_eq!(job["repository"]["owner"], namespace);
     let personal = h.json("/api/repos/personal", &bob).await;
     let fork = &personal["repositories"][0];

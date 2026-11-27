@@ -30,7 +30,6 @@ import { Spinner } from "@/components/ui/spinner";
 import { reasons, type Reason } from "@/features/notifications/filters";
 import type { OrganizationMembershipEntry } from "@/features/organizations/choices";
 import { useOrganizationDirectory } from "@/features/organizations/directory";
-import { CreateRepository } from "@/features/repository/create";
 import { navigate, useRequest, type Repository } from "@/lib/api";
 import type { AvatarConfig, OwnProfile, Session } from "@/lib/contracts";
 import { repoHref } from "@/lib/repository-route";
@@ -83,12 +82,10 @@ export function HomeDashboard({
   session,
   avatar,
   url,
-  onRepositoryCreated,
 }: {
   session: Session;
   avatar?: AvatarConfig | null;
   url: URL;
-  onRepositoryCreated?: () => void;
 }) {
   const [pinnedTab, setPinnedTab] = useState<HomeTab>(readPinnedTab);
   const tabParam = url.searchParams.get("tab");
@@ -96,7 +93,12 @@ export function HomeDashboard({
     tabParam === "feed" ? "feed" : tabParam === "home" ? "home" : pinnedTab;
 
   const [context, setContext] = useState<HomeContext>({ kind: "personal" });
-  const [createOpen, setCreateOpen] = useState(false);
+  const newRepository = () =>
+    navigate(
+      context.kind === "organization" && context.entry.can_create
+        ? `/-/new?${new URLSearchParams({ organization: context.entry.organization.id })}`
+        : "/-/new",
+    );
 
   const ownProfile = useRequest<OwnProfile>(
     session.authenticated ? "/api/profile" : null,
@@ -165,7 +167,7 @@ export function HomeDashboard({
         repositoriesError={repositoryCatalog.error}
         hasMoreRepositories={Boolean(repositoryCatalog.data?.next)}
         onRetryRepositories={repositoryCatalog.retry}
-        onNewRepository={() => setCreateOpen(true)}
+        onNewRepository={newRepository}
       />
 
       <div className="home-content">
@@ -180,7 +182,7 @@ export function HomeDashboard({
                     ? context.entry.organization
                     : undefined
                 }
-                onNewRepository={() => setCreateOpen(true)}
+                onNewRepository={newRepository}
               />
               <HomeWorkSection kind="pull" scopeOwner={scopeOwner} />
               <HomeWorkSection kind="issue" scopeOwner={scopeOwner} />
@@ -192,27 +194,6 @@ export function HomeDashboard({
 
         <HomeRail organizations={organizations} />
       </div>
-
-      <CreateRepository
-        key={`home-create-${context.kind === "organization" ? context.entry.organization.id : "personal"}`}
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        trigger={null}
-        organization={
-          context.kind === "organization" && context.entry.can_create
-            ? {
-                id: context.entry.organization.id,
-                name: context.entry.organization.name,
-                actor: context.entry.actor,
-              }
-            : undefined
-        }
-        csrf={session.csrf ?? ""}
-        onCreated={(repo) => {
-          onRepositoryCreated?.();
-          navigate(repoHref(repo));
-        }}
-      />
     </div>
   );
 }
