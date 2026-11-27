@@ -46,7 +46,7 @@ fn json<T: Serialize>(value: &T) -> Result<Vec<u8>> {
 }
 
 impl CatalogPages {
-    pub(super) fn build(capsules: &[Capsule]) -> Result<Option<(Bytes, Self)>> {
+    pub(super) fn build<C: CapsuleSource>(capsules: &[C]) -> Result<Option<(Bytes, Self)>> {
         let mut directories = KINDS.map(|_| BTreeMap::<_, Variant>::new());
         let mut capsule_bodies = Vec::with_capacity(capsules.len());
         let mut admitted = 0_u64;

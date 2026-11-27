@@ -19,6 +19,7 @@ export interface GitImportInput {
   visibility: RepositoryVisibility;
   properties?: PropertyOverrides;
   token?: string;
+  mirror?: boolean;
 }
 
 export interface GitImportJob {
@@ -26,6 +27,7 @@ export interface GitImportJob {
   source: string;
   fork_source?: string;
   default_branch_only?: boolean;
+  mirror?: boolean;
   owner: string;
   name: string;
   visibility: RepositoryVisibility;

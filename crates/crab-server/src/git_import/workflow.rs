@@ -8,14 +8,16 @@ use super::{
     FetchGrant, ForkSource, ImportAccount, ImportContext, ImportError, InternalGit,
     OrganizationDestination,
     git::{configure_git, default_branch, mirror_refs, mirror_size, push_mirror, run_git},
-    jobs, repository_route,
+    jobs, native,
+    remote::Remote,
+    repository_route,
     source::ValidatedImport,
 };
 use crate::{
     RepositoryAccess, RepositoryMember,
     catalog::{
         BrowserNamespace, CatalogRecord, CatalogStore, GitImportReservation, MembershipActor,
-        RepositoryApplicationState, RepositoryBaseline,
+        PullMirror, RepositoryApplicationState, RepositoryBaseline,
     },
     repository::{
         MaintenanceTrigger, Repository,
@@ -166,6 +168,8 @@ async fn import_repository(
             || record.name != request.name
             || record.organization_id() != authority
             || record.forked_from != request.fork_source
+            || record.mirror.as_ref().map(|mirror| &mirror.source)
+                != request.mirror.then_some(&request.source)
             || record.creation_visibility != request.visibility
         {
             return Err(ImportError::Catalog(crate::catalog::CatalogError::Conflict));
@@ -208,6 +212,19 @@ async fn import_repository(
         {
             return Err(ImportError::DestinationChanged);
         }
+    }
+    if request.fork_source.is_none() {
+        return import_source(
+            server,
+            job,
+            request,
+            account,
+            id,
+            namespace,
+            &catalog,
+            cancellation,
+        )
+        .await;
     }
 
     job.update(jobs::State::Running, "Cloning from Git").await?;
@@ -311,6 +328,7 @@ async fn import_repository(
             description: request.description.clone(),
             visibility: request.visibility,
             forked_from: request.fork_source,
+            mirror: None,
         },
     )
     .await?;
@@ -353,6 +371,99 @@ async fn import_repository(
         &snapshot,
     )
     .await
+}
+
+/// Import branches and tags from an external Git host without local storage.
+///
+/// The fetched pack is staged in object storage under the job's destination ID,
+/// so a resumed job re-verifies that pack instead of fetching it again.
+async fn import_source(
+    server: &Arc<Server>,
+    job: &Arc<jobs::Writer>,
+    request: &ValidatedImport,
+    account: &ImportAccount,
+    id: Uuid,
+    namespace: BrowserNamespace,
+    catalog: &CatalogStore,
+    cancellation: &CancellationToken,
+) -> Result<(), ImportError> {
+    let organization = account.organization;
+    job.update(jobs::State::Running, "Reading Git refs").await?;
+    let remote = Remote::new(&request.source, request.token.as_deref())?;
+    let discovered = native::discover(&remote).await?;
+    let snapshot = jobs::Snapshot::new(discovered.head.clone(), &discovered.refs);
+    job.pin(&snapshot).await?;
+    job.update(jobs::State::Running, "Preparing Crab repository")
+        .await?;
+    let record = reserve_destination(
+        server,
+        account,
+        job,
+        catalog,
+        namespace,
+        GitImportReservation {
+            id,
+            name: request.name.clone(),
+            description: request.description.clone(),
+            visibility: request.visibility,
+            forked_from: None,
+            mirror: request.mirror.then(|| PullMirror {
+                source: request.source.clone(),
+            }),
+        },
+    )
+    .await?;
+    if record.application == RepositoryApplicationState::GitImportPending
+        && let Some(owner) = organization
+    {
+        owner
+            .initialize_properties(server, job, record.id, &request.properties)
+            .await?;
+    }
+    let repository = open_destination(catalog, &record, &snapshot).await?;
+    let root = catalog.root();
+    let staging = root.path(&format!(
+        ".crab/http-server/v1/git-imports/staging/{id}.pack"
+    ));
+    let staged = match native::rescan(&root.store, &staging).await? {
+        Some(staged) => staged,
+        None => {
+            job.update(
+                jobs::State::Running,
+                &format!("Fetching Git history ({} refs)", discovered.refs.len()),
+            )
+            .await?;
+            native::stage(
+                &root.store,
+                &staging,
+                &remote,
+                &discovered.tips()?,
+                &[],
+                cancellation,
+            )
+            .await?
+        }
+    };
+    job.update(jobs::State::Running, "Verifying and publishing Git history")
+        .await?;
+    let rules = ImportRules::load(server, &repository, organization, None).await?;
+    native::publish(
+        &repository,
+        &staged,
+        &staging,
+        &discovered,
+        &rules,
+        native::LfsSource {
+            url: &request.source,
+            token: request.token.as_deref(),
+        },
+        cancellation,
+    )
+    .await?;
+    if let Err(error) = root.store.delete(&staging).await {
+        tracing::warn!(error = %error, "published Git import kept its staged pack");
+    }
+    finish_destination(server, catalog, job, id, organization, None, &snapshot).await
 }
 
 pub(super) async fn open_destination(
@@ -578,7 +689,6 @@ async fn validate_destination_policy(
     fork: Option<&ForkSource>,
     snapshot: &jobs::Snapshot,
 ) -> Result<(u64, RepositoryBaseline), ImportError> {
-    use crate::cells::repository::rulesets::{ActiveRulesets, BypassActor, BypassContext};
     let (document, _) = catalog.load().await.map_err(ImportError::Catalog)?;
     let organization = owner.map(|destination| destination.id).or_else(|| {
         fork.filter(|source| !source.visibility.is_public())
@@ -619,51 +729,91 @@ async fn validate_destination_policy(
     if !snapshot.matches(view.head(), view.refs()) {
         return Err(ImportError::DestinationChanged);
     }
-    let inherited = crate::repository::settings::inherited_rulesets(server, &repository)
-        .await
-        .map_err(ImportError::organization)?;
-    let organization_owner = match owner {
-        Some(destination) => destination.check(server).await?,
-        None => false,
-    };
-    let teams = if inherited.rulesets.iter().any(|rule| {
-        rule.bypass_actors
-            .iter()
-            .any(|entry| matches!(entry.actor, BypassActor::Team { .. }))
-    }) {
-        match (owner, fork) {
-            (Some(owner), _) => owner
-                .policy_grant(server)
-                .await
-                .map_err(ImportError::organization)?,
-            (None, Some(fork)) => fork.policy_grant(server, true).await?,
-            (None, None) => return Err(ImportError::DestinationChanged),
-        }
-        .bypass_teams
-    } else {
-        Vec::new()
-    };
-    let actor = BypassContext {
-        role: Some(if organization_owner {
-            RepositoryAccess::Admin
+    let rules = ImportRules::load(server, &repository, owner, fork).await?;
+    rules.check(view.refs().keys().map(String::as_str), view.head(), |_| {
+        false
+    })?;
+    Ok((rules.inherited.version, baseline))
+}
+
+/// Organization rulesets inherited by an import destination, and the importer's bypass standing.
+pub(super) struct ImportRules {
+    inherited: crate::cells::repository::rulesets::Rulesets,
+    organization_owner: bool,
+    teams: Vec<Uuid>,
+}
+
+impl ImportRules {
+    pub(super) async fn load(
+        server: &Server,
+        repository: &Repository,
+        owner: Option<OrganizationDestination>,
+        fork: Option<&ForkSource>,
+    ) -> Result<Self, ImportError> {
+        use crate::cells::repository::rulesets::BypassActor;
+        let inherited = crate::repository::settings::inherited_rulesets(server, repository)
+            .await
+            .map_err(ImportError::organization)?;
+        let organization_owner = match owner {
+            Some(destination) => destination.check(server).await?,
+            None => false,
+        };
+        let teams = if inherited.rulesets.iter().any(|rule| {
+            rule.bypass_actors
+                .iter()
+                .any(|entry| matches!(entry.actor, BypassActor::Team { .. }))
+        }) {
+            match (owner, fork) {
+                (Some(owner), _) => owner
+                    .policy_grant(server)
+                    .await
+                    .map_err(ImportError::organization)?,
+                (None, Some(fork)) => fork.policy_grant(server, true).await?,
+                (None, None) => return Err(ImportError::DestinationChanged),
+            }
+            .bypass_teams
         } else {
-            RepositoryAccess::Write
-        }),
-        organization_owner,
-        teams: &teams,
-        organization_teams: &teams,
-    };
-    let rules = ActiveRulesets::new(&inherited)
-        .map_err(|error| ImportError::organization(crate::app::Error::Cell(error)))?;
-    for reference in view.refs().keys() {
-        if rules
-            .matches(reference, view.head())
-            .any(|rule| rule.restrict_creations && !rule.allows_bypass(actor, false))
-        {
-            return Err(ImportError::Ruleset);
-        }
+            Vec::new()
+        };
+        Ok(Self {
+            inherited,
+            organization_owner,
+            teams,
+        })
     }
-    Ok((inherited.version, baseline))
+
+    /// Reject refs whose creation a ruleset restricts or whose history it requires to be linear.
+    ///
+    /// `nonlinear` reports whether a ref's first-parent history contains a merge.
+    pub(super) fn check<'a>(
+        &self,
+        refs: impl Iterator<Item = &'a str>,
+        head: &str,
+        nonlinear: impl Fn(&str) -> bool,
+    ) -> Result<(), ImportError> {
+        use crate::cells::repository::rulesets::{ActiveRulesets, BypassContext};
+        let actor = BypassContext {
+            role: Some(if self.organization_owner {
+                RepositoryAccess::Admin
+            } else {
+                RepositoryAccess::Write
+            }),
+            organization_owner: self.organization_owner,
+            teams: &self.teams,
+            organization_teams: &self.teams,
+        };
+        let rules = ActiveRulesets::new(&self.inherited)
+            .map_err(|error| ImportError::organization(crate::app::Error::Cell(error)))?;
+        for reference in refs {
+            if rules.matches(reference, head).any(|rule| {
+                (rule.restrict_creations || (rule.require_linear_history && nonlinear(reference)))
+                    && !rule.allows_bypass(actor, false)
+            }) {
+                return Err(ImportError::Ruleset);
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn install_destination(

@@ -1,11 +1,11 @@
 //! Co-located visibility proofs keep compacted control reads away from Git payloads.
 use super::*;
 
-pub(super) fn build(
+pub(super) fn build<C: CapsuleSource>(
     body: &mut Vec<u8>,
     body_offset: u64,
     level: u8,
-    capsules: &[Capsule],
+    capsules: &[C],
     locations: &[RunCapsuleLocation],
 ) -> Result<Option<RunSectionLocation>> {
     if capsules.len() != locations.len() {
@@ -19,18 +19,10 @@ pub(super) fn build(
         let Some(range) = &location.visibility else {
             continue;
         };
-        let start = range
-            .offset
-            .checked_sub(location.offset)
-            .and_then(|offset| usize::try_from(offset).ok())
-            .ok_or_else(|| contract_error("visibility pool offset cannot be represented"))?;
-        let end = u64::try_from(start)
-            .ok()
-            .and_then(|start| start.checked_add(range.length))
-            .and_then(|end| usize::try_from(end).ok())
-            .filter(|end| *end <= capsule.bytes().len())
+        let bytes = section_bytes_for_kind(capsule, CapsuleSectionKind::VisibilityDelta)?
+            .filter(|bytes| bytes.len() as u64 == range.length)
             .ok_or_else(|| contract_error("visibility pool source is outside its capsules"))?;
-        body.extend_from_slice(&capsule.bytes()[start..end]);
+        body.extend_from_slice(&bytes);
     }
     Ok(Some(RunSectionLocation {
         offset: checked_run_body_offset(body_offset, offset)?,

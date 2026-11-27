@@ -87,6 +87,8 @@ pub(super) struct Status {
     pub(super) fork_source: Option<Uuid>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     default_branch_only: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) mirror: bool,
     state: State,
     message: String,
     #[serde(default)]
@@ -331,6 +333,7 @@ impl Jobs {
                 properties: BTreeMap::new(),
                 fork_source: Some(fork_source),
                 default_branch_only: status.default_branch_only,
+                mirror: false,
                 token: None,
             }
         } else {
@@ -341,6 +344,7 @@ impl Jobs {
                 description,
                 status.visibility,
                 token,
+                status.mirror,
                 allowed_hosts,
             )?
         };
@@ -400,6 +404,7 @@ impl Jobs {
             properties: request.properties.clone(),
             fork_source: request.fork_source,
             default_branch_only: request.default_branch_only,
+            mirror: request.mirror,
             state: State::Queued,
             message: "Queued for import".into(),
             resumable: false,
@@ -576,6 +581,9 @@ fn digest(request: &ValidatedImport) -> Result<String, ImportError> {
     if request.default_branch_only {
         hash.update(b"\0default-branch-only");
     }
+    if request.mirror {
+        hash.update(b"\0pull-mirror");
+    }
     if !request.properties.is_empty() {
         hash.update(b"\0properties");
         hash.update(&serde_json::to_vec(&request.properties)?);
@@ -607,6 +615,7 @@ mod tests {
         let import = ValidatedImport {
             fork_source: None,
             default_branch_only: false,
+            mirror: false,
             source: "https://example.com/repo.git".into(),
             owner: "example".into(),
             name: "repo".into(),

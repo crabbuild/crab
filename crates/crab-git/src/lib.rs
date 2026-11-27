@@ -5,14 +5,18 @@ pub mod delta;
 pub mod discover;
 #[cfg(feature = "facade")]
 pub mod facade;
+pub mod fetch_wire;
 pub mod filter_attr_cache;
+pub mod import_graph;
 pub mod incoming_pack;
 #[cfg(feature = "facade")]
 pub mod index_stat;
 pub mod lfs_pointer;
+mod object_check;
 pub mod odb_adapter;
 pub mod pack;
 pub mod pack_locator;
+pub mod pack_stream;
 pub mod pack_writer;
 pub mod pointer_detect;
 pub mod pointer_ref;

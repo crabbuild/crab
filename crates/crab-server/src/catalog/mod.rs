@@ -110,6 +110,18 @@ pub struct CatalogRecord {
     naming: Option<rename::Naming>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) transfer: Option<transfer::Offer>,
+    // Set only when an import reserves the record, so a mirror is read-only
+    // from the moment its refs become visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) mirror: Option<PullMirror>,
+}
+
+/// Upstream whose branches and tags a read-only pull mirror follows.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PullMirror {
+    /// Normalized credential-free clone URL from the import allowlist.
+    pub(crate) source: String,
 }
 
 pub(crate) const MAX_TEAM_GRANTS: usize = 100;
@@ -955,6 +967,7 @@ pub(crate) struct GitImportReservation {
     pub(crate) description: String,
     pub(crate) visibility: visibility::Visibility,
     pub(crate) forked_from: Option<Uuid>,
+    pub(crate) mirror: Option<PullMirror>,
 }
 
 impl CatalogStore {
@@ -1019,6 +1032,7 @@ impl CatalogStore {
             protected_branches: Vec::new(),
             naming: None,
             transfer: None,
+            mirror: None,
         };
         self.initialize_git(&record, &default_branch, false).await?;
         self.insert_with_mode(record, InsertMode::ExistingPrefix)
@@ -1068,6 +1082,7 @@ impl CatalogStore {
                 protected_branches: Vec::new(),
                 naming: None,
                 transfer: None,
+                mirror: None,
             },
             InsertMode::Reserved(actor),
         )
@@ -1087,7 +1102,11 @@ impl CatalogStore {
             description,
             visibility,
             forked_from,
+            mirror,
         } = input;
+        if mirror.is_some() && forked_from.is_some() {
+            return Err(CatalogError::Invalid("a fork cannot be a pull mirror"));
+        }
         let fork_owner = match &namespace {
             BrowserNamespace::PersonalFork { owner, .. }
                 if forked_from.is_some() && owner == &actor =>
@@ -1141,6 +1160,7 @@ impl CatalogStore {
                 protected_branches: Vec::new(),
                 naming: None,
                 transfer: None,
+                mirror,
             },
             InsertMode::Reserved(actor),
         )
@@ -1208,6 +1228,7 @@ impl CatalogStore {
             protected_branches: Vec::new(),
             naming: None,
             transfer: None,
+            mirror: None,
         };
         let runtime = record.runtime_config(&self.root, "main")?;
         crate::config::validate_repository(&runtime)
@@ -1586,6 +1607,34 @@ impl CatalogStore {
             document.validate(&self.root)?;
             if self.write_document(&document, etag).await? {
                 return Ok(updated);
+            }
+        }
+        Err(CatalogError::Conflict)
+    }
+
+    /// Clear a repository's pull-mirror upstream so its refs accept writes again.
+    pub(crate) async fn stop_mirror(
+        &self,
+        repository: Uuid,
+    ) -> Result<CatalogDocument, CatalogError> {
+        for _ in 0..MAX_CAS_ATTEMPTS {
+            let (mut document, etag) = self.load_for_mutation().await?;
+            let record = document
+                .repositories
+                .iter_mut()
+                .find(|record| record.id == repository)
+                .ok_or(CatalogError::NotFound)?;
+            if record.mirror.take().is_none() {
+                return Ok(document);
+            }
+            record.record_metadata_update(catalog_time_ms()?);
+            document.version = document
+                .version
+                .checked_add(1)
+                .ok_or(CatalogError::Invalid("catalog version overflowed"))?;
+            document.validate(&self.root)?;
+            if self.write_document(&document, etag).await? {
+                return Ok(document);
             }
         }
         Err(CatalogError::Conflict)

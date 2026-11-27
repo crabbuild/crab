@@ -351,7 +351,83 @@ pub fn build(
     // The map is no longer needed once all raw objects have been admitted.
     graph.positions.clear();
     graph.positions.shrink_to_fit();
-    let words = roots.len().div_ceil(64);
+    memberships(graph, &starts, roots.len(), limits, &check)
+}
+
+/// Propagate exact memberships over a caller-built, complete object graph.
+///
+/// `links[i]` holds the positions linked from `objects[i]`; every node must be
+/// an object whose identity and structure the caller already verified. `roots`
+/// are node positions in output order. Cycles and out-of-range links fail closed.
+pub fn from_graph(
+    objects: Vec<ObjectId>,
+    links: Vec<Box<[u32]>>,
+    roots: &[u32],
+    limits: Limits,
+    check: impl Fn() -> bool,
+) -> Result<SharedVisibility> {
+    cancelled(&check)?;
+    bound(roots.len(), limits.max_refs, "refs")?;
+    bound(
+        objects.len(),
+        limits.max_objects.min(u32::MAX as usize),
+        "distinct objects",
+    )?;
+    if objects.len() != links.len() {
+        return Err(Error::Invalid {
+            oid: ObjectId::null(gix_hash::Kind::Sha1),
+            reason: "object graph has mismatched adjacency",
+        });
+    }
+    let count = objects.len();
+    let mut parsed_links = 0usize;
+    let mut nodes = Vec::with_capacity(count);
+    for (oid, links) in objects.into_iter().zip(links) {
+        if links.iter().any(|&link| link as usize >= count) {
+            return Err(Error::Invalid {
+                oid,
+                reason: "object graph links outside its nodes",
+            });
+        }
+        parsed_links = parsed_links.saturating_add(links.len());
+        nodes.push(Node {
+            oid,
+            kind: None,
+            links,
+        });
+    }
+    bound(parsed_links, limits.max_links, "structural links")?;
+    let graph = Graph {
+        nodes,
+        positions: HashMap::new(),
+        parsed_links,
+        distinct_links: parsed_links,
+        structural_bytes: 0,
+    };
+    graph.memory(limits, 0)?;
+    let starts = roots
+        .iter()
+        .map(|&root| {
+            usize::try_from(root)
+                .ok()
+                .filter(|root| *root < graph.nodes.len())
+                .ok_or(Error::Invalid {
+                    oid: ObjectId::null(gix_hash::Kind::Sha1),
+                    reason: "object graph root is outside its nodes",
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    memberships(graph, &starts, roots.len(), limits, &check)
+}
+
+fn memberships(
+    mut graph: Graph,
+    starts: &[usize],
+    root_count: usize,
+    limits: Limits,
+    check: &impl Fn() -> bool,
+) -> Result<SharedVisibility> {
+    let words = root_count.div_ceil(64);
     let matrix_bytes = product(product(graph.nodes.len(), words)?, 8)?;
     bound(matrix_bytes, limits.max_matrix_bytes, "membership matrix")?;
     graph.memory(limits, matrix_bytes)?;
@@ -359,7 +435,7 @@ pub fn build(
     for (bit, &start) in starts.iter().enumerate() {
         membership[start * words + bit / 64] |= 1 << (bit % 64);
     }
-    propagate(&graph.nodes, words, &mut membership, &check)?;
+    propagate(&graph.nodes, words, &mut membership, check)?;
     // Retire adjacency before allocating the transposed chunk pool.
     for node in &mut graph.nodes {
         node.links = Box::new([]);
@@ -368,7 +444,7 @@ pub fn build(
     sorted.sort_unstable_by_key(|&index| graph.nodes[index].oid);
     let slots = sorted.len().div_ceil(CHUNK_BITS);
     let fixed_output = product(
-        product(roots.len(), slots)?,
+        product(root_count, slots)?,
         std::mem::size_of::<Arc<[u8; CHUNK_BYTES]>>(),
     )?
     .checked_add(product(sorted.len(), 32)?)
@@ -377,13 +453,13 @@ pub fn build(
         maximum: usize::MAX as u64,
     })?;
     let fixed_output = fixed_output
-        .checked_add(product(roots.len(), 64)?)
+        .checked_add(product(root_count, 64)?)
         .ok_or(Error::Limit {
             kind: "output arithmetic",
             maximum: usize::MAX as u64,
         })?;
     bound(fixed_output, limits.max_output_bytes, "output")?;
-    let block_bytes = product(roots.len(), CHUNK_BYTES)?;
+    let block_bytes = product(root_count, CHUNK_BYTES)?;
     let fixed_working = product(graph.nodes.len(), 256)?
         .checked_add(matrix_bytes)
         .and_then(|n| n.checked_add(fixed_output))
@@ -393,14 +469,14 @@ pub fn build(
             maximum: usize::MAX as u64,
         })?;
     bound(fixed_working, limits.max_memory_bytes, "memory")?;
-    let mut closures = (0..roots.len())
+    let mut closures = (0..root_count)
         .map(|_| Closure {
             chunks: Vec::with_capacity(slots),
             count: 0,
         })
         .collect::<Vec<_>>();
     let mut pool = HashMap::<[u8; CHUNK_BYTES], Arc<[u8; CHUNK_BYTES]>>::new();
-    let mut block = vec![[0u8; CHUNK_BYTES]; roots.len()];
+    let mut block = vec![[0u8; CHUNK_BYTES]; root_count];
     for group in sorted.chunks(CHUNK_BITS) {
         cancelled(&check)?;
         block.fill([0; CHUNK_BYTES]);
@@ -432,7 +508,7 @@ pub fn build(
                 let working = product(graph.nodes.len(), 256)?
                     .checked_add(matrix_bytes)
                     .and_then(|n| n.checked_add(output))
-                    .and_then(|n| n.checked_add(roots.len().saturating_mul(CHUNK_BYTES)))
+                    .and_then(|n| n.checked_add(root_count.saturating_mul(CHUNK_BYTES)))
                     .ok_or(Error::Limit {
                         kind: "allocation arithmetic",
                         maximum: usize::MAX as u64,

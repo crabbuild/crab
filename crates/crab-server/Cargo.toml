@@ -11,6 +11,7 @@ provider-cdn = ["dep:crab-auth-store", "crab-auth-store/operator-cdn", "dep:crab
 provider-cdn-qualification = ["provider-cdn", "crab-storage/provider-cdn-qualification"]
 
 [dependencies]
+async-trait = { workspace = true }
 crab-auth-store = { workspace = true, optional = true }
 crab-cache = { workspace = true, features = ["local-cache"], optional = true }
 crab-cache-store = { workspace = true, optional = true }

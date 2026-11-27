@@ -164,6 +164,18 @@ pub enum ReceivePlanError {
     Cancelled,
 }
 
+impl ReceivePlanError {
+    fn violation(oid: ObjectId, violation: crate::object_check::Violation) -> Self {
+        use crate::object_check::Violation;
+        match violation {
+            Violation::Parse(source) => Self::Parse { oid, source },
+            Violation::Invalid(reason) => Self::Invalid { oid, reason },
+            Violation::Path(source) => Self::Path { oid, source },
+            Violation::TagName(source) => Self::TagName { oid, source },
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Node {
     kind: Kind,
@@ -439,122 +451,29 @@ impl<'a, S: GraphSource, C: Fn() -> bool> Validator<'a, S, C> {
         object: BaseObject,
         observe: Option<&mut CommitObserver<'_>>,
     ) -> Result<Node> {
-        let mut links = Vec::new();
-        let mut tree = Vec::new();
-        let parse_error = |source| ReceivePlanError::Parse { oid, source };
-        match object.kind {
-            Kind::Commit => {
-                if object.data.contains(&0) {
-                    return Err(ReceivePlanError::Invalid {
-                        oid,
-                        reason: "NUL in commit",
-                    });
-                }
-                let commit = gix_object::CommitRef::from_bytes(&object.data, gix_hash::Kind::Sha1)
-                    .map_err(parse_error)?;
-                commit.author().map_err(parse_error)?;
-                commit.committer().map_err(parse_error)?;
-                if commit.extra_headers.iter().any(|(name, _)| {
-                    matches!(
-                        name.as_bytes(),
-                        b"tree" | b"parent" | b"author" | b"committer"
-                    )
-                }) {
-                    return Err(ReceivePlanError::Invalid {
-                        oid,
-                        reason: "misplaced core commit header",
-                    });
-                }
-                links.push((commit.tree(), Kind::Tree));
-                links.extend(commit.parents().map(|parent| (parent, Kind::Commit)));
-                if let Some(observe) = observe {
-                    observe(oid, commit.message.as_bytes())?;
-                }
-            }
-            Kind::Tree => {
-                let mut previous = None;
-                let mut names = HashSet::new();
-                for entry in gix_object::TreeRefIter::from_bytes(&object.data, gix_hash::Kind::Sha1)
-                {
-                    self.step()?;
-                    let entry = entry.map_err(parse_error)?;
-                    if previous.as_ref().is_some_and(|previous| previous >= &entry)
-                        || !names.insert(entry.filename)
-                    {
-                        return Err(ReceivePlanError::Invalid {
-                            oid,
-                            reason: "unsorted or duplicate tree entries",
-                        });
-                    }
-                    let kind = match entry.mode.value() {
-                        0o040000 => Some(Kind::Tree),
-                        0o100644 | 0o100755 | 0o120000 => Some(Kind::Blob),
-                        0o160000 => None,
-                        _ => {
-                            return Err(ReceivePlanError::Invalid {
-                                oid,
-                                reason: "unsupported tree mode",
-                            });
-                        }
-                    };
-                    let mode = entry
-                        .mode
-                        .is_link()
-                        .then_some(gix_validate::path::component::Mode::Symlink);
-                    gix_validate::path::component(
-                        entry.filename,
-                        mode,
-                        gix_validate::path::component::Options {
-                            protect_windows: false,
-                            protect_hfs: true,
-                            protect_ntfs: true,
-                        },
-                    )
-                    .map_err(|source| ReceivePlanError::Path { oid, source })?;
-                    let target = entry.oid.to_owned();
-                    if target.is_null() {
-                        return Err(ReceivePlanError::Invalid {
-                            oid,
-                            reason: "null tree entry",
-                        });
-                    }
-                    // Gitlinks identify commits in another repository, outside this closure.
-                    if let Some(kind) = kind {
-                        links.push((target, kind));
-                    }
-                    tree.push(TreeEntry {
-                        name: entry.filename.to_vec(),
-                        oid: target,
-                        mode: entry.mode.value(),
-                    });
-                    previous = Some(entry);
-                }
-            }
-            Kind::Tag => {
-                let tag = gix_object::TagRef::from_bytes(&object.data, gix_hash::Kind::Sha1)
-                    .map_err(parse_error)?;
-                tag.tagger().map_err(parse_error)?;
-                gix_validate::tag::name(tag.name)
-                    .map_err(|source| ReceivePlanError::TagName { oid, source })?;
-                links.push((tag.target(), tag.target_kind));
-            }
-            Kind::Blob => {
-                let pointer = crate::classify(&object.data);
-                if !matches!(pointer, PointerKind::NotAPointer) {
-                    self.pointers.insert(oid, pointer);
-                }
-            }
+        let structure = crate::object_check::inspect(object.kind, &object.data, true)
+            .map_err(|violation| ReceivePlanError::violation(oid, violation))?;
+        for _ in 0..structure.entry_count {
+            self.step()?;
         }
-        if links.iter().any(|(oid, _)| oid.is_null()) {
-            return Err(ReceivePlanError::Invalid {
-                oid,
-                reason: "null object link",
-            });
+        if let (Some(message), Some(observe)) = (structure.message, observe) {
+            observe(oid, message)?;
+        }
+        if !matches!(structure.pointer, PointerKind::NotAPointer) {
+            self.pointers.insert(oid, structure.pointer);
         }
         Ok(Node {
             kind: object.kind,
-            links,
-            tree,
+            links: structure.links,
+            tree: structure
+                .entries
+                .into_iter()
+                .map(|entry| TreeEntry {
+                    name: entry.name.to_vec(),
+                    oid: entry.oid,
+                    mode: entry.mode,
+                })
+                .collect(),
         })
     }
     fn connected(&mut self, mut pending: Vec<(ObjectId, Option<Kind>)>) -> Result<()> {

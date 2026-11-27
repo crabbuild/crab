@@ -1,9 +1,15 @@
 mod authority;
 mod git;
 mod jobs;
+mod lfs;
+pub(crate) mod mirror;
+mod native;
+mod remote;
 mod source;
 mod workflow;
+
 use authority::{ForkSource, ImportAccount, OrganizationDestination};
+pub(crate) use lfs::copy_mirror_lfs;
 use source::{GitImportRequest, ValidatedImport, validate_request};
 use workflow::run_import;
 
@@ -83,6 +89,11 @@ impl ImportContext {
             organization,
             fork,
         })))
+    }
+
+    /// Whether a stored source still normalizes to itself under the current allowlist.
+    fn allows(&self, source: &str) -> bool {
+        source::normalized(source, &self.allowed_hosts).as_deref() == Some(source)
     }
 
     fn register(&self, grant: InternalGit) -> ImportGuard {
@@ -350,7 +361,7 @@ impl Drop for ImportGuard {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum ImportError {
+pub(crate) enum ImportError {
     #[error("invalid request: {0}")]
     Invalid(&'static str),
     #[error("the import service is unavailable")]
@@ -397,6 +408,38 @@ enum ImportError {
     Catalog(#[source] crate::catalog::CatalogError),
     #[error("temporary import storage failed")]
     Io(#[source] std::io::Error),
+    #[error("the Git source pack is invalid")]
+    Pack(#[from] crab_git::pack_stream::PackStreamError),
+    #[error("the Git source history is invalid")]
+    History(#[from] crab_git::import_graph::ImportGraphError),
+    #[error("staged Git pack storage failed")]
+    Stage(#[source] crab_storage::StorageError),
+    #[error("import publication failed")]
+    Publication(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl From<crab_metadata::error::MetadataError> for ImportError {
+    fn from(error: crab_metadata::error::MetadataError) -> Self {
+        Self::Publication(Box::new(error))
+    }
+}
+
+impl From<crab_write::WriteError> for ImportError {
+    fn from(error: crab_write::WriteError) -> Self {
+        match error {
+            crab_write::WriteError::Cancelled => Self::Cancelled,
+            error => Self::Publication(Box::new(error)),
+        }
+    }
+}
+
+impl From<crab_remote::publication::Error> for ImportError {
+    fn from(error: crab_remote::publication::Error) -> Self {
+        match error {
+            crab_remote::publication::Error::Cancelled => Self::Cancelled,
+            error => Self::Publication(Box::new(error)),
+        }
+    }
 }
 
 impl ImportError {
@@ -475,12 +518,22 @@ impl IntoResponse for ImportError {
                 "git_source_unavailable",
                 "The Git source could not be cloned or published; verify the URL, access, token, and server capacity",
             ),
+            Self::Pack(_) | Self::History(_) => (
+                StatusCode::BAD_GATEWAY,
+                "git_source_invalid",
+                "The Git source sent history that Crab cannot verify",
+            ),
             Self::Staging(crate::local_disk::Error::TooLarge) => (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "import_capacity",
                 "Git source exceeds the node disk capacity",
             ),
-            Self::Setup(_) | Self::Catalog(_) | Self::Io(_) | Self::Staging(_) => (
+            Self::Setup(_)
+            | Self::Catalog(_)
+            | Self::Io(_)
+            | Self::Staging(_)
+            | Self::Stage(_)
+            | Self::Publication(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "import_failed",
                 "The repository could not be prepared for import",
@@ -515,6 +568,14 @@ pub(crate) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             post(start_fork).layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
         )
         .route("/api/imports/git/{id}", get(status))
+        .route(
+            "/api/repositories/{repository}/mirror",
+            get(mirror::read).delete(mirror::request_stop),
+        )
+        .route(
+            "/api/repositories/{repository}/mirror/sync",
+            post(mirror::request_sync),
+        )
         .route("/api/imports/git/{id}/resume", post(resume))
         .route(
             "/api/organizations/{organization}/repositories/imports/git",
@@ -632,6 +693,7 @@ async fn start_fork(
         source: format!("{}/{}", source.config.owner, source.config.name),
         fork_source: Some(source.id),
         default_branch_only: input.default_branch_only,
+        mirror: false,
         owner: account
             .organization_owner()
             .map_or_else(|| account.personal_owner(), str::to_owned),

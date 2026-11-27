@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 use url::{Host, Url};
 use uuid::Uuid;
 const MAX_TOKEN_BYTES: usize = 512;
+// Imports fetch with protocol-v2 smart HTTP; only GitHub's SSH form has a known HTTPS twin.
+const HTTPS_ONLY: ImportError =
+    ImportError::Invalid("Git imports fetch over HTTPS; use the repository's HTTPS clone URL");
 const MAX_DESCRIPTION_CHARS: usize = 1_000;
 
 #[derive(Debug, Deserialize)]
@@ -22,6 +25,9 @@ pub(super) struct GitImportRequest {
     properties: BTreeMap<Uuid, PropertyValue>,
     #[serde(default)]
     token: Option<String>,
+    /// Keep following the source as a read-only pull mirror.
+    #[serde(default)]
+    mirror: bool,
 }
 
 #[derive(Clone)]
@@ -29,6 +35,7 @@ pub(super) struct ValidatedImport {
     pub(super) source: String,
     pub(super) fork_source: Option<uuid::Uuid>,
     pub(super) default_branch_only: bool,
+    pub(super) mirror: bool,
     pub(super) owner: String,
     pub(super) name: String,
     pub(super) description: String,
@@ -74,10 +81,17 @@ pub(super) fn validate_request(
             "source tokens require an HTTPS Git URL",
         ));
     }
+    // Source credentials are never stored, and a mirror syncs unattended.
+    if request.mirror && token.is_some() {
+        return Err(ImportError::Invalid(
+            "A pull mirror syncs without stored credentials; mirror a source that allows anonymous reads",
+        ));
+    }
     Ok(ValidatedImport {
         source,
         fork_source: None,
         default_branch_only: false,
+        mirror: request.mirror,
         owner,
         name,
         description,
@@ -104,6 +118,7 @@ pub(super) fn stored_request(
     description: String,
     visibility: Visibility,
     token: Option<String>,
+    mirror: bool,
     allowed_hosts: &[String],
 ) -> Result<ValidatedImport, ImportError> {
     validate_request(
@@ -116,10 +131,16 @@ pub(super) fn stored_request(
             visibility,
             properties: BTreeMap::new(),
             token,
+            mirror,
         },
         None,
         allowed_hosts,
     )
+}
+
+/// The canonical form of an allowed source, if `value` is one.
+pub(super) fn normalized(value: &str, allowed_hosts: &[String]) -> Option<String> {
+    normalize_source(value, allowed_hosts).ok()
 }
 
 fn normalize_source(value: &str, allowed_hosts: &[String]) -> Result<String, ImportError> {
@@ -153,7 +174,7 @@ fn normalize_source(value: &str, allowed_hosts: &[String]) -> Result<String, Imp
     }
     let url = Url::parse(value)
         .map_err(|_| ImportError::Invalid("source must be an allowed HTTPS or SSH clone URL"))?;
-    if !matches!(url.scheme(), "https" | "ssh")
+    if !(matches!(url.scheme(), "https" | "ssh") || loopback_http(&url))
         || url.host_str().is_none()
         || url.password().is_some()
         || url.query().is_some()
@@ -171,7 +192,7 @@ fn normalize_source(value: &str, allowed_hosts: &[String]) -> Result<String, Imp
     }
     let host = normalize_host(host)?;
     require_allowed_host(&host, allowed_hosts)?;
-    if url.scheme() == "https" && !url.username().is_empty() {
+    if url.scheme() != "ssh" && !url.username().is_empty() {
         return Err(ImportError::Invalid(
             "HTTPS source URLs must not contain a username",
         ));
@@ -193,13 +214,17 @@ fn normalize_source(value: &str, allowed_hosts: &[String]) -> Result<String, Imp
             .map_or_else(String::new, |port| format!(":{port}"));
         return Ok(format!("https://github.com{port}/{path}"));
     }
-    let scheme = url.scheme();
-    let user = if scheme == "ssh" { "git@" } else { "" };
+    if url.scheme() == "ssh" {
+        return Err(HTTPS_ONLY);
+    }
     let port = url
         .port()
         .map_or_else(String::new, |port| format!(":{port}"));
-    let host = format_url_host(&host);
-    Ok(format!("{scheme}://{user}{host}{port}/{path}"))
+    Ok(format!(
+        "{}://{}{port}/{path}",
+        url.scheme(),
+        format_url_host(&host)
+    ))
 }
 
 fn normalize_github_path(path: &str, allowed_hosts: &[String]) -> Result<String, ImportError> {
@@ -227,7 +252,18 @@ fn normalize_ssh_source(
     if host == "github.com" {
         return normalize_github_path(&path, allowed_hosts);
     }
-    Ok(format!("ssh://git@{}/{path}", format_url_host(&host)))
+    Err(HTTPS_ONLY)
+}
+
+/// Plain HTTP is accepted only for a source on this host, such as a local mirror.
+pub(super) fn loopback_http(url: &Url) -> bool {
+    url.scheme() == "http"
+        && match url.host() {
+            Some(Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+            Some(Host::Ipv4(address)) => address.is_loopback(),
+            Some(Host::Ipv6(address)) => address.is_loopback(),
+            None => false,
+        }
 }
 
 fn format_url_host(host: &str) -> String {
@@ -391,24 +427,29 @@ mod tests {
             normalize_source("https://gitlab.com/group/subgroup/repo.git", &allowed,).unwrap(),
             "https://gitlab.com/group/subgroup/repo.git"
         );
-        assert_eq!(
-            normalize_source("git@gitlab.com:group/repo.git", &allowed).unwrap(),
-            "ssh://git@gitlab.com/group/repo.git"
-        );
         let ipv6 = ["2001:db8::7".to_owned()];
         assert_eq!(
-            normalize_source("ssh://git@[2001:db8::7]:2222/group/repo", &ipv6).unwrap(),
-            "ssh://git@[2001:db8::7]:2222/group/repo.git"
+            normalize_source("https://[2001:db8::7]:8443/group/repo", &ipv6).unwrap(),
+            "https://[2001:db8::7]:8443/group/repo.git"
         );
+        assert!(normalize_source("ssh://git@[2001:db8::7]:2222/group/repo", &ipv6).is_err());
         for value in [
+            "git@gitlab.com:group/repo.git",
             "https://gitlab.com/group/repo?token=secret",
             "https://gitlab.com/group/../repo",
             "https://gitlab.com/group/%2e%2e/repo",
             "git@gitlab.com:group/repo?token=secret",
             "git://gitlab.com/group/repo",
             "https://example.com/group/repo",
+            "http://gitlab.com/group/repo",
         ] {
             assert!(normalize_source(value, &allowed).is_err(), "{value}");
         }
+        let loopback = ["127.0.0.1".to_owned()];
+        assert_eq!(
+            normalize_source("http://127.0.0.1:8080/mirror", &loopback).unwrap(),
+            "http://127.0.0.1:8080/mirror.git"
+        );
+        assert!(normalize_source("http://127.0.0.1:8080/mirror", &allowed).is_err());
     }
 }

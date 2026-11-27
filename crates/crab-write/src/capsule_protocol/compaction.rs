@@ -154,7 +154,7 @@ fn window(frontier: &[CapsulePointer]) -> Result<Option<Range<usize>>> {
 pub(super) async fn compact_ref_frontier(
     router: &StoreLayout<Store>,
     frontier: &mut Vec<CapsulePointer>,
-    known_leaf: &CapsuleRun,
+    known_leaf: Option<&CapsuleRun>,
 ) -> Result<Option<CapsuleRun>> {
     let Some(selected) = window(frontier)? else {
         return Ok(None);
@@ -163,8 +163,8 @@ pub(super) async fn compact_ref_frontier(
     let runs = try_join_all(pointers.iter().map(|pointer| async move {
         // Byte pressure may select an older prefix. Its final source is not
         // necessarily the new leaf, so reuse local bytes only by exact identity.
-        if pointer.hash() == known_leaf.hash() {
-            return Ok::<_, WriteError>(known_leaf.clone());
+        if let Some(leaf) = known_leaf.filter(|leaf| pointer.hash() == leaf.hash()) {
+            return Ok::<_, WriteError>(leaf.clone());
         }
         Ok::<_, WriteError>(
             crab_metadata::capsule_protocol::load_capsule_run(router, pointer).await?,
@@ -446,7 +446,7 @@ mod tests {
             leaf = Some(run);
         }
         // Neither the giant historical body nor the known local leaf exists remotely.
-        let compacted = compact_ref_frontier(&router, &mut frontier, &leaf.unwrap())
+        let compacted = compact_ref_frontier(&router, &mut frontier, leaf.as_ref())
             .await
             .unwrap()
             .unwrap();

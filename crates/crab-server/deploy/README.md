@@ -46,11 +46,12 @@ Git push, and process restart against a private RustFS instance. It retains a
 native receipt bound to the exact source and image digest. Backup restore, LFS
 faults, and broader provider matrices require new native qualification.
 
-The server image also includes the system `git` executable for the browser's
-Git import workflow. That workflow copies Git history and refs only; it does
-not include Git LFS payload migration. Configure `[import].allowed_hosts` and
-allow the server workload outbound HTTPS/SSH to those hosts (or through the
-configured proxy) when this workflow is enabled.
+The browser's Git import workflow fetches branches, tags, and Git LFS
+payloads over HTTPS straight into object storage, and pull mirrors keep
+following their upstream the same way. Configure `[import].allowed_hosts` and
+allow the server workload outbound HTTPS to those hosts (or through the
+configured proxy) when this workflow is enabled. The image's system `git`
+executable remains for copying forks between Crab repositories.
 
 Release publication is disabled until native qualification binds the exact
 source, image, SDK version, and provider configuration. The container workflow

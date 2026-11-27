@@ -165,6 +165,7 @@ async fn private_fork_push_synchronizes_only_the_matching_upstream_pull() {
                 description: String::new(),
                 visibility: crate::catalog::visibility::Visibility::Private,
                 forked_from: None,
+                mirror: None,
             },
             MembershipActor {
                 issuer: h.provider.issuer.clone(),

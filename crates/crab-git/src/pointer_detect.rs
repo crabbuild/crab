@@ -14,7 +14,7 @@ const LEGACY_GIT_MEDIA_PREFIX: &str = "version http://git-media.io/v/2";
 const LEGACY_HAWSER_PREFIX: &str = "version https://hawser.github.com/spec/v1";
 
 /// Result of classifying a blob's pointer format.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PointerKind {
     /// Standard Git LFS pointer (spec v1).
     Lfs(LfsPointer),
