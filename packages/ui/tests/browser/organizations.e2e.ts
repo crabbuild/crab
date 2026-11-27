@@ -1371,3 +1371,42 @@ test("a former member can inspect their old decision without current metadata or
   );
   expect(state.writes).toEqual([]);
 });
+
+test("organization creation alert button preserves contrast and no underline in light and dark themes", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.route("**/api/profile", (route) =>
+    route.fulfill({ json: { profile: null } }),
+  );
+  await page.goto("/-/organizations/new");
+  const cta = page.getByRole("link", { name: "Set up your public profile" });
+  await expect(cta).toBeVisible();
+  for (const theme of ["light", "dark"] as const) {
+    if (theme === "dark") {
+      await selectDarkTheme(page);
+    }
+    const rest = await cta.evaluate((el) => {
+      const style = getComputedStyle(el);
+      return {
+        color: style.color,
+        backgroundColor: style.backgroundColor,
+        textDecorationLine: style.textDecorationLine,
+      };
+    });
+    expect(rest.textDecorationLine).toBe("none");
+    expect(rest.color).not.toBe(rest.backgroundColor);
+    await cta.hover();
+    const hovered = await cta.evaluate((el) => {
+      const style = getComputedStyle(el);
+      return {
+        color: style.color,
+        backgroundColor: style.backgroundColor,
+        textDecorationLine: style.textDecorationLine,
+      };
+    });
+    expect(hovered.textDecorationLine).toBe("none");
+    expect(hovered.color).not.toBe(hovered.backgroundColor);
+    await expectNoAccessibilityViolations(page);
+  }
+});
