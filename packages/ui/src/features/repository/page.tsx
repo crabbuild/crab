@@ -437,10 +437,14 @@ export function RepositoryPage({
       kind={kind}
     />
   );
+  const showWatch = Boolean(identity && !publicReader);
+  const showCodeSearch = view !== "code-search";
+  const showViewForks = Boolean(forkNetwork && view !== "forks");
+  const hasHeaderActions = showWatch || showCodeSearch || showViewForks;
   return (
     <>
-      <div className="repo-header flex items-center gap-2">
-        <nav aria-label="Repository" className="min-w-0 flex-1">
+      <div className="repo-header flex flex-col lg:flex-row lg:items-center lg:gap-3">
+        <nav aria-label="Repository" className="min-w-0 lg:flex-1">
           {[
             {
               view: "code",
@@ -522,50 +526,56 @@ export function RepositoryPage({
               </Link>
             ))}
         </nav>
-        {identity && !publicReader && (
-          <RepositoryWatch key={repo.id} repo={repo} csrf={csrf} />
-        )}
-        {view !== "code-search" && (
-          <Button asChild variant="outline" size="sm" className="shrink-0">
-            <Link
-              aria-label="Search code"
-              href={repoHref(repo, { view: "code-search", at: revision })}
-            >
-              <SearchIcon data-icon="inline-start" />
-              <span className="hidden sm:inline">Search code</span>
-            </Link>
-          </Button>
+        {hasHeaderActions && (
+          <div className="repo-header-actions flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-border/70 py-2 lg:flex-nowrap lg:border-t-0 lg:py-0">
+            {showWatch && (
+              <RepositoryWatch key={repo.id} repo={repo} csrf={csrf} />
+            )}
+            {showCodeSearch && (
+              <Button asChild variant="outline" size="sm" className="shrink-0">
+                <Link
+                  aria-label="Search code"
+                  href={repoHref(repo, { view: "code-search", at: revision })}
+                >
+                  <SearchIcon data-icon="inline-start" />
+                  <span>Search code</span>
+                </Link>
+              </Button>
+            )}
+            {showViewForks && forkNetwork && (
+              <Button asChild variant="outline" size="sm" className="shrink-0">
+                <Link
+                  aria-label="View forks"
+                  href={repoHref(forkNetwork, { view: "forks" })}
+                >
+                  <RepoForkedIcon data-icon="inline-start" />
+                  <span>View forks</span>
+                </Link>
+              </Button>
+            )}
+          </div>
         )}
       </div>
-      {overview && (forkNetwork || canCreateFork) && (
+      {overview && canCreateFork && (
         <div className="flex flex-wrap items-start justify-end gap-2 px-4 py-2">
-          {forkNetwork && (
-            <Button asChild variant="outline">
-              <Link href={repoHref(forkNetwork, { view: "forks" })}>
-                <RepoForkedIcon data-icon="inline-start" /> View forks
-              </Link>
-            </Button>
-          )}
-          {canCreateFork && (
-            <GitImport
-              key={`${identity.issuer}:${identity.subject}:${repo.id}`}
-              account={JSON.stringify([identity.issuer, identity.subject])}
-              organization={
-                organizationId
-                  ? {
-                      id: organizationId,
-                      name: ownership?.organization.name ?? repo.owner,
-                    }
-                  : undefined
-              }
-              fork={repo}
-              csrf={csrf}
-              onImported={(repository) => {
-                onRepositoryChanged();
-                navigate(repoHref(repository));
-              }}
-            />
-          )}
+          <GitImport
+            key={`${identity.issuer}:${identity.subject}:${repo.id}`}
+            account={JSON.stringify([identity.issuer, identity.subject])}
+            organization={
+              organizationId
+                ? {
+                    id: organizationId,
+                    name: ownership?.organization.name ?? repo.owner,
+                  }
+                : undefined
+            }
+            fork={repo}
+            csrf={csrf}
+            onImported={(repository) => {
+              onRepositoryChanged();
+              navigate(repoHref(repository));
+            }}
+          />
         </div>
       )}
       {repo.fork && (

@@ -326,6 +326,27 @@ test("repository search pages on the server and restores a stale continuation", 
       .getByRole("list", { name: "Repository results" })
       .getByText("Public", { exact: true }),
   ).toBeVisible();
+  const repoRow = page
+    .getByRole("list", { name: "Repository results" })
+    .getByRole("listitem")
+    .first();
+  const iconBox = await repoRow.locator("svg").first().boundingBox();
+  const linkBox = await repoRow
+    .getByRole("link", { name: "archive-newest" })
+    .boundingBox();
+  const badgeBox = await repoRow
+    .getByText("Archived", { exact: true })
+    .boundingBox();
+  expect(iconBox).not.toBeNull();
+  expect(linkBox).not.toBeNull();
+  expect(badgeBox).not.toBeNull();
+  const centerY = (box: NonNullable<typeof iconBox>) => box.y + box.height / 2;
+  expect(Math.abs(centerY(iconBox!) - centerY(linkBox!))).toBeLessThanOrEqual(
+    2,
+  );
+  expect(Math.abs(centerY(linkBox!) - centerY(badgeBox!))).toBeLessThanOrEqual(
+    2,
+  );
   await expect(page.locator("relative-time")).toHaveAttribute(
     "datetime",
     "2026-01-15T00:00:00.000Z",

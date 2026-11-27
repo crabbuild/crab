@@ -123,7 +123,7 @@ export function UserAvatar({
   return (
     <span
       className={cn(
-        "inline-flex shrink-0 items-center justify-center overflow-hidden border border-border/60 bg-muted select-none",
+        "inline-flex shrink-0 items-center justify-center overflow-hidden border border-border/60 bg-muted select-none [&>svg]:size-full",
         square ? "rounded-md" : "rounded-full",
         className,
       )}
@@ -137,6 +137,7 @@ export function UserAvatar({
         variant={resolved.variant}
         colors={resolved.colors}
         square={square}
+        className="size-full"
       />
     </span>
   );

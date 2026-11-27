@@ -78,25 +78,27 @@ export function GeneralSettings({
             aria-labelledby="danger-zone-heading"
           >
             <h2 id="danger-zone-heading">Danger Zone</h2>
-            {repo.can_configure_visibility && csrf && (
-              <VisibilitySettings
+            <div className="danger-zone-list">
+              {repo.can_configure_visibility && csrf && (
+                <VisibilitySettings
+                  repo={repo}
+                  csrf={csrf}
+                  onChanged={onRepositoryChanged}
+                />
+              )}
+              <ArchiveSettings
                 repo={repo}
                 csrf={csrf}
                 onChanged={onRepositoryChanged}
               />
-            )}
-            <ArchiveSettings
-              repo={repo}
-              csrf={csrf}
-              onChanged={onRepositoryChanged}
-            />
-            {repo.organization_id && csrf && (
-              <DeleteRepositorySettings
-                repo={repo}
-                csrf={csrf}
-                onChanged={onRepositoryChanged}
-              />
-            )}
+              {repo.organization_id && csrf && (
+                <DeleteRepositorySettings
+                  repo={repo}
+                  csrf={csrf}
+                  onChanged={onRepositoryChanged}
+                />
+              )}
+            </div>
           </section>
         </>
       )}

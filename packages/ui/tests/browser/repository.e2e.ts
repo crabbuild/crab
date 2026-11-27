@@ -4586,3 +4586,304 @@ test("revision picker creates a branch from the exact viewed commit", async ({
     }),
   ).toHaveAttribute("aria-checked", "true");
 });
+
+test("repository header places View forks to the right of Search code and stays responsive", async ({
+  page,
+}) => {
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/session") {
+      return route.fulfill({
+        json: {
+          authenticated: true,
+          mode: "local",
+          user: {
+            issuer: "https://auth.example",
+            subject: "user-1",
+            name: "Alice",
+          },
+          csrf: "test-csrf",
+        },
+      });
+    }
+    if (url.pathname === "/api/notifications/unread") {
+      return route.fulfill({ json: { count: 0 } });
+    }
+    if (url.pathname === "/api/repos") {
+      return route.fulfill({
+        json: {
+          repositories: [
+            {
+              id: "00000000-0000-4000-8000-000000000099",
+              owner: "team",
+              name: "project",
+              description: "A repository for our team.",
+              visibility: "public",
+              organization_id: "00000000-0000-4000-8000-000000000100",
+              access: "write",
+              can_admin: true,
+              can_maintain: true,
+              archive_version: 0,
+              archived: false,
+              protection_version: 0,
+              protected_branches: [],
+            },
+          ],
+        },
+      });
+    }
+    if (
+      url.pathname === "/api/organizations/00000000-0000-4000-8000-000000000100"
+    ) {
+      return route.fulfill({
+        json: {
+          organization: {
+            id: "00000000-0000-4000-8000-000000000100",
+            name: "team",
+            display_name: "Team",
+          },
+          role: "owner",
+        },
+      });
+    }
+    return route.fallback();
+  });
+
+  for (const viewport of [
+    { width: 1280, height: 720 },
+    { width: 1024, height: 768 },
+    { width: 768, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+    if (viewport.width === 1280) {
+      await page.goto("/team/project");
+    }
+
+    const header = page.locator(".repo-header");
+    const nav = header.getByRole("navigation", { name: "Repository" });
+    const watch = header.getByRole("button", { name: "Watch", exact: true });
+    const searchCode = header.getByRole("link", {
+      name: "Search code",
+      exact: true,
+    });
+    const viewForks = header.getByRole("link", {
+      name: "View forks",
+      exact: true,
+    });
+
+    await expect(nav).toBeVisible();
+    await expect(watch).toBeVisible();
+    await expect(searchCode).toBeVisible();
+    await expect(viewForks).toBeVisible();
+
+    const searchBox = await searchCode.boundingBox();
+    const forksBox = await viewForks.boundingBox();
+    expect(searchBox).not.toBeNull();
+    expect(forksBox).not.toBeNull();
+    expect(forksBox!.x).toBeGreaterThanOrEqual(
+      searchBox!.x + searchBox!.width - 1,
+    );
+    const searchCenterY = searchBox!.y + searchBox!.height / 2;
+    const forksCenterY = forksBox!.y + forksBox!.height / 2;
+    expect(Math.abs(forksCenterY - searchCenterY)).toBeLessThanOrEqual(2);
+
+    const scrollWidth = await page.evaluate(
+      () => document.documentElement.scrollWidth,
+    );
+    expect(scrollWidth).toBeLessThanOrEqual(viewport.width);
+    await expectNoAccessibilityViolations(page);
+  }
+});
+
+test("Danger Zone renders compact grouped rows with clear section spacing in light and dark themes", async ({
+  page,
+}) => {
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/session") {
+      return route.fulfill({
+        json: {
+          authenticated: true,
+          mode: "local",
+          user: {
+            issuer: "https://auth.example",
+            subject: "user-1",
+            name: "Alice",
+          },
+          csrf: "test-csrf",
+        },
+      });
+    }
+    if (url.pathname === "/api/notifications/unread") {
+      return route.fulfill({ json: { count: 0 } });
+    }
+    if (url.pathname === "/api/repos") {
+      return route.fulfill({
+        json: {
+          repositories: [
+            {
+              id: "00000000-0000-4000-8000-000000000099",
+              owner: "team",
+              name: "project",
+              description: "A repository for our team.",
+              visibility: "private",
+              organization_id: "00000000-0000-4000-8000-000000000100",
+              access: "write",
+              can_admin: true,
+              can_configure_visibility: true,
+              archive_version: 0,
+              archived: false,
+              protection_version: 0,
+              protected_branches: [],
+            },
+          ],
+        },
+      });
+    }
+    return route.fallback();
+  });
+
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.goto("/team/project/settings");
+
+  const dangerZone = page.locator(".danger-zone");
+  const dangerList = dangerZone.locator(".danger-zone-list");
+  const rows = dangerList.locator(".danger-zone-row");
+  await expect(rows).toHaveCount(3);
+
+  const prevSection = page
+    .locator(".settings-content > .settings-section")
+    .last();
+  const prevBox = await prevSection.boundingBox();
+  const dangerBox = await dangerZone.boundingBox();
+  expect(prevBox).not.toBeNull();
+  expect(dangerBox).not.toBeNull();
+  expect(dangerBox!.y - (prevBox!.y + prevBox!.height)).toBeGreaterThanOrEqual(
+    32,
+  );
+
+  const rowBoxes = await Promise.all(
+    [0, 1, 2].map((i) => rows.nth(i).boundingBox()),
+  );
+  for (const box of rowBoxes) {
+    expect(box).not.toBeNull();
+    expect(box!.height).toBeLessThanOrEqual(76);
+  }
+  expect(
+    Math.abs(rowBoxes[1]!.y - (rowBoxes[0]!.y + rowBoxes[0]!.height)),
+  ).toBeLessThanOrEqual(2);
+  expect(
+    Math.abs(rowBoxes[2]!.y - (rowBoxes[1]!.y + rowBoxes[1]!.height)),
+  ).toBeLessThanOrEqual(2);
+
+  await expectNoAccessibilityViolations(page);
+  await selectTheme(page, "dark");
+  await expectNoAccessibilityViolations(page);
+
+  await page
+    .getByRole("button", { name: "Archive this repository", exact: true })
+    .click();
+  await expect(page.locator(".archive-confirm")).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(390);
+  await expectNoAccessibilityViolations(page);
+});
+
+test("directory file table uses file-type-specific icons in light and dark themes", async ({
+  page,
+}) => {
+  await page.route("**/api/repos/team/project/tree?*", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("path_hex")) return route.fallback();
+    return route.fulfill({
+      json: {
+        items: [
+          {
+            path: "crates",
+            path_hex: pathHex("crates"),
+            kind: "Tree",
+            oid,
+            mode: "040000",
+          },
+          {
+            path: "allocations.md",
+            path_hex: pathHex("allocations.md"),
+            kind: "Blob",
+            oid,
+            mode: "100644",
+          },
+          {
+            path: "bindings.rs",
+            path_hex: pathHex("bindings.rs"),
+            kind: "Blob",
+            oid,
+            mode: "100644",
+          },
+          {
+            path: "app.ts",
+            path_hex: pathHex("app.ts"),
+            kind: "Blob",
+            oid,
+            mode: "100644",
+          },
+          {
+            path: "Cargo.toml",
+            path_hex: pathHex("Cargo.toml"),
+            kind: "Blob",
+            oid,
+            mode: "100644",
+          },
+        ],
+        next: null,
+        commit: oid,
+        directory_oid: oid,
+        generation: 1,
+      },
+    });
+  });
+
+  await page.goto("/team/project");
+  const fileTable = page.locator(".file-table");
+  await expect(fileTable).toBeVisible();
+
+  const spriteInfo = await page.evaluate(() => {
+    const sprites = document.querySelectorAll("#crab-file-type-icon-sprite");
+    const sprite = sprites[0];
+    const markdownSymbol = sprite?.querySelector("#file-tree-builtin-markdown");
+    const rustSymbol = sprite?.querySelector("#file-tree-builtin-rust");
+    return {
+      count: sprites.length,
+      markdownNs: markdownSymbol?.namespaceURI,
+      rustNs: rustSymbol?.namespaceURI,
+    };
+  });
+  expect(spriteInfo).toEqual({
+    count: 1,
+    markdownNs: "http://www.w3.org/2000/svg",
+    rustNs: "http://www.w3.org/2000/svg",
+  });
+
+  for (const [token, symbolName] of [
+    ["markdown", "file-tree-builtin-markdown"],
+    ["rust", "file-tree-builtin-rust"],
+    ["typescript", "file-tree-builtin-typescript"],
+    ["default", "file-tree-builtin-default"],
+  ] as const) {
+    const icon = fileTable.locator(`svg.file-icon[data-icon-token="${token}"]`);
+    await expect(icon).toBeVisible();
+    await expect(icon.locator("use")).toHaveAttribute("href", `#${symbolName}`);
+    const box = await icon.boundingBox();
+    expect(box).not.toBeNull();
+    expect(Math.round(box!.width)).toBe(16);
+    expect(Math.round(box!.height)).toBe(16);
+  }
+
+  await expectNoAccessibilityViolations(page);
+  await selectDarkTheme(page);
+  await expectNoAccessibilityViolations(page);
+});

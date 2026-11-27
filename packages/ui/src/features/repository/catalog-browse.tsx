@@ -198,14 +198,14 @@ export function BrowseRepositories({
                       }
                     >
                       <RepoIcon
-                        size={18}
+                        size={16}
                         className="shrink-0 text-muted-foreground"
                         aria-hidden="true"
                       />
                       <RepositoryHeading
                         className={
                           scoped
-                            ? "min-w-0 wrap-anywhere text-base font-semibold"
+                            ? "m-0 min-w-0 wrap-anywhere text-base leading-snug font-semibold"
                             : undefined
                         }
                       >

@@ -41,7 +41,7 @@ export function DeleteRepositorySettings({
       </div>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogTrigger asChild>
-          <Button variant="destructive" size="sm">
+          <Button variant="outline" size="sm" className="danger-zone-action">
             Delete this repository
           </Button>
         </DialogTrigger>

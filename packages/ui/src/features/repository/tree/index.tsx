@@ -6,7 +6,8 @@ import {
   InputGroupAddon,
   InputGroupInput,
 } from "@/components/ui/input-group";
-import { FileIcon, SearchIcon } from "@primer/octicons-react";
+import { SearchIcon } from "@primer/octicons-react";
+import { FileTypeIcon } from "../file-type-icon";
 import {
   displayHex,
   endpoint,
@@ -374,7 +375,7 @@ export function RepositoryTree({
                     onMouseEnter={() => setActiveResult(index)}
                     onClick={() => openSearchResult(entry)}
                   >
-                    <FileIcon aria-hidden="true" />
+                    <FileTypeIcon path={entry.path} />
                     <span>{entry.path}</span>
                   </li>
                 ))}
