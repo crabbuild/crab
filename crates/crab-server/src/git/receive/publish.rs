@@ -32,7 +32,7 @@ const MAX_IMPORT_COMMAND_BYTES: usize = 32 * 1024 * 1024;
 const MAX_RECEIVE_LOGICAL_OBJECTS: u64 = 5_000_000;
 const MAX_RECEIVE_STORAGE_REQUESTS: u64 = 6_000_000;
 
-fn repository_options(server: &Server) -> crate::Result<RepositoryOptions> {
+pub(crate) fn repository_options(server: &Server) -> crate::Result<RepositoryOptions> {
     let mut operation = server.options.operation_limits();
     operation.max_duration = super::REQUEST_BUDGET;
     operation.max_logical_objects = MAX_RECEIVE_LOGICAL_OBJECTS;
@@ -83,8 +83,6 @@ pub(super) enum Publication {
         plan_id: String,
     },
     PullRequest(PullPublication),
-    /// A pull mirror replacing its refs with the upstream's branches and tags.
-    Mirror,
 }
 
 impl Publication {
@@ -97,8 +95,6 @@ impl Publication {
             Self::BranchUpdate(update) => Some(update.plan_id.clone()),
             Self::ForkSync { plan_id, .. } => Some(plan_id.clone()),
             Self::PullRequest(pull) => pull.plan_id.clone(),
-            // Each sync recomputes its edits from the current refs.
-            Self::Mirror => None,
         }
     }
 
@@ -112,8 +108,7 @@ impl Publication {
             | Self::PullBranch(_)
             | Self::ReviewSuggestions(_)
             | Self::BranchUpdate(_)
-            | Self::ForkSync { .. }
-            | Self::Mirror => server,
+            | Self::ForkSync { .. } => server,
             Self::PullRequest(pull) => &pull.cancel,
         }
     }
@@ -313,15 +308,12 @@ pub(crate) async fn publish_default_branch(
     cancel: &CancellationToken,
 ) -> Result<()> {
     let entry = server.repositories.get(key).ok_or(ReceiveError::NotFound)?;
-    // A mirror's default branch follows its upstream; only its sync moves it.
-    match (entry.mirror.is_some(), principal.is_mirror()) {
-        (true, false) => return Err(ReceiveError::RefRule(super::READ_ONLY_MIRROR)),
-        (false, true) => return Err(ReceiveError::RefRule(super::NOT_A_MIRROR)),
-        _ => {}
+    // A mirror's default branch follows its upstream HEAD.
+    if entry.mirror.is_some() {
+        return Err(ReceiveError::RefRule(super::READ_ONLY_MIRROR));
     }
-    let authorized = |principal: &Principal| principal.is_mirror() || principal.can_admin(entry.id);
     let current = crate::app::membership(server, principal, &entry).await?;
-    if !authorized(&current.principal) {
+    if !current.principal.can_admin(entry.id) {
         return Err(ReceiveError::Forbidden);
     }
     let leased_entry = Arc::clone(&entry);
@@ -353,7 +345,7 @@ pub(crate) async fn publish_default_branch(
                             return Ok(false);
                         }
                         let current = crate::app::membership(server, principal, entry).await?;
-                        if !authorized(&current.principal) {
+                        if !current.principal.can_admin(entry.id) {
                             return Err(ReceiveError::Forbidden);
                         }
                         match crab_write::capsule_protocol::retarget_head(
@@ -388,58 +380,6 @@ pub(crate) async fn publish_default_branch(
         },
     )
     .await
-}
-
-pub(super) async fn publish_mirror(
-    server: &Server,
-    repository: &Repository,
-    updates: Vec<crab_git::receive_plan::RefUpdate>,
-    pack: Option<(crate::local_disk::StagingDirectory, std::path::PathBuf)>,
-    head: &str,
-    cancel: &CancellationToken,
-) -> Result<()> {
-    let principal = Principal::mirror(repository.id);
-    let key = (
-        repository.config.owner.clone(),
-        repository.config.name.clone(),
-    );
-    if !updates.is_empty() {
-        let (directory, input) = match pack {
-            Some((directory, path)) => {
-                let file = tokio::task::spawn_blocking(move || std::fs::File::open(path)).await??;
-                (directory, Some(BufReader::new(file)))
-            }
-            None => (server.local_staging.create(1, cancel).await?, None),
-        };
-        run_request(
-            server,
-            &principal,
-            &key,
-            Arc::new(directory),
-            receive_wire::ReceiveRequest {
-                updates,
-                report_status: false,
-            },
-            ReceiveInput {
-                pack: input,
-                plan_id: None,
-                publication: Publication::Mirror,
-                visibility_bases: BTreeMap::new(),
-                defer_readiness: false,
-                wire: false,
-                native_repeat: None,
-            },
-            cancel,
-        )
-        .await?;
-    }
-    let view = repository.open_ref_view().await?;
-    let Some(oid) = view.refs().get(head).filter(|_| view.head() != head) else {
-        return Ok(());
-    };
-    let oid = gix_hash::ObjectId::from_hex(oid.as_bytes())
-        .map_err(|_| ReceiveError::Request("Invalid ref in mirror"))?;
-    publish_default_branch(server, &principal, &key, view.head(), head, oid, cancel).await
 }
 
 pub(super) async fn publish_pack(
@@ -593,8 +533,7 @@ async fn run_request(
             | Publication::IssueBranch(_)
             | Publication::PullBranch(_)
             | Publication::ReviewSuggestions(_)
-            | Publication::ForkSync { .. }
-            | Publication::Mirror => None,
+            | Publication::ForkSync { .. } => None,
             Publication::PullRequest(pull)
                 if pull.head_repository.is_none()
                     && !matches!(pull.candidate, Some(CandidatePublication::Remove)) =>
@@ -817,10 +756,8 @@ fn tracks_issue_closures(
     principal: &Principal,
     updates: &[crab_git::receive_plan::RefUpdate],
 ) -> bool {
-    // Copied history names the source host's issues, not this repository's.
     server.cells().is_some()
         && principal.import_grant().is_none()
-        && !principal.is_mirror()
         && updates.iter().any(|update| {
             update.name.starts_with("refs/heads/")
                 && update.new.is_some()
@@ -1141,8 +1078,7 @@ async fn publish_attempt(
         linear_history: None,
         rewritten_refs: Default::default(),
     };
-    let mirror = matches!(input.publication, Publication::Mirror);
-    let policy = if defer_readiness || mirror {
+    let policy = if defer_readiness {
         settings::import_ref_policy(server, entry).await?
     } else {
         settings::load_ref_policy(server, entry).await?
@@ -1174,7 +1110,7 @@ async fn publish_attempt(
         .head
         .as_ref()
         .map(|head| head.name.clone());
-    let max_ref_updates = if defer_readiness || mirror {
+    let max_ref_updates = if defer_readiness {
         MAX_IMPORT_REF_UPDATES
     } else {
         1024
@@ -1194,12 +1130,6 @@ async fn publish_attempt(
         (Publication::BranchUpdate(branch), [update]) if branch.rebase => {
             [update.name.clone()].into()
         }
-        // The upstream may rewrite history; inherited rulesets still apply.
-        (Publication::Mirror, updates) => updates
-            .iter()
-            .filter(|update| update.old.is_some() && update.new.is_some())
-            .map(|update| update.name.clone())
-            .collect(),
         (
             Publication::PullRequest(PullPublication {
                 candidate: Some(CandidatePublication::Prepare { .. }),
@@ -1303,15 +1233,6 @@ async fn publish_attempt(
     mutation.check_policy(&policy, view.head(), actor)?;
     let dependency_limits = dependency_limits();
     let pointers = prepared.plan().pointers();
-    if let (Publication::Mirror, Some(source)) = (&input.publication, entry.mirror.as_deref())
-        && !pointers.is_empty()
-    {
-        // Payloads stream from the upstream's LFS server; the capsule upload
-        // below proves every pointer before any ref moves.
-        crate::git_import::copy_mirror_lfs(source, entry, pointers, cancel)
-            .await
-            .map_err(|error| ReceiveError::MirrorSource(Box::new(error)))?;
-    }
     let source = match &input.publication {
         _ if pointers.is_empty() => None,
         Publication::ForkSync { source, .. } => Some(Arc::clone(source)),
@@ -1651,15 +1572,9 @@ async fn commit_authorized(
     {
         return Err(ReceiveError::Archived);
     }
-    // Only the mirror's own synchronization moves a mirror's refs, and it
-    // never writes to a repository that stopped mirroring.
-    match (
-        entry.mirror.is_some(),
-        matches!(mutation.publication, Publication::Mirror),
-    ) {
-        (true, false) => return Err(ReceiveError::RefRule(super::READ_ONLY_MIRROR)),
-        (false, true) => return Err(ReceiveError::RefRule(super::NOT_A_MIRROR)),
-        _ => {}
+    // A mirror's refs follow its upstream through the import path, never a push.
+    if entry.mirror.is_some() {
+        return Err(ReceiveError::RefRule(super::READ_ONLY_MIRROR));
     }
     if let Publication::IssueBranch(branch) = mutation.publication {
         crate::repository::development_branches::authorize(server, entry, principal, branch)
@@ -1680,7 +1595,7 @@ async fn commit_authorized(
         None
     };
     let bypassed = if !matches!(mutation.publication, Publication::PullRequest(_)) {
-        let policy = if principal.import_grant().is_some() || principal.is_mirror() {
+        let policy = if principal.import_grant().is_some() {
             settings::import_ref_policy(server, entry).await?
         } else {
             settings::load_ref_policy(server, entry).await?

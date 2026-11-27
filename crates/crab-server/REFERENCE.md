@@ -1051,12 +1051,14 @@ about 1 GiB of delta bases and read windows while it reconstructs objects.
 
 | Endpoint | Contract |
 | --- | --- |
-| `POST /api/imports/git` | Starts an asynchronous import. The JSON body is `{request_id?, source, owner, name, description?, visibility?, token?, mirror?}`. `visibility` is `private` (default) or `public`. `source` is an HTTPS clone URL, GitHub `owner/repository` shorthand, or a GitHub SSH URL (fetched over HTTPS), whose host appears in `import.allowed_hosts`. Plain HTTP is accepted only for a loopback host. HTTPS tokens are sent as bearer headers and remain in memory. `mirror: true` keeps the repository as a read-only pull mirror and accepts no token. Browser requests require the session CSRF token. An exact request UUID replay returns the existing job. |
+| `POST /api/imports/git` | Starts an asynchronous import. The JSON body is `{request_id?, source, owner, name, description?, visibility?, token?, mirror?}`. `visibility` is `private` (default) or `public`. `source` is an HTTPS clone URL, GitHub `owner/repository` shorthand, or a GitHub SSH URL (fetched over HTTPS), whose host appears in `import.allowed_hosts`. Plain HTTP is accepted only for a loopback host. Tokens are sent as bearer headers over HTTPS or to a loopback host. An import keeps its token in memory only. `mirror: true` keeps the repository as a read-only pull mirror; with a `token`, the server seals it for later syncs, which requires `auth.state_key_file`. Browser requests require the session CSRF token. An exact request UUID replay returns the existing job. |
 | `GET /api/imports/git/{id}` | Reads the caller's job from object storage on any serving replica. States are `queued`, `running`, `succeeded`, `failed`, and `interrupted`. The response includes the saved `visibility`, `mirror` when set, `resumable`, and the destination link after success. |
 | `POST /api/imports/git/{id}/resume` | Resumes a failed or interrupted job as the original account. Send the session CSRF token and a JSON body of `{}` or `{"token":"…"}` for a private HTTPS source. An active or completed job returns its existing status. |
-| `GET /api/repositories/{repository}/mirror` | Reads a pull mirror's upstream `source` and its last sync `status`: `checked_at_ms`, `synced_at_ms`, `updated_refs`, and `error`. Requires read access. |
+| `GET /api/repositories/{repository}/mirror` | Reads a pull mirror's upstream `source`, whether it holds a sealed token (`authenticated`), and its last sync `status`: `checked_at_ms`, `synced_at_ms`, `updated_refs`, and `error`. Requires read access. |
 | `POST /api/repositories/{repository}/mirror/sync` | Syncs the mirror now and returns the same shape. Requires write access. A failed sync returns `502` with code `mirror_sync_failed` and its reason, and leaves every ref unchanged. |
-| `DELETE /api/repositories/{repository}/mirror` | Stops mirroring; the repository accepts pushes again. Requires admin access and returns `204`. |
+| `PUT /api/repositories/{repository}/mirror/credential` | Replaces the mirror's upstream token with `{"token":"…"}`. Requires admin access and `auth.state_key_file`, and returns `204`. |
+| `DELETE /api/repositories/{repository}/mirror/credential` | Deletes the sealed token; later syncs read the upstream anonymously. Requires admin access and returns `204`. |
+| `DELETE /api/repositories/{repository}/mirror` | Stops mirroring and deletes the mirror's token; the repository accepts pushes again. Requires admin access and returns `204`. |
 
 People with repository creation permission use **Import from Git** in the
 organization's **Repositories** tab or from the repository owner picker.
@@ -1092,22 +1094,30 @@ An import with `mirror: true` keeps following its upstream. Every 15 minutes,
 and on request, a sync lists the upstream's branches and tags, fetches only the
 objects the mirror lacks, and moves each changed ref to the upstream's value.
 New refs are created, rewritten refs are replaced, and refs deleted upstream
-are deleted. The default branch follows the upstream `HEAD`. A sync publishes
-through the same validation, visibility, and LFS checks as a push, as the
-`Git mirror` identity. It sends push webhooks, but it does not record push
-attribution or close issues that upstream commit messages name. Organization
-rulesets inherited by the repository still apply.
+are deleted. The default branch follows the upstream `HEAD`. Like the initial
+import, a sync uses no local disk. It stages the incremental pack in object
+storage and parses each object once as the pack is reread. It then validates
+those objects with the same graph, policy, and exact visibility rules as a
+push, against the mirror's visible history, and publishes them in one capsule
+after copying new Git LFS payloads. Syncs do not send push webhooks, record
+push attribution, or close issues that upstream commit messages name.
+Organization rulesets inherited by the repository still apply.
 
 Nothing else moves a mirror's refs. Git pushes are refused before any upload,
 and browser branch, file, merge, and default-branch changes return `403`. One
-lease per mirror serializes its syncs across replicas and with **stop
-mirroring**. A sync stages only the incremental pack, in the Cell local-disk
-budget, up to 8 GiB. Source credentials are never stored, so a mirror reads its
-upstream anonymously; mirror a source that allows anonymous reads. Each sync
-rechecks `import.allowed_hosts`, so removing a host stops its mirrors. Sync
-status records live under `.crab/http-server/v1/git-mirrors/`. Upgrade every
-serving replica before creating the first mirror: earlier builds cannot read a
-catalog that records one.
+lease per mirror serializes its syncs across replicas, with token changes, and
+with **stop mirroring**. Each sync rechecks `import.allowed_hosts`, so removing
+a host stops its mirrors.
+
+A private upstream's token is sealed with XChaCha20-Poly1305 under a key
+derived from `auth.state_key_file`. The seal is bound to the mirror's repository
+UUID and source URL, so it cannot be replayed for another mirror or host. Only
+the sealed form is stored, in
+`.crab/http-server/v1/git-mirrors/{repository}/credential.json`, next to the
+sync status in `status.json`. Every serving replica needs the same key file.
+After the key changes, syncs report that the stored token cannot be read until
+an administrator sets it again. Upgrade every serving replica before creating
+the first mirror: earlier builds cannot read a catalog that records one.
 
 Status records live under `.crab/http-server/v1/git-imports/` within the configured
 root. A worker updates the record every 15 seconds. After 60 seconds without
@@ -1129,8 +1139,8 @@ allowed_hosts = ["github.com", "gitlab.com", "git.example.internal"]
 ```
 
 Hosts are exact, lower-case matches. The server fetches HTTPS clone URLs;
-GitHub SSH URLs and shorthand map to their HTTPS form, and plain HTTP is
-accepted only for loopback hosts. SSH URLs for other hosts, file paths,
+GitHub SSH URLs and shorthand map to their HTTPS form, and plain HTTP, with or
+without a token, is accepted only for loopback hosts. SSH URLs for other hosts, file paths,
 `git://`, embedded credentials, query strings, and fragments are rejected.
 Git fetches do not follow redirects; LFS downloads follow at most five HTTPS
 redirects. Keep outbound network policy enabled as a second boundary for

@@ -255,6 +255,7 @@ pub(crate) struct Authentication {
     state: AuthState,
     cursor_key: [u8; 32],
     webhook_key: Option<[u8; 32]>,
+    mirror_key: Option<[u8; 32]>,
     scim_key: Option<blake3::Hash>,
     scim_admission: Semaphore,
     admission: Semaphore,
@@ -305,7 +306,7 @@ impl Authentication {
                 Ok(ClientSecret::new(text.to_owned()))
             })
             .transpose()?;
-        let (cursor_key, webhook_key) = match &config.state_key_file {
+        let (cursor_key, webhook_key, mirror_key) = match &config.state_key_file {
             Some(path) => {
                 let secret = std::fs::read(path).map_err(AuthError::provider)?;
                 if secret.len() < 32 {
@@ -317,9 +318,13 @@ impl Authentication {
                         "crab github actions webhook key v1",
                         &secret,
                     )),
+                    Some(blake3::derive_key(
+                        "crab git mirror credential key v1",
+                        &secret,
+                    )),
                 )
             }
-            None => (rand::random(), None),
+            None => (rand::random(), None, None),
         };
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -340,6 +345,7 @@ impl Authentication {
             state,
             cursor_key,
             webhook_key,
+            mirror_key,
             scim_key,
             scim_admission: Semaphore::new(4),
             admission: Semaphore::new(8),
@@ -365,6 +371,11 @@ impl Authentication {
 
     pub(crate) fn webhook_key(&self) -> Option<&[u8; 32]> {
         self.webhook_key.as_ref()
+    }
+
+    /// Key sealing pull-mirror source credentials; shared by every replica.
+    pub(crate) fn mirror_key(&self) -> Option<&[u8; 32]> {
+        self.mirror_key.as_ref()
     }
 
     pub fn origin(&self) -> String {

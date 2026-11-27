@@ -95,6 +95,7 @@ fn shared_auth(store: Store) -> Authentication {
         },
         cursor_key: [7; 32],
         webhook_key: None,
+        mirror_key: None,
         scim_key: None,
         scim_admission: Semaphore::new(4),
         admission: Semaphore::new(1),

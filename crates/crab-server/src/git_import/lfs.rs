@@ -10,7 +10,6 @@ use std::time::Duration;
 use crab_git::pointer_detect::PointerKind;
 use crab_git::receive_plan::PointerDependency;
 use futures_util::{StreamExt, TryStreamExt};
-use gix_hash::ObjectId;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -71,51 +70,31 @@ struct ObjectError {
 }
 
 /// Copy every LFS payload named by `pointers`, then prove the complete set.
+///
+/// Payloads already in the repository's LFS store are not downloaded again.
 pub(super) async fn copy(
     source: &str,
     token: Option<&str>,
-    repository: &Repository,
-    pointers: &[(ObjectId, PointerKind)],
-    cancel: &CancellationToken,
-) -> Result<(), ImportError> {
-    let wanted = wanted(pointers.iter().map(|(_, pointer)| pointer))?;
-    if wanted.is_empty() {
-        return Ok(());
-    }
-    let copied = download_missing(source, token, repository, &wanted, cancel).await?;
-    let dependencies = pointers
-        .iter()
-        .map(|(blob, pointer)| PointerDependency {
-            blob: *blob,
-            pointer: pointer.clone(),
-        })
-        .collect::<Vec<_>>();
-    crab_read::dependency_proof::verify_capsule_dependencies_except_prepared(
-        &repository.layout,
-        &crab_metadata::capsule_protocol::PointerCatalog::new(),
-        &dependencies,
-        &BTreeSet::new(),
-        &copied,
-        proof_limits(dependencies.len()),
-        cancel,
-    )
-    .await
-    .map_err(|error| ImportError::Publication(Box::new(error)))
-}
-
-/// Copy the payloads of pointers a mirror sync introduces.
-///
-/// The receive publication that called this proves every pointer afterwards.
-pub(crate) async fn copy_mirror_lfs(
-    source: &str,
     repository: &Repository,
     pointers: &[PointerDependency],
     cancel: &CancellationToken,
 ) -> Result<(), ImportError> {
     let wanted = wanted(pointers.iter().map(|dependency| &dependency.pointer))?;
-    download_missing(source, None, repository, &wanted, cancel)
-        .await
-        .map(drop)
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let copied = download_missing(source, token, repository, &wanted, cancel).await?;
+    crab_read::dependency_proof::verify_capsule_dependencies_except_prepared(
+        &repository.layout,
+        &crab_metadata::capsule_protocol::PointerCatalog::new(),
+        pointers,
+        &BTreeSet::new(),
+        &copied,
+        proof_limits(pointers.len()),
+        cancel,
+    )
+    .await
+    .map_err(|error| ImportError::Publication(Box::new(error)))
 }
 
 fn wanted<'a>(

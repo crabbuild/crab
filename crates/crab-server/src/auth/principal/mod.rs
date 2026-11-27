@@ -24,7 +24,6 @@ enum Credential {
     Automation(Arc<super::automation::Credential>),
     Deploy { expires_at: u64 },
     Import(Arc<crate::git_import::ReceiveGrant>),
-    Mirror,
     AutoMerge(Identity),
 }
 
@@ -157,26 +156,6 @@ impl Principal {
             _ => None,
         }
     }
-    /// The server's own synchronization of one read-only pull mirror.
-    ///
-    /// It is never derived from a request credential, so no client can
-    /// publish to a mirror through it.
-    pub(crate) fn mirror(repository: Uuid) -> Self {
-        Self {
-            credential: Credential::Mirror,
-            grant: Some(Grant {
-                repository,
-                access: RepositoryAccess::Write,
-                role: RepositoryAccess::Write,
-            }),
-            repository_scope: RepositoryScope::Target(repository),
-            allow_public_reads: false,
-            public_read: None,
-        }
-    }
-    pub(crate) fn is_mirror(&self) -> bool {
-        matches!(self.credential, Credential::Mirror)
-    }
     pub(crate) fn auto_merge(repository: Uuid, actor: Identity) -> Self {
         Self {
             credential: Credential::AutoMerge(actor),
@@ -293,10 +272,7 @@ impl Principal {
     pub(crate) fn authenticated(&self) -> bool {
         match &self.credential {
             Credential::Anonymous => false,
-            Credential::Local
-            | Credential::Import(_)
-            | Credential::Mirror
-            | Credential::AutoMerge(_) => true,
+            Credential::Local | Credential::Import(_) | Credential::AutoMerge(_) => true,
             Credential::User(session) => session.active(),
             Credential::Git(token) => token.active(),
             Credential::Automation(credential) => credential.active(),
@@ -317,11 +293,6 @@ impl Principal {
                 issuer: "urn:crab:git-import".into(),
                 subject: "import-worker".into(),
                 name: "Git import worker".into(),
-            }),
-            Credential::Mirror => Some(Identity {
-                issuer: "urn:crab:git-mirror".into(),
-                subject: "mirror-sync".into(),
-                name: "Git mirror".into(),
             }),
             Credential::Local => Some(Identity {
                 issuer: "urn:crab:local".into(),

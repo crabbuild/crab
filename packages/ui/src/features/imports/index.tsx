@@ -356,7 +356,7 @@ export function GitImport({
             {
               ...fields,
               request_id,
-              token: (!mirror && token) || undefined,
+              token: token || undefined,
             },
             csrf,
             organizationId,
@@ -562,22 +562,19 @@ export function GitImport({
               disabled={fixedDestination}
             />
           </label>
-          {!forkJob &&
-            !(job ? job.mirror : mirror) &&
-            (!job || job.resumable) && (
-              <label>
-                Source token{" "}
-                <span className="muted">(HTTPS private repos)</span>
-                <Input
-                  type="password"
-                  value={token}
-                  onChange={(event) => setToken(event.target.value)}
-                  placeholder="Optional personal access token"
-                  autoComplete="new-password"
-                  disabled={running || submitting}
-                />
-              </label>
-            )}
+          {!forkJob && (!job || job.resumable) && (
+            <label>
+              Source token <span className="muted">(HTTPS private repos)</span>
+              <Input
+                type="password"
+                value={token}
+                onChange={(event) => setToken(event.target.value)}
+                placeholder="Optional personal access token"
+                autoComplete="new-password"
+                disabled={running || submitting}
+              />
+            </label>
+          )}
           {!forkJob && (
             <Field>
               <FieldLabel htmlFor="git-import-visibility">
@@ -633,8 +630,8 @@ export function GitImport({
               </FieldLabel>
               <FieldDescription id="git-import-mirror-help">
                 Crab follows the source&apos;s branches and tags every 15
-                minutes. Pushes and browser edits are refused, and the source
-                must allow reads without a token.
+                minutes, and pushes and browser edits are refused. A source
+                token is sealed on the server for those syncs.
               </FieldDescription>
             </FieldContent>
           </Field>
