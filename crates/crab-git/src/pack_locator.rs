@@ -187,6 +187,21 @@ pub(crate) fn write_pack_index_v2(
     index_path: &Path,
     pack_checksum: gix_hash::ObjectId,
 ) -> Result<(), PackLocatorError> {
+    let bytes = encode_pack_index_v2(entries, index_path, pack_checksum)?;
+    std::fs::write(index_path, bytes).map_err(|source| PackLocatorError::IndexIo {
+        path: index_path.to_owned(),
+        source,
+    })
+}
+
+/// Encode a standard version-2 pack index, sorting `entries` by object ID.
+///
+/// `index_path` only names the index in errors; nothing is opened.
+pub(crate) fn encode_pack_index_v2(
+    entries: &mut [PackIndexEntry],
+    index_path: &Path,
+    pack_checksum: gix_hash::ObjectId,
+) -> Result<Vec<u8>, PackLocatorError> {
     entries.sort_unstable_by_key(|entry| entry.oid);
     if entries.windows(2).any(|pair| pair[0].oid == pair[1].oid) {
         return Err(PackLocatorError::InvalidIndex {
@@ -254,10 +269,54 @@ pub(crate) fn write_pack_index_v2(
     bytes.extend_from_slice(pack_checksum.as_bytes());
     let index_checksum: [u8; 20] = Sha1::digest(&bytes).into();
     bytes.extend_from_slice(&index_checksum);
-    std::fs::write(index_path, bytes).map_err(|source| PackLocatorError::IndexIo {
-        path: index_path.to_owned(),
-        source,
-    })
+    Ok(bytes)
+}
+
+/// Encode a standard Git reverse index from offsets in index (object ID) order.
+///
+/// `offsets[i]` is the pack offset of the object at index position `i`, as
+/// written by [`encode_pack_index_v2`]. `label` only names the index in errors.
+pub(crate) fn encode_pack_reverse_index(
+    offsets: &[u64],
+    label: &Path,
+    pack_checksum: gix_hash::ObjectId,
+) -> Result<Vec<u8>, PackLocatorError> {
+    let count = u32::try_from(offsets.len()).map_err(|_| PackLocatorError::Overflow {
+        path: label.to_owned(),
+    })?;
+    let mut positions: Vec<u32> = (0..count).collect();
+    positions.sort_unstable_by_key(|position| offsets[*position as usize]);
+    let mut previous = None;
+    for position in &positions {
+        let offset = offsets[*position as usize];
+        if offset < PACK_HEADER_LEN {
+            return Err(PackLocatorError::InvalidOffset {
+                path: label.to_owned(),
+                offset,
+                pack_data_end: u64::MAX,
+            });
+        }
+        if previous == Some(offset) {
+            return Err(PackLocatorError::DuplicateOffset {
+                path: label.to_owned(),
+                offset,
+            });
+        }
+        previous = Some(offset);
+    }
+    let mut bytes = Vec::with_capacity(
+        REVERSE_HEADER_LEN + positions.len() * REVERSE_ENTRY_LEN + REVERSE_TRAILER_LEN,
+    );
+    bytes.extend_from_slice(b"RIDX");
+    bytes.extend_from_slice(&1_u32.to_be_bytes());
+    bytes.extend_from_slice(&1_u32.to_be_bytes());
+    for position in positions {
+        bytes.extend_from_slice(&position.to_be_bytes());
+    }
+    bytes.extend_from_slice(pack_checksum.as_bytes());
+    let checksum: [u8; 20] = Sha1::digest(&bytes).into();
+    bytes.extend_from_slice(&checksum);
+    Ok(bytes)
 }
 
 /// Iterator over verified locations in increasing pack-offset order.

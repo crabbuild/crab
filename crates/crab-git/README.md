@@ -56,6 +56,11 @@ The main surfaces are:
   Git objects and pack mechanics;
 - `pack_writer` for checksummed SHA-1 pack construction from sized readers,
   with a caller-selected output limit and cooperative cancellation;
+- `fetch_wire`, `pack_stream`, and `import_graph` for diskless imports: the
+  protocol-v2 `ls-refs`/`fetch` client framing, a two-pass streamed pack
+  scanner and resolver that rebuilds byte-identical `.idx`/`.rev` sidecars
+  with bounded delta-base memory, and the closed object graph whose exact
+  per-ref closures become visibility evidence;
 - `batch` for bounded verification and copying of raw Git blobs against
   captured object IDs, kinds and sizes; copy callers discard output on error
   and own process cancellation and publication after successful verification;

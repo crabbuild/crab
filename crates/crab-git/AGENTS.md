@@ -27,6 +27,7 @@ Trace one path: `crates/crab-server/src/git/receive/validate.rs` → `validate` 
 | Pack decoding | `crates/crab-git/src/incoming_pack.rs`, `crates/crab-git/src/delta.rs` | `crates/crab-remote-git/src/reader.rs` |
 | Streaming pack construction | `crates/crab-git/src/pack_writer.rs` | `crates/crab-server/src/git/receive/mod.rs` |
 | Pointer classification | `crates/crab-git/src/pointer_detect.rs` | `crates/crab-types/src/pointer.rs` |
+| Diskless import | `crates/crab-git/src/pack_stream.rs`, `crates/crab-git/src/import_graph.rs` | `crates/crab-git/src/fetch_wire.rs`, `crates/crab-server/src/git_import/native.rs` |
 
 ## Invariants
 
@@ -34,6 +35,8 @@ Trace one path: `crates/crab-server/src/git/receive/validate.rs` → `validate` 
   Source: `crates/crab-git/src/refname.rs`.
 - A receive plan is not publication authority: callers supply policy, verify pointer dependencies, and recheck the captured base under writer leases.
   Source: `crates/crab-git/src/receive_plan.rs`.
+- Import and receive share one object rule set; change it only in `object_check`, or a streamed import accepts objects a push rejects.
+  Sources: `crates/crab-git/src/object_check.rs`, `crates/crab-git/src/import_graph.rs`.
 - Read `GIT_DIR` with `var_os`; an explicit OS path must not disappear because
   it is non-Unicode. Check the feature-gated CLI config resolver sibling too.
   Sources: `crates/crab-git/src/discover.rs`, `crab/src/core/config_resolver.rs`.
