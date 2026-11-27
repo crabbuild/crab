@@ -245,12 +245,16 @@ async fn invitations_require_consent_and_current_qualified_authority_without_rep
             StatusCode::FORBIDDEN
         );
     }
+    let existing_handle = h.json(&root, &alice).await["organization"]["handle"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert_eq!(
         h.write(
             Method::PATCH,
             &root,
             &bob,
-            json!({"version":3,"name":"Takeover","description":""})
+            json!({"version":3,"handle":existing_handle,"name":"Takeover","description":""})
         )
         .await
         .status(),
@@ -360,8 +364,13 @@ async fn organization_accounts_are_issuer_qualified_and_git_tokens_cannot_manage
             app::mutation_identity().unwrap(),
             BootstrapInput {
                 actor: actors[0],
+                handle: crate::catalog::derive_organization_handle("other-realm", other),
                 name: "Other realm".into(),
                 description: String::new(),
+                website: String::new(),
+                email: String::new(),
+                location: String::new(),
+                avatar: None,
             },
         )
         .await
@@ -401,12 +410,32 @@ async fn organization_accounts_are_issuer_qualified_and_git_tokens_cannot_manage
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
-    let revision = h.json(&root, &alice).await["organization"]["version"].clone();
-    assert_eq!(h.write(Method::PATCH,&root,&alice,json!({"version":revision,"name":"Organization renamed","description":"Native metadata"})).await.status(),StatusCode::OK);
+    let current = h.json(&root, &alice).await["organization"].clone();
+    let revision = current["version"].clone();
     assert_eq!(
-        h.json(&root, &alice).await["organization"]["name"],
-        "Organization renamed"
+        h.write(
+            Method::PATCH,
+            &root,
+            &alice,
+            json!({
+                "version": revision,
+                "handle": current["handle"],
+                "name": "Organization renamed",
+                "description": "Native metadata",
+                "website": "https://crab.build",
+                "email": "hello@crab.build",
+                "location": "San Francisco"
+            })
+        )
+        .await
+        .status(),
+        StatusCode::OK
     );
+    let updated = h.json(&root, &alice).await["organization"].clone();
+    assert_eq!(updated["name"], "Organization renamed");
+    assert_eq!(updated["website"], "https://crab.build");
+    assert_eq!(updated["email"], "hello@crab.build");
+    assert_eq!(updated["location"], "San Francisco");
     h.close().await;
 }
 

@@ -196,14 +196,14 @@ test("an owner confirms publication and a signed-out visitor can find the code",
       name: "Repository",
       exact: true,
     });
-    await tabs.getByRole("link", { name: "Properties", exact: true }).click();
+    await expect(
+      tabs.getByRole("link", { name: "Properties", exact: true }),
+    ).toHaveCount(0);
+    await guest.goto("/org-crab/library/settings/properties");
     await expect(
       guest.getByRole("heading", { name: "Repository properties" }),
-    ).toBeVisible();
-    await expect(guest.getByText("standard", { exact: true })).toBeVisible();
-    await expect(
-      guest.getByRole("button", { name: "Edit properties" }),
     ).toHaveCount(0);
+    await guest.goto("/org-crab/library");
     await tabs.getByRole("link", { name: "Issues", exact: true }).click();
     await expect(guest.getByRole("button", { name: "New issue" })).toHaveCount(
       0,

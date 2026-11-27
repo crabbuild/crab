@@ -54,6 +54,9 @@ pub(crate) fn validate_handle(handle: &str) -> std::result::Result<(), &'static 
     Ok(())
 }
 fn handle_taken(context: &Transaction<'_>, handle: &str, actor: Option<Uuid>) -> Result<bool> {
+    if super::organizations::handle_owner(context, handle)?.is_some() {
+        return Ok(true);
+    }
     let rows = context.query(
         "SELECT id FROM profiles WHERE handle = ?",
         &[SqlValue::Text(handle.into())],

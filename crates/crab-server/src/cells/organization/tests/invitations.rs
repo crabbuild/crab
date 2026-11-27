@@ -290,8 +290,13 @@ async fn rejected_and_noop_commands_do_not_append_audit_or_change_revision() {
             EditInput {
                 actor: owner,
                 version: original.version,
+                handle: original.handle.clone(),
                 name: original.name.clone(),
-                description: original.description.clone()
+                description: original.description.clone(),
+                website: original.website.clone(),
+                email: original.email.clone(),
+                location: original.location.clone(),
+                avatar: original.avatar.clone(),
             }
         )
         .await,
@@ -304,8 +309,13 @@ async fn rejected_and_noop_commands_do_not_append_audit_or_change_revision() {
             EditInput {
                 actor: owner,
                 version: 0,
+                handle: original.handle.clone(),
                 name: "Stale".into(),
-                description: String::new()
+                description: String::new(),
+                website: String::new(),
+                email: String::new(),
+                location: String::new(),
+                avatar: None,
             }
         )
         .await,
@@ -332,8 +342,13 @@ async fn rejected_and_noop_commands_do_not_append_audit_or_change_revision() {
             EditInput {
                 actor: owner,
                 version: 1,
+                handle: original.handle.clone(),
                 name: "   ".into(),
                 description: String::new(),
+                website: String::new(),
+                email: String::new(),
+                location: String::new(),
+                avatar: None,
             },
         )
         .await;

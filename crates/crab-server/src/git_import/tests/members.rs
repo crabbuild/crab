@@ -138,7 +138,10 @@ async fn member_import_preserves_destination_policy_and_creator_during_owner_rec
         &account,
         &writer,
         &catalog,
-        BrowserNamespace::Organization(organization),
+        BrowserNamespace::Organization {
+            id: organization,
+            owner: account.organization_owner().unwrap().to_owned(),
+        },
         GitImportReservation {
             id: repository_id,
             name: request.name.clone(),

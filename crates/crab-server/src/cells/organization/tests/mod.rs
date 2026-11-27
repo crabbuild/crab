@@ -30,8 +30,13 @@ async fn bootstrap(client: &CellClient, id: Uuid, owner: Uuid) -> Organization {
         id,
         BootstrapInput {
             actor: owner,
+            handle: crate::catalog::derive_organization_handle("native-organization", id),
             name: "Native organization".into(),
             description: "Private authority".into(),
+            website: String::new(),
+            email: String::new(),
+            location: String::new(),
+            avatar: None,
         },
     )
     .await
@@ -200,8 +205,13 @@ async fn current_membership_fences_privileged_commands_reads_and_recorded_replay
                 EditInput {
                     actor: bob,
                     version: 1,
+                    handle: crate::catalog::derive_organization_handle("native-organization", id),
                     name: "Unauthorized edit".into(),
-                    description: String::new()
+                    description: String::new(),
+                    website: String::new(),
+                    email: String::new(),
+                    location: String::new(),
+                    avatar: None,
                 }
             )
             .await,

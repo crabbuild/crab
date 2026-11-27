@@ -548,7 +548,10 @@ async fn start(
     let account = ImportAccount::resolve(&server, &principal, path.organization).await?;
     let Json(request) = body.map_err(|_| ImportError::Invalid("invalid import request"))?;
     let id = request.request_id.unwrap_or_else(Uuid::now_v7);
-    let request = validate_request(request, path.organization, &context.allowed_hosts)?;
+    let mut request = validate_request(request, path.organization, &context.allowed_hosts)?;
+    if let Some(owner) = account.organization_owner() {
+        request.owner = owner.to_owned();
+    }
     submit(&server, context, account, id, request).await
 }
 
@@ -629,10 +632,9 @@ async fn start_fork(
         source: format!("{}/{}", source.config.owner, source.config.name),
         fork_source: Some(source.id),
         default_branch_only: input.default_branch_only,
-        owner: match organization {
-            Some(id) => crate::catalog::organization_namespace(id),
-            None => account.personal_owner(),
-        },
+        owner: account
+            .organization_owner()
+            .map_or_else(|| account.personal_owner(), str::to_owned),
         name,
         description: source::description(&input.description)?,
         visibility,
@@ -654,6 +656,24 @@ async fn submit(
     }
     let account = account.for_request(&request);
     let organization_owner = account.check(server).await?;
+    if account.organization.is_none()
+        && let Some(cells) = server.cells()
+        && app::query_output(
+            cells
+                .query::<crate::cells::directory::organizations::ResolveOrganizationHandle>(
+                    crate::cells::Address::Directory,
+                    None,
+                    request.owner.clone(),
+                )
+                .await,
+        )
+        .map_err(ImportError::organization)?
+        .is_some()
+    {
+        return Err(ImportError::Invalid(
+            "Start the import from the organization's Repositories tab",
+        ));
+    }
     let catalog = server.catalog().ok_or(ImportError::Unavailable)?;
     account.namespace(&request.owner, request.visibility)?;
     let jobs = account.jobs(catalog.root());

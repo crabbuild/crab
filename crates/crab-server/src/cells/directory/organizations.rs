@@ -1,7 +1,116 @@
 use super::*;
 
 const PREFIX: &str = "directory/v1/organization-candidates/";
+const ORG_HANDLE_PREFIX: &str = "directory/v1/org-handle/";
+const ORG_ID_HANDLE_PREFIX: &str = "directory/v1/org-id-handle/";
 pub(crate) const PAGE_SIZE: usize = 40;
+
+fn org_handle_key(handle: &str) -> String {
+    format!("{ORG_HANDLE_PREFIX}{handle}")
+}
+
+fn org_id_handle_key(id: Uuid) -> String {
+    format!("{ORG_ID_HANDLE_PREFIX}{}", id.simple())
+}
+
+pub(super) fn handle_owner(context: &Transaction<'_>, handle: &str) -> Result<Option<Uuid>> {
+    context.document(&org_handle_key(handle))
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HandleClaimInput {
+    pub organization: Uuid,
+    pub handle: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) enum HandleClaimOutcome {
+    Claimed,
+    Taken,
+}
+
+pub(crate) struct ClaimOrganizationHandle;
+impl Mutation for ClaimOrganizationHandle {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 83;
+    type Input = HandleClaimInput;
+    type Output = HandleClaimOutcome;
+
+    fn execute(
+        context: &mut Transaction<'_>,
+        input: Self::Input,
+    ) -> Result<MutationResult<Self::Output>> {
+        if input.organization.is_nil() {
+            return Err(Error::Invalid("Organization ID is invalid"));
+        }
+        let handle = input.handle.to_ascii_lowercase();
+        if !crate::catalog::valid_organization_handle(&handle) {
+            return Err(Error::Invalid(
+                "Organization handle must contain 1–39 lowercase letters, digits or single hyphens and cannot use a reserved name",
+            ));
+        }
+        let current = context.document::<String>(&org_id_handle_key(input.organization))?;
+        if current.as_deref() == Some(handle.as_str()) {
+            return Ok(MutationResult::Success(HandleClaimOutcome::Claimed));
+        }
+        let taken_by_user = !context
+            .query(
+                "SELECT 1 FROM profiles WHERE handle = ?",
+                &[SqlValue::Text(handle.clone())],
+            )?
+            .rows
+            .is_empty();
+        if taken_by_user {
+            return Ok(MutationResult::Rejected(HandleClaimOutcome::Taken));
+        }
+        if let Some(existing) = handle_owner(context, &handle)?
+            && existing != input.organization
+        {
+            return Ok(MutationResult::Rejected(HandleClaimOutcome::Taken));
+        }
+        if let Some(previous) = current
+            && previous != handle
+        {
+            let _ = context.delete_document(&org_handle_key(&previous))?;
+        }
+        context.put_document(&org_handle_key(&handle), &input.organization)?;
+        context.put_document(&org_id_handle_key(input.organization), &handle)?;
+        advance(context)?;
+        Ok(MutationResult::Success(HandleClaimOutcome::Claimed))
+    }
+}
+
+pub(crate) struct ResolveOrganizationHandle;
+impl Read for ResolveOrganizationHandle {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 84;
+    type Input = String;
+    type Output = Option<Uuid>;
+
+    fn execute(context: &mut Transaction<'_>, handle: String) -> Result<Option<Uuid>> {
+        let handle = handle.trim().to_ascii_lowercase();
+        if handle.is_empty() {
+            return Ok(None);
+        }
+        handle_owner(context, &handle)
+    }
+}
+
+pub(crate) struct GetOrganizationHandle;
+impl Read for GetOrganizationHandle {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 85;
+    type Input = Uuid;
+    type Output = Option<String>;
+
+    fn execute(context: &mut Transaction<'_>, organization: Uuid) -> Result<Option<String>> {
+        if organization.is_nil() {
+            return Err(Error::Invalid("Organization ID is invalid"));
+        }
+        context.document(&org_id_handle_key(organization))
+    }
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

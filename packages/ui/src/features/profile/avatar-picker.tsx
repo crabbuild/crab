@@ -34,11 +34,21 @@ export function ProfileAvatarPicker({
   avatar,
   csrf,
   onSaved,
+  square = false,
+  onSaveAvatar,
+  heading = "Profile picture",
+  description = "Powered by Boring Avatars. Customize the style, seed name, and color palette shown across Crab.",
 }: {
   fallbackName: string;
   avatar?: AvatarConfig | null;
   csrf: string;
   onSaved: (next: AvatarConfig | null) => void;
+  square?: boolean;
+  onSaveAvatar?: (
+    next: AvatarConfig | null,
+  ) => Promise<AvatarConfig | null | undefined>;
+  heading?: string;
+  description?: string;
 }) {
   const [open, setOpen] = useState(false);
   const resolved = resolveAvatar(fallbackName, avatar);
@@ -46,6 +56,8 @@ export function ProfileAvatarPicker({
   const [seed, setSeed] = useState(resolved.seed);
   const [colors, setColors] = useState<string[]>(resolved.colors);
   const [statusMessage, setStatusMessage] = useState("");
+  const [customSaving, setCustomSaving] = useState(false);
+  const [customError, setCustomError] = useState("");
   const mutation = useMutation(csrf, null);
 
   function openEditor() {
@@ -54,6 +66,7 @@ export function ProfileAvatarPicker({
     setSeed(current.seed);
     setColors([...current.colors]);
     setStatusMessage("");
+    setCustomError("");
     mutation.reset();
     setOpen(true);
   }
@@ -77,6 +90,25 @@ export function ProfileAvatarPicker({
 
   async function saveAvatar(next: AvatarConfig | null) {
     setStatusMessage("");
+    setCustomError("");
+    if (onSaveAvatar) {
+      setCustomSaving(true);
+      try {
+        const updated = await onSaveAvatar(next);
+        onSaved(updated ?? null);
+        setStatusMessage(
+          updated ? "Profile picture updated." : "Profile picture reset.",
+        );
+        setOpen(false);
+      } catch (error) {
+        setCustomError(
+          error instanceof Error ? error.message : "Could not save avatar.",
+        );
+      } finally {
+        setCustomSaving(false);
+      }
+      return;
+    }
     const response = await mutation.run<AvatarResponse>(
       "/api/profile/avatar",
       "PUT",
@@ -90,6 +122,9 @@ export function ProfileAvatarPicker({
     setOpen(false);
   }
 
+  const pending = mutation.pending || customSaving;
+  const errorMessage = customError || mutation.error;
+
   const draft: AvatarConfig = {
     variant,
     seed: seed.trim() || fallbackName.trim() || "Crab User",
@@ -98,15 +133,14 @@ export function ProfileAvatarPicker({
 
   return (
     <div className="grid justify-items-start gap-3">
-      <h2 className="m-0 text-sm font-semibold text-foreground">
-        Profile picture
-      </h2>
+      <h2 className="m-0 text-sm font-semibold text-foreground">{heading}</h2>
 
       <div className="relative">
         <UserAvatar
           name={fallbackName}
           avatar={avatar}
           size={176}
+          square={square}
           className="border-2 border-border shadow-xs"
         />
         <Button
@@ -122,8 +156,7 @@ export function ProfileAvatarPicker({
       </div>
 
       <p className="m-0 text-xs leading-relaxed text-muted-foreground">
-        Powered by Boring Avatars. Customize the style, seed name, and color
-        palette shown across Crab.
+        {description}
       </p>
 
       {statusMessage && (
@@ -152,6 +185,7 @@ export function ProfileAvatarPicker({
                   name={fallbackName}
                   avatar={draft}
                   size={72}
+                  square={square}
                   className="border-2 border-border shadow-xs"
                 />
                 <div className="grid gap-1.5">
@@ -159,9 +193,24 @@ export function ProfileAvatarPicker({
                     Live preview
                   </span>
                   <div className="flex items-center gap-2">
-                    <UserAvatar name={fallbackName} avatar={draft} size={36} />
-                    <UserAvatar name={fallbackName} avatar={draft} size={26} />
-                    <UserAvatar name={fallbackName} avatar={draft} size={20} />
+                    <UserAvatar
+                      name={fallbackName}
+                      avatar={draft}
+                      size={36}
+                      square={square}
+                    />
+                    <UserAvatar
+                      name={fallbackName}
+                      avatar={draft}
+                      size={26}
+                      square={square}
+                    />
+                    <UserAvatar
+                      name={fallbackName}
+                      avatar={draft}
+                      size={20}
+                      square={square}
+                    />
                   </div>
                 </div>
               </div>
@@ -303,9 +352,9 @@ export function ProfileAvatarPicker({
               </div>
             </div>
 
-            {mutation.error && (
+            {errorMessage && (
               <p role="alert" className="m-0 text-sm text-destructive">
-                {mutation.error}
+                {errorMessage}
               </p>
             )}
           </div>
@@ -315,7 +364,7 @@ export function ProfileAvatarPicker({
               type="button"
               variant="ghost"
               size="sm"
-              disabled={mutation.pending || !avatar}
+              disabled={pending || !avatar}
               onClick={() => void saveAvatar(null)}
               className="gap-1.5 text-muted-foreground"
             >
@@ -326,17 +375,17 @@ export function ProfileAvatarPicker({
               <Button
                 type="button"
                 variant="outline"
-                disabled={mutation.pending}
+                disabled={pending}
                 onClick={() => setOpen(false)}
               >
                 Cancel
               </Button>
               <Button
                 type="button"
-                disabled={mutation.pending || !seed.trim()}
+                disabled={pending || !seed.trim()}
                 onClick={() => void saveAvatar(draft)}
               >
-                {mutation.pending ? "Saving…" : "Save avatar"}
+                {pending ? "Saving…" : "Save avatar"}
               </Button>
             </div>
           </DialogFooter>

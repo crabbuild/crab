@@ -99,7 +99,11 @@ export function OrganizationDirectory({
                         key={organization.id}
                         className="flex flex-wrap items-center gap-3 px-4 py-3"
                       >
-                        <OrganizationAvatar id={organization.id} size={32} />
+                        <OrganizationAvatar
+                          id={organization.id}
+                          avatar={organization.avatar}
+                          size={32}
+                        />
                         <div className="min-w-0 flex-1 basis-44">
                           <Link
                             href={organizationHref(

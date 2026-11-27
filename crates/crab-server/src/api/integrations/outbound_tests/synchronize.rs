@@ -155,7 +155,10 @@ async fn private_fork_push_synchronizes_only_the_matching_upstream_pull() {
         .await;
     let upstream = catalog
         .reserve_git_import(
-            BrowserNamespace::Organization(organization),
+            BrowserNamespace::Organization {
+                id: organization,
+                owner: crate::catalog::derive_organization_handle("org", organization),
+            },
             crate::catalog::GitImportReservation {
                 id: upstream_id,
                 name: "upstream".into(),

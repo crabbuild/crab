@@ -102,11 +102,6 @@ const RepositoryRulesets = lazy(() =>
     default: module.RepositoryRulesets,
   })),
 );
-const RepositoryProperties = lazy(() =>
-  import("@/features/organizations/repository-properties").then((module) => ({
-    default: module.RepositoryProperties,
-  })),
-);
 const Settings = lazy(() =>
   import("@/features/settings").then((module) => ({
     default: module.Settings,
@@ -165,7 +160,6 @@ export function RepositoryPage({
       "labels",
       "milestones",
     ].includes(view) ||
-    (view === "properties" && !!repo.organization_id) ||
     (view === "issues" && route?.issue !== "new") ||
     (view === "pulls" && route?.pull !== "new" && !route?.action);
   const historyBase = route?.since;
@@ -183,7 +177,6 @@ export function RepositoryPage({
       view === "issues" ||
       view === "labels" ||
       view === "milestones" ||
-      view === "properties" ||
       view === "activity" ||
       view === "forks"
       ? null
@@ -456,7 +449,6 @@ export function RepositoryPage({
                 view !== "settings" &&
                 view !== "activity" &&
                 view !== "security" &&
-                view !== "properties" &&
                 view !== "projects",
             },
             {
@@ -471,16 +463,6 @@ export function RepositoryPage({
               icon: GitPullRequestIcon,
               active: view === "pulls",
             },
-            ...(repo.organization_id
-              ? [
-                  {
-                    view: "properties",
-                    label: "Properties",
-                    icon: TagIcon,
-                    active: view === "properties",
-                  },
-                ]
-              : []),
             {
               view: "projects",
               label: "Projects",
@@ -512,8 +494,7 @@ export function RepositoryPage({
           ]
             .filter(
               (tab) =>
-                !publicReader ||
-                ["code", "issues", "pulls", "properties"].includes(tab.view),
+                !publicReader || ["code", "issues", "pulls"].includes(tab.view),
             )
             .map(({ view: tab, label, icon: Icon, active }) => (
               <Link
@@ -765,19 +746,6 @@ export function RepositoryPage({
           >
             <RepositoryRulesets key={repo.id} repo={repo} />
           </Suspense>
-        ) : view === "properties" && repo.organization_id ? (
-          <section className="settings-section grid gap-4 p-4">
-            <h2 className="text-lg font-semibold">Repository properties</h2>
-            <Suspense
-              fallback={
-                <div role="status">
-                  <Spinner /> Loading properties…
-                </div>
-              }
-            >
-              <RepositoryProperties key={repo.id} repo={repo} csrf={csrf} />
-            </Suspense>
-          </section>
         ) : view === "settings" ? (
           repo.can_admin || repo.can_maintain ? (
             <Result state={visibleRefState} timingLabel="Repository references">
@@ -796,6 +764,7 @@ export function RepositoryPage({
                     csrf={csrf}
                     section={
                       route?.section === "branches" ||
+                      route?.section === "properties" ||
                       route?.section === "members" ||
                       route?.section === "integrations" ||
                       route?.section === "webhooks" ||

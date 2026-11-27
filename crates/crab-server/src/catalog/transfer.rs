@@ -5,8 +5,8 @@ use uuid::Uuid;
 
 use super::{
     CatalogDocument, CatalogError, CatalogRecord, CatalogStore, MembershipActor,
-    MembershipAuditEvent, OrganizationAccess, RepositoryApplicationState, organization_namespace,
-    personal_namespace, valid_account_namespace, valid_actor,
+    MembershipAuditEvent, NamespaceOwner, OrganizationAccess, RepositoryApplicationState,
+    organization_namespace, personal_namespace, valid_account_namespace, valid_actor,
 };
 use crate::{RepositoryAccess, RepositoryMember, config::valid_repository_component};
 
@@ -44,6 +44,8 @@ pub(crate) struct Offer {
     pub requester: MembershipActor,
     pub recipient: Recipient,
     pub recipient_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_handle: Option<String>,
     pub from_owner: String,
     pub from_name: String,
     pub name: String,
@@ -57,6 +59,7 @@ pub(crate) struct Proposal {
     pub requester: MembershipActor,
     pub recipient: Recipient,
     pub recipient_label: String,
+    pub destination_handle: Option<String>,
     pub name: String,
     pub version: u32,
 }
@@ -74,8 +77,8 @@ pub(crate) enum Decision {
 impl Offer {
     /// The owner address the repository moves to on acceptance.
     ///
-    /// An account offer is labelled `@username`; that username is the
-    /// destination both people confirmed, so it is never re-derived later.
+    /// An account offer is labelled `@username` and an organization offer
+    /// carries `destination_handle`; both sides confirmed that address.
     pub(crate) fn destination_owner(&self) -> String {
         match &self.recipient {
             Recipient::Account { .. } => self
@@ -83,7 +86,10 @@ impl Offer {
                 .strip_prefix('@')
                 .unwrap_or_default()
                 .to_owned(),
-            Recipient::Organization { id } => organization_namespace(*id),
+            Recipient::Organization { id } => self
+                .destination_handle
+                .clone()
+                .unwrap_or_else(|| organization_namespace(*id)),
         }
     }
 
@@ -217,6 +223,7 @@ impl CatalogStore {
             requester: proposal.requester,
             recipient: proposal.recipient,
             recipient_label: proposal.recipient_label,
+            destination_handle: proposal.destination_handle,
             name: proposal.name,
             from_owner: record.owner.clone(),
             from_name: record.name.clone(),
@@ -297,21 +304,14 @@ impl CatalogStore {
                 // must not land between the departing member's two commits.
                 return Err(CatalogError::Conflict);
             }
-            let account = match &offer.recipient {
-                Recipient::Account { identity } => {
-                    Some(personal_namespace(&identity.issuer, &identity.subject))
-                }
-                Recipient::Organization { .. } => None,
+            let expected_owner = match &offer.recipient {
+                Recipient::Account { identity } => NamespaceOwner::Personal(personal_namespace(
+                    &identity.issuer,
+                    &identity.subject,
+                )),
+                Recipient::Organization { id } => NamespaceOwner::Organization(*id),
             };
-            if let Recipient::Organization { id } = offer.recipient
-                && document.repositories.iter().any(|record| {
-                    record.owner.eq_ignore_ascii_case(&namespace)
-                        && record.organization_id() != Some(id)
-                })
-            {
-                return Err(CatalogError::NameUnavailable);
-            }
-            if !document.namespace_bound_to(&namespace, account.as_deref()) {
+            if !document.namespace_bound_to(&namespace, &expected_owner) {
                 return Err(CatalogError::NameUnavailable);
             }
             let new = document.relocate(repository, namespace, offer.name.clone(), id)?;

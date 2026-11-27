@@ -141,7 +141,7 @@ export function HomeDashboard({
 
   const scopeOwner =
     context.kind === "organization"
-      ? `org-${context.entry.organization.id.replaceAll("-", "")}`
+      ? context.entry.organization.handle
       : undefined;
 
   return (
@@ -206,7 +206,7 @@ function HomeCommandHero({
 }: {
   greetingName: string;
   repositories: Repository[];
-  organization?: { id: string; name: string };
+  organization?: { id: string; handle: string; name: string };
   onNewRepository: () => void;
 }) {
   const [query, setQuery] = useState("");
@@ -255,7 +255,7 @@ function HomeCommandHero({
       if (selectedRepo) {
         params.set("scope", `${selectedRepo.owner}/${selectedRepo.name}`);
       } else if (organization) {
-        params.set("scope", `org-${organization.id.replaceAll("-", "")}`);
+        params.set("scope", organization.handle);
       }
       navigate(`/-/discussion-search${params.size ? `?${params}` : ""}`);
       return;

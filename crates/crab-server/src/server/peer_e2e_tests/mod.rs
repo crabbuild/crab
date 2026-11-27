@@ -219,12 +219,18 @@ async fn qualify_handoff(
     use crate::cells::organization::{
         self, Bootstrap, BootstrapInput, Caller, ChangeOutcome, GetOrganization,
     };
-    let organization = Address::Organization(Uuid::now_v7());
+    let organization_id = Uuid::now_v7();
+    let organization = Address::Organization(organization_id);
     first.cells.client.initialize(organization).await.unwrap();
     let organization_input = BootstrapInput {
         actor: profile.id,
+        handle: crate::catalog::derive_organization_handle("peer-organization", organization_id),
         name: "Peer organization".into(),
         description: "Independent native authority".into(),
+        website: String::new(),
+        email: String::new(),
+        location: String::new(),
+        avatar: None,
     };
     let bootstrapped = first
         .cells

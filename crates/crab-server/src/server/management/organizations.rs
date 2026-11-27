@@ -14,7 +14,10 @@ use crate::{
     catalog::{CatalogRecord, MembershipActor, OrganizationAccess},
     cells::{
         Address,
-        directory::organizations::{Candidate, RecordCandidate},
+        directory::organizations::{
+            Candidate, ClaimOrganizationHandle, HandleClaimInput, HandleClaimOutcome,
+            RecordCandidate,
+        },
         directory::{IdentityKey, RegisterAccounts},
         organization::{self, Bootstrap, BootstrapInput, Caller, ChangeOutcome, teams},
     },
@@ -129,6 +132,8 @@ async fn set_repository_organization(
 #[serde(deny_unknown_fields)]
 struct Input {
     owner: IdentityKey,
+    #[serde(default)]
+    handle: Option<String>,
     name: String,
     #[serde(default)]
     description: String,
@@ -151,7 +156,13 @@ async fn bootstrap(
             "First owner must use the server's configured identity issuer",
         ));
     }
-    organization::details(&input.name, &input.description).map_err(Error::Cell)?;
+    let handle = input
+        .handle
+        .as_deref()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| crate::catalog::derive_organization_handle(&input.name, id));
+    organization::validate_profile(&handle, &input.name, &input.description, "", "", "", None)
+        .map_err(Error::Invalid)?;
     let _permit = super::admit(&server)?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     // Bootstrap is explicit private operator work. The qualified account is
@@ -160,6 +171,21 @@ async fn bootstrap(
         .initialize(Address::Directory)
         .await
         .map_err(Error::Cell)?;
+    let claimed = app::command_output(
+        cells
+            .command::<ClaimOrganizationHandle>(
+                Address::Directory,
+                app::mutation_identity()?,
+                HandleClaimInput {
+                    organization: id,
+                    handle: handle.clone(),
+                },
+            )
+            .await,
+    )?;
+    if matches!(claimed, HandleClaimOutcome::Taken) {
+        return Err(Error::ProfileHandleTaken);
+    }
     let registered = app::command_output(
         cells
             .command::<RegisterAccounts>(
@@ -195,15 +221,20 @@ async fn bootstrap(
                 app::mutation_identity()?,
                 BootstrapInput {
                     actor: *actor,
+                    handle: handle.clone(),
                     name: input.name,
                     description: input.description,
+                    website: String::new(),
+                    email: String::new(),
+                    location: String::new(),
+                    avatar: None,
                 },
             )
             .await,
     )?;
     match result {
         ChangeOutcome::Applied(organization) => Ok(Json(
-            json!({"organization":organization,"owner":actor,"url":format!("/-/organizations/{id}")}),
+            json!({"organization":organization,"owner":actor,"url":format!("/{handle}")}),
         )),
         ChangeOutcome::Conflict => Err(Error::Conflict),
         _ => Err(Error::CellContract(

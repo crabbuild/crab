@@ -15,8 +15,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Link } from "@/components/navigation/link";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { UserAvatar } from "@/components/ui/user-avatar";
+import { OrganizationAvatar, UserAvatar } from "@/components/ui/user-avatar";
 import type { AvatarConfig } from "@/lib/contracts";
 import { Button } from "@/components/ui/button";
 import {
@@ -140,11 +139,12 @@ export function HomeSidebar({
               aria-label="Switch dashboard context"
             >
               {context.kind === "organization" ? (
-                <Avatar className="size-8 shrink-0 border border-border">
-                  <AvatarFallback className="text-xs font-semibold">
-                    <Building2Icon className="size-4" aria-hidden="true" />
-                  </AvatarFallback>
-                </Avatar>
+                <OrganizationAvatar
+                  id={context.entry.organization.id}
+                  avatar={context.entry.organization.avatar}
+                  size={32}
+                  className="shrink-0"
+                />
               ) : (
                 <UserAvatar
                   name={primaryLabel}

@@ -1,4 +1,10 @@
-import { OrganizationIcon, RepoIcon } from "@primer/octicons-react";
+import {
+  LinkIcon,
+  LocationIcon,
+  MailIcon,
+  OrganizationIcon,
+  RepoIcon,
+} from "@primer/octicons-react";
 import { RelativeTime } from "@/components/discussion/time";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
@@ -43,16 +49,22 @@ export function OrganizationOverview({
       <header className="mb-6 flex min-w-0 flex-wrap items-center gap-5 border-b pb-6">
         <OrganizationAvatar
           id={organization.id}
+          avatar={organization.avatar}
           size={88}
           className="rounded-xl"
         />
         <div className="min-w-0 flex-1 basis-60">
-          <h1
-            dir="auto"
-            className="m-0 text-2xl font-semibold tracking-tight wrap-anywhere"
-          >
-            {organization.name}
-          </h1>
+          <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+            <h1
+              dir="auto"
+              className="m-0 text-2xl font-semibold tracking-tight wrap-anywhere"
+            >
+              {organization.name}
+            </h1>
+            <span className="font-mono text-sm text-muted-foreground">
+              @{organization.handle}
+            </span>
+          </div>
           {organization.description && (
             <p
               dir="auto"
@@ -60,6 +72,42 @@ export function OrganizationOverview({
             >
               {organization.description}
             </p>
+          )}
+          {(organization.location ||
+            organization.website ||
+            organization.email) && (
+            <ul className="mt-2.5 mb-0 flex list-none flex-wrap items-center gap-x-4 gap-y-1 p-0 text-sm text-muted-foreground">
+              {organization.location && (
+                <li className="flex items-center gap-1.5">
+                  <LocationIcon aria-hidden="true" />
+                  <span dir="auto">{organization.location}</span>
+                </li>
+              )}
+              {organization.website && (
+                <li className="flex items-center gap-1.5">
+                  <LinkIcon aria-hidden="true" />
+                  <a
+                    href={organization.website}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-foreground hover:text-(--info) hover:underline"
+                  >
+                    {organization.website.replace(/^https?:\/\//, "")}
+                  </a>
+                </li>
+              )}
+              {organization.email && (
+                <li className="flex items-center gap-1.5">
+                  <MailIcon aria-hidden="true" />
+                  <a
+                    href={`mailto:${organization.email}`}
+                    className="text-foreground hover:text-(--info) hover:underline"
+                  >
+                    {organization.email}
+                  </a>
+                </li>
+              )}
+            </ul>
           )}
           <p className="mt-2 mb-0 flex items-center gap-1.5 text-sm text-muted-foreground">
             <OrganizationIcon aria-hidden="true" />

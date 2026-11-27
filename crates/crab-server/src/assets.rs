@@ -61,6 +61,7 @@ pub(crate) async fn serve(request: Request) -> Response {
     };
     let application_route = path.is_empty()
         || global_route
+        || (components.len() == 1 && crate::catalog::valid_organization_handle(components[0]))
         || (components.len() >= 2
             && components[0] != "-"
             && components[0] != "api"
@@ -75,7 +76,6 @@ pub(crate) async fn serve(request: Request) -> Response {
                             | "fork-compare"
                             | "forks"
                             | "projects"
-                            | "properties"
                             | "rulesets"
                             | "security"
                     ))
@@ -190,9 +190,12 @@ mod tests {
                 "/team/repo.name/projects/01900000-0000-7000-8000-000000000001/unknown",
                 StatusCode::NOT_FOUND,
             ),
-            ("/team/repo.name/properties", StatusCode::OK),
+            ("/team/repo.name/settings/properties", StatusCode::OK),
             ("/team/repo.name/rulesets", StatusCode::OK),
+            ("/team/repo.name/properties", StatusCode::NOT_FOUND),
             ("/team/repo.name/properties/unknown", StatusCode::NOT_FOUND),
+            ("/crabbuild", StatusCode::OK),
+            ("/bad--handle", StatusCode::NOT_FOUND),
             ("/team/repo.name/forks", StatusCode::OK),
             ("/team/repo.name/forks/unknown", StatusCode::NOT_FOUND),
             ("/team/repo.name/fork-compare", StatusCode::OK),
@@ -316,7 +319,9 @@ mod tests {
             ("/api/repos/team/blob/main/missing", StatusCode::NOT_FOUND),
             ("/auth/repo/issues/1", StatusCode::NOT_FOUND),
             ("/git/repo/tree/main", StatusCode::NOT_FOUND),
-            ("/unknown", StatusCode::NOT_FOUND),
+            ("/unknown--handle", StatusCode::NOT_FOUND),
+            ("/-unknown", StatusCode::NOT_FOUND),
+            ("/unknown", StatusCode::OK),
         ] {
             let response = serve(Request::builder().uri(path).body(Body::empty()).unwrap()).await;
             assert_eq!(response.status(), expected, "{path}");

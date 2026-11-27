@@ -76,8 +76,13 @@ async fn fixture() -> Fixture {
         organization,
         BootstrapInput {
             actor: owner,
+            handle: crate::catalog::derive_organization_handle("engineering", organization),
             name: "Engineering".into(),
             description: String::new(),
+            website: String::new(),
+            email: String::new(),
+            location: String::new(),
+            avatar: None,
         },
     )
     .await;

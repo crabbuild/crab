@@ -490,6 +490,26 @@ async fn personal_owner_name(server: &Server, principal: &Principal) -> app::Res
     ))
 }
 
+async fn organization_owner_name(
+    server: &Server,
+    organization: Uuid,
+    actor: Uuid,
+) -> app::Result<String> {
+    let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
+    if let Some(view) = app::query_output(
+        cells
+            .query::<crate::cells::organization::GetOrganization>(
+                Address::Organization(organization),
+                None,
+                Caller { actor },
+            )
+            .await,
+    )? {
+        return Ok(view.organization.handle);
+    }
+    Ok(crate::catalog::organization_namespace(organization))
+}
+
 async fn personal(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
@@ -599,10 +619,14 @@ async fn create_organization(
         if cancel.is_cancelled() {
             return Err(app::Error::MergeBusy);
         }
+        let owner = organization_owner_name(&worker, organization, actor).await?;
         let record = reserve(
             &worker,
             &account,
-            BrowserNamespace::Organization(organization),
+            BrowserNamespace::Organization {
+                id: organization,
+                owner,
+            },
             grant_creator,
             input,
         )

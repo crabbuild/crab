@@ -172,11 +172,15 @@ export function RepositoryRulesets({
             Manage rulesets
           </Link>
         )}
-        {csrf === undefined && repo.organization_id && (
-          <Link href={repoHref(repo, { view: "properties" })}>
-            Repository properties
-          </Link>
-        )}
+        {csrf === undefined &&
+          repo.organization_id &&
+          (repo.can_admin || repo.can_maintain) && (
+            <Link
+              href={repoHref(repo, { view: "settings", section: "properties" })}
+            >
+              Repository properties
+            </Link>
+          )}
       </div>
       <Result state={request} timingLabel="Repository rulesets">
         {(data) => (

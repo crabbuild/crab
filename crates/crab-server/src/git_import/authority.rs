@@ -36,6 +36,7 @@ pub(super) struct ImportAccount {
     pub(super) principal: Principal,
     pub(super) organization: Option<OrganizationDestination>,
     organization_role: Option<Role>,
+    organization_handle: Option<String>,
     personal_handle: Option<String>,
     local: bool,
 }
@@ -47,7 +48,8 @@ impl ImportAccount {
         organization: Option<Uuid>,
     ) -> Result<Self, ImportError> {
         let key = app::account(principal).map_err(|_| ImportError::NotFound)?;
-        let (organization, organization_role) = if let Some(id) = organization {
+        let (organization, organization_role, organization_handle) = if let Some(id) = organization
+        {
             let actor = actor_id(server, key.clone())
                 .await
                 .map_err(ImportError::organization)?
@@ -57,9 +59,21 @@ impl ImportAccount {
                 actor,
                 visibility: Visibility::Private,
             };
-            (Some(destination), Some(destination.role(server).await?))
+            let role = destination.role(server).await?;
+            let cells = server.cells().ok_or(ImportError::Unavailable)?;
+            let handle = cells
+                .query::<crate::cells::organization::GetOrganization>(
+                    Address::Organization(id),
+                    None,
+                    Caller { actor },
+                )
+                .await
+                .ok()
+                .and_then(|result| result.output.map(|view| view.organization.handle))
+                .unwrap_or_else(|| crate::catalog::organization_namespace(id));
+            (Some(destination), Some(role), Some(handle))
         } else {
-            (None, None)
+            (None, None, None)
         };
         let personal_handle = if principal.is_local() {
             None
@@ -72,9 +86,14 @@ impl ImportAccount {
             principal: principal.clone(),
             organization,
             organization_role,
+            organization_handle,
             personal_handle,
             local: principal.is_local(),
         })
+    }
+
+    pub(super) fn organization_owner(&self) -> Option<&str> {
+        self.organization_handle.as_deref()
     }
 
     /// The owner address of this account's new personal repositories.
@@ -100,10 +119,13 @@ impl ImportAccount {
         visibility: Visibility,
     ) -> Result<BrowserNamespace, ImportError> {
         if let Some(organization) = self.organization {
-            if owner != crate::catalog::organization_namespace(organization.id) {
+            if self.organization_handle.as_deref() != Some(owner) {
                 return Err(ImportError::DestinationChanged);
             }
-            return Ok(BrowserNamespace::Organization(organization.id));
+            return Ok(BrowserNamespace::Organization {
+                id: organization.id,
+                owner: owner.into(),
+            });
         }
         if crate::catalog::is_organization_namespace(owner) {
             return Err(ImportError::Invalid(

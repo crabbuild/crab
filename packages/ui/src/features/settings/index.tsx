@@ -8,6 +8,7 @@ import { MemberSettings } from "./members";
 import { MentionSettings } from "./mentions";
 import { BranchProtectionSettings } from "./protections";
 import { IntegrationSettings } from "./integrations";
+import { RepositoryProperties } from "../organizations/repository-properties";
 import { RepositoryRulesets } from "./rulesets";
 import { RepositoryTeamSettings } from "./team-access";
 import { OutboundWebhooks } from "./webhooks";
@@ -29,6 +30,7 @@ export function Settings({
   section:
     | "general"
     | "branches"
+    | "properties"
     | "members"
     | "integrations"
     | "webhooks"
@@ -86,6 +88,15 @@ export function Settings({
         >
           Rulesets
         </Link>
+        {repo.organization_id && (
+          <Link
+            className={section === "properties" ? "active" : ""}
+            aria-current={section === "properties" ? "page" : undefined}
+            href={repoHref(repo, { view: "settings", section: "properties" })}
+          >
+            Properties
+          </Link>
+        )}
         <Link
           className={section === "members" ? "active" : ""}
           aria-current={section === "members" ? "page" : undefined}
@@ -138,6 +149,11 @@ export function Settings({
       </nav>
       {section === "rulesets" ? (
         <RepositoryRulesets key={repo.id} repo={repo} csrf={csrf} />
+      ) : section === "properties" && repo.organization_id ? (
+        <section className="settings-content grid gap-4">
+          <h2 className="text-lg font-semibold">Repository properties</h2>
+          <RepositoryProperties key={repo.id} repo={repo} csrf={csrf} />
+        </section>
       ) : section === "integrations" ? (
         <IntegrationSettings key={repo.id} repo={repo} csrf={csrf} />
       ) : section === "webhooks" ? (

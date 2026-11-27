@@ -353,6 +353,7 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
         [
           "branches",
           "access",
+          "properties",
           "mentions",
           "team-access",
           "integrations",
@@ -376,7 +377,6 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
         "security",
         "code-search",
         "rulesets",
-        "properties",
       ].includes(page) &&
       !tail.length
     )

@@ -21,9 +21,22 @@ import type {
   OrganizationRole,
   OwnProfile,
 } from "@/lib/contracts";
-import { organizationHref } from "@/lib/organization-route";
+import {
+  organizationHref,
+  validOrganizationHandle,
+} from "@/lib/organization-route";
 import { MutationError } from "./feedback";
 import { InviteForm } from "./invitations";
+
+function deriveOrganizationHandle(name: string): string {
+  const normalized = name
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/\p{Mark}/gu, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized.slice(0, 39).replace(/-+$/g, "");
+}
 
 // GitHub's two-step setup: name the organization, then add members.
 export function NewOrganization({ csrf }: { csrf: string }) {
@@ -67,11 +80,16 @@ function OrganizationForm({ csrf }: { csrf: string }) {
   // creating a second organization.
   const [id, setId] = useState(() => crypto.randomUUID());
   const [name, setName] = useState("");
+  const [handle, setHandle] = useState("");
+  const [handleEdited, setHandleEdited] = useState(false);
   const [description, setDescription] = useState("");
   const mutation = useMutation(csrf, null);
   const trimmed = name.trim();
+  const trimmedHandle = handle.trim().toLowerCase();
+  const previewHandle = trimmedHandle || "your-organization";
+  const handleValid = validOrganizationHandle(trimmedHandle);
   const address = new URL(
-    organizationHref({ id, name: trimmed }),
+    organizationHref({ id, handle: previewHandle, name: trimmed }),
     window.location.origin,
   ).href;
   return (
@@ -79,10 +97,11 @@ function OrganizationForm({ csrf }: { csrf: string }) {
       className="grid gap-6"
       onSubmit={(event) => {
         event.preventDefault();
-        if (!trimmed) return;
+        if (!trimmed || !handleValid) return;
         void mutation
           .run<Organization>("/api/organizations", "POST", {
             id,
+            handle: trimmedHandle,
             name: trimmed,
             description,
           })
@@ -109,12 +128,47 @@ function OrganizationForm({ csrf }: { csrf: string }) {
               autoComplete="organization"
               disabled={mutation.pending}
               aria-describedby="new-organization-name-help"
-              onChange={(event) => setName(event.target.value)}
+              onChange={(event) => {
+                const nextName = event.target.value;
+                setName(nextName);
+                if (!handleEdited) {
+                  setHandle(deriveOrganizationHandle(nextName));
+                }
+              }}
             />
           </div>
           <FieldDescription id="new-organization-name-help">
-            This will be the name of your organization on Crab. Your URL will
-            be: <code className="break-all">{address}</code>
+            Display name shown across the organization.
+          </FieldDescription>
+        </Field>
+        <Field>
+          <FieldLabel htmlFor="new-organization-handle">
+            Organization handle
+            <span aria-hidden="true" className="text-destructive">
+              *
+            </span>
+          </FieldLabel>
+          <Input
+            id="new-organization-handle"
+            value={handle}
+            required
+            maxLength={39}
+            pattern="[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?"
+            placeholder="crabbuild"
+            autoComplete="off"
+            autoCapitalize="none"
+            spellCheck={false}
+            disabled={mutation.pending}
+            aria-describedby="new-organization-handle-help"
+            onChange={(event) => {
+              setHandleEdited(true);
+              setHandle(event.target.value.toLowerCase());
+            }}
+          />
+          <FieldDescription id="new-organization-handle-help">
+            Unique handle (1–39 lowercase letters, digits, or single hyphens).
+            Your URL will be <code className="break-all">{address}</code> and
+            repositories use <code>{previewHandle}/&lt;repo&gt;</code>.
           </FieldDescription>
         </Field>
         <Field>
@@ -142,11 +196,18 @@ function OrganizationForm({ csrf }: { csrf: string }) {
         <Alert variant="destructive">
           <AlertDescription className="grid gap-3">
             <p className="m-0">
-              This form already created an organization with different details.
+              This form already created an organization with different details,
+              or the handle is already in use.
             </p>
             <div className="flex flex-wrap gap-2">
               <Button asChild variant="outline" size="sm">
-                <Link href={organizationHref({ id, name: trimmed })}>
+                <Link
+                  href={organizationHref({
+                    id,
+                    handle: previewHandle,
+                    name: trimmed,
+                  })}
+                >
                   View organization
                 </Link>
               </Button>
@@ -170,7 +231,7 @@ function OrganizationForm({ csrf }: { csrf: string }) {
       <Button
         type="submit"
         className="w-fit"
-        disabled={mutation.pending || !trimmed}
+        disabled={mutation.pending || !trimmed || !handleValid}
       >
         {mutation.pending ? "Creating organization…" : "Next"}
       </Button>
@@ -194,7 +255,11 @@ export function OrganizationSetup({
   return (
     <section className="mx-auto grid w-full max-w-2xl gap-8 px-4 py-10 sm:px-8">
       <header className="grid justify-items-center gap-3 text-center">
-        <OrganizationAvatar id={organization.id} size={64} />
+        <OrganizationAvatar
+          id={organization.id}
+          avatar={organization.avatar}
+          size={64}
+        />
         <p className="m-0 text-sm font-semibold text-muted-foreground">
           Welcome to <bdi>{organization.name}</bdi>
         </p>

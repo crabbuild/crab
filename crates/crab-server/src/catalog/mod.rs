@@ -307,15 +307,15 @@ impl Default for CatalogDocument {
 }
 
 impl CatalogDocument {
-    /// Whether every repository at this owner address belongs to `account`.
+    /// Whether every repository at this owner address belongs to `expected`.
     ///
-    /// `account` is the owning account's stable namespace key, or `None` for
-    /// unmanaged and organization owners. An unused address is available.
-    pub(crate) fn namespace_bound_to(&self, owner: &str, account: Option<&str>) -> bool {
+    /// `expected` identifies the single owning account, organization, or
+    /// unmanaged scope. An unused address is available.
+    pub(crate) fn namespace_bound_to(&self, owner: &str, expected: &NamespaceOwner) -> bool {
         self.repositories
             .iter()
             .filter(|record| record.owner.eq_ignore_ascii_case(owner))
-            .all(|record| record.personal_namespace().as_deref() == account)
+            .all(|record| &record.namespace_owner() == expected)
     }
 
     pub(crate) fn membership_snapshot(
@@ -419,16 +419,16 @@ impl CatalogDocument {
                     "personal repository owner is invalid",
                 ));
             }
-            // A username can be renamed and later claimed by someone else. One
-            // owner address must never mix repositories of different accounts.
-            let account = record.personal_namespace();
+            // A username or organization handle can change. One owner address
+            // must never mix repositories from different owners.
+            let namespace_owner = record.namespace_owner();
             if *namespaces
                 .entry(record.owner.to_lowercase())
-                .or_insert_with(|| account.clone())
-                != account
+                .or_insert_with(|| namespace_owner.clone())
+                != namespace_owner
             {
                 return Err(CatalogError::Invalid(
-                    "a personal namespace belongs to one account",
+                    "an owner namespace belongs to one account or organization",
                 ));
             }
             if record
@@ -559,13 +559,53 @@ pub(crate) fn is_organization_namespace(owner: &str) -> bool {
         .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
+/// Whether an organization handle can address an organization page and its repositories.
+pub(crate) fn valid_organization_handle(handle: &str) -> bool {
+    crate::cells::directory::validate_handle(handle).is_ok() && valid_account_namespace(handle)
+}
+
+/// Derives a fallback handle from an organization's name when an existing cell predates handles.
+pub(crate) fn derive_organization_handle(name: &str, id: Uuid) -> String {
+    let mut slug = String::new();
+    let mut prev_hyphen = true;
+    for ch in name.chars() {
+        let lower = ch.to_ascii_lowercase();
+        if lower.is_ascii_lowercase() || lower.is_ascii_digit() {
+            slug.push(lower);
+            prev_hyphen = false;
+        } else if !prev_hyphen {
+            slug.push('-');
+            prev_hyphen = true;
+        }
+        if slug.len() >= 39 {
+            break;
+        }
+    }
+    let trimmed = slug.trim_end_matches('-');
+    if valid_organization_handle(trimmed) {
+        trimmed.to_owned()
+    } else {
+        organization_namespace(id)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NamespaceOwner {
+    Personal(String),
+    Organization(Uuid),
+    Unmanaged,
+}
+
 pub(crate) enum BrowserNamespace {
     Personal(String),
     ManagedPersonal {
         owner: String,
         actor: MembershipActor,
     },
-    Organization(Uuid),
+    Organization {
+        id: Uuid,
+        owner: String,
+    },
     PersonalFork {
         organization: Uuid,
         owner: MembershipActor,
@@ -586,7 +626,7 @@ impl BrowserNamespace {
         actor: &MembershipActor,
         members: &[RepositoryMember],
     ) -> Result<(String, Option<OrganizationAccess>), CatalogError> {
-        if matches!(&self, Self::Organization(_)) {
+        if matches!(&self, Self::Organization { .. }) {
             if !members.is_empty()
                 && (members.len() != 1
                     || members[0].subject != actor.subject
@@ -618,14 +658,21 @@ impl BrowserNamespace {
                     teams: Vec::new(),
                 }),
             )),
-            Self::Organization(id) if members.is_empty() => Ok((
-                organization_namespace(id),
-                Some(OrganizationAccess {
-                    id,
-                    teams: Vec::new(),
-                }),
-            )),
-            Self::Organization(_) | Self::PersonalFork { .. } => Err(CatalogError::Invalid(
+            Self::Organization { id, owner } if members.is_empty() => {
+                if !valid_organization_handle(&owner) && owner != organization_namespace(id) {
+                    return Err(CatalogError::Invalid(
+                        "organization handle must be a valid URL slug",
+                    ));
+                }
+                Ok((
+                    owner,
+                    Some(OrganizationAccess {
+                        id,
+                        teams: Vec::new(),
+                    }),
+                ))
+            }
+            Self::Organization { .. } | Self::PersonalFork { .. } => Err(CatalogError::Invalid(
                 "organization repositories inherit their initial administrators",
             )),
         }
@@ -688,13 +735,21 @@ impl CatalogRecord {
         self.personal_namespace().is_some()
     }
 
+    pub(crate) fn namespace_owner(&self) -> NamespaceOwner {
+        if let Some(personal) = self.personal_namespace() {
+            return NamespaceOwner::Personal(personal);
+        }
+        if let Some(organization) = self.organization_id() {
+            return NamespaceOwner::Organization(organization);
+        }
+        NamespaceOwner::Unmanaged
+    }
+
     fn fork_creator_valid(&self) -> bool {
         self.fork_creator.as_ref().is_none_or(|creator| {
             self.forked_from.is_some()
                 && self.fork_owner.is_none()
-                && self
-                    .organization_id()
-                    .is_some_and(|id| self.owner == organization_namespace(id))
+                && self.organization_id().is_some()
                 && valid_actor(creator)
         })
     }
@@ -776,9 +831,7 @@ impl CatalogRecord {
                     && !source.visibility.value.is_public()
                     && source.organization.is_some()
                     && self.organization_id().is_some_and(|owner| {
-                        source.organization_id() == Some(owner)
-                            || (self.fork_owner.is_none()
-                                && self.owner == organization_namespace(owner))
+                        source.organization_id() == Some(owner) || self.fork_owner.is_none()
                     })
                     && source.application == RepositoryApplicationState::CellReady
             })
@@ -980,8 +1033,12 @@ impl CatalogStore {
         members: Vec<RepositoryMember>,
     ) -> Result<CatalogRecord, CatalogError> {
         let personal_owner = namespace.personal_owner();
+        let org_id_seed = match &namespace {
+            BrowserNamespace::Organization { id, .. } => Some(organization_namespace(*id)),
+            _ => None,
+        };
         let (owner, organization) = namespace.reservation_owner(&actor, &members)?;
-        let id = browser_repository_id(&owner, input.request_id);
+        let id = browser_repository_id(org_id_seed.as_deref().unwrap_or(&owner), input.request_id);
         self.insert_with_mode(
             CatalogRecord {
                 id,
@@ -1572,7 +1629,7 @@ impl CatalogStore {
                     Err(CatalogError::Conflict)
                 };
             }
-            if !document.namespace_bound_to(&record.owner, record.personal_namespace().as_deref()) {
+            if !document.namespace_bound_to(&record.owner, &record.namespace_owner()) {
                 return Err(CatalogError::Conflict);
             }
             if is_organization_namespace(&record.owner) {

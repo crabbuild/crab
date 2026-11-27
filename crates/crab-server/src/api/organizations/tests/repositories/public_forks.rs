@@ -19,14 +19,31 @@ async fn public_forks_keep_destination_grants_and_survive_upstream_changes() {
         .initialize(Address::Organization(destination))
         .await
         .unwrap();
+    let destination_handle = crate::catalog::derive_organization_handle("destination", destination);
+    cells
+        .command::<crate::cells::directory::organizations::ClaimOrganizationHandle>(
+            Address::Directory,
+            app::mutation_identity().unwrap(),
+            crate::cells::directory::organizations::HandleClaimInput {
+                organization: destination,
+                handle: destination_handle.clone(),
+            },
+        )
+        .await
+        .unwrap();
     cells
         .command::<Bootstrap>(
             Address::Organization(destination),
             app::mutation_identity().unwrap(),
             BootstrapInput {
                 actor: bob_actor,
+                handle: destination_handle.clone(),
                 name: "Destination".into(),
                 description: String::new(),
+                website: String::new(),
+                email: String::new(),
+                location: String::new(),
+                avatar: None,
             },
         )
         .await
@@ -163,7 +180,10 @@ async fn public_forks_keep_destination_grants_and_survive_upstream_changes() {
     let pending = Uuid::now_v7();
     catalog
         .reserve_git_import(
-            BrowserNamespace::Organization(destination),
+            BrowserNamespace::Organization {
+                id: destination,
+                owner: destination_handle,
+            },
             crate::catalog::GitImportReservation {
                 id: pending,
                 name: "pending-fork".into(),

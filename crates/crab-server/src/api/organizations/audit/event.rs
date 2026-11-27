@@ -112,15 +112,30 @@ impl From<organization::Event> for RawEvent {
                 event.detail = Some(format!("{label} · {identity}"));
                 AuditAction::AutomationChanged
             }
-            Action::Edited { name, description } => {
-                event.detail = Some(
-                    match (name, description) {
-                        (true, true) => "Name and description changed",
-                        (true, false) => "Name changed",
-                        _ => "Description changed",
-                    }
-                    .into(),
-                );
+            Action::Edited {
+                name,
+                description,
+                handle,
+                profile,
+            } => {
+                let mut parts = Vec::new();
+                if handle {
+                    parts.push("handle");
+                }
+                if name {
+                    parts.push("name");
+                }
+                if description {
+                    parts.push("description");
+                }
+                if profile {
+                    parts.push("profile");
+                }
+                event.detail = Some(if parts.is_empty() {
+                    "Organization updated".into()
+                } else {
+                    format!("Updated {}", parts.join(", "))
+                });
                 AuditAction::OrganizationEdited
             }
             Action::Membership {

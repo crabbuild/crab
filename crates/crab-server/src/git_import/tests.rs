@@ -244,7 +244,10 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
     let id = Uuid::now_v7();
     let path = format!("{endpoint}/{id}");
     let resume_path = format!("{path}/resume");
-    let destination = crate::catalog::organization_namespace(organization);
+    let org = h
+        .json(&format!("/api/organizations/{organization}"), &alice)
+        .await;
+    let destination = org["organization"]["handle"].as_str().unwrap().to_owned();
     let property = Uuid::now_v7();
     h.write(
         reqwest::Method::PUT,
@@ -366,7 +369,10 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
     let repository_id = scope.repository_id(id);
     let record = catalog
         .reserve_git_import(
-            BrowserNamespace::Organization(organization),
+            BrowserNamespace::Organization {
+                id: organization,
+                owner: destination.clone(),
+            },
             GitImportReservation {
                 id: repository_id,
                 name: request.name,

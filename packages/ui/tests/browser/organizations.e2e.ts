@@ -42,6 +42,7 @@ async function fixture(page: Page) {
   } = {
     organization: {
       id,
+      handle: "crab-engineering",
       name: "Crab engineering",
       description: "Repository collaboration",
       version: 1,
@@ -142,6 +143,16 @@ async function fixture(page: Page) {
         state.policy = { ...input, version: input.version + 1 };
       }
       return route.fulfill({ json: state.policy });
+    }
+    if (path === `/api/organizations/by-handle/${state.organization.handle}`) {
+      if (!state.metadataVisible) return route.fulfill({ status: 404 });
+      return route.fulfill({
+        json: {
+          organization: state.organization,
+          role: state.role,
+          actor: alice,
+        },
+      });
     }
     if (path === base) {
       if (method === "PATCH") {
@@ -1222,6 +1233,27 @@ test("organization settings and read-only people remain accessible at mobile wid
     ),
   ).toBe(true);
   await expectNoAccessibilityViolations(page);
+  await page.getByRole("link", { name: "General", exact: true }).click();
+  await page
+    .getByLabel("Organization handle", { exact: true })
+    .fill("crab-research");
+  await page.getByLabel("Website", { exact: true }).fill("https://crab.build");
+  await page.getByLabel("Email", { exact: true }).fill("ops@crab.build");
+  await page.getByLabel("Location", { exact: true }).fill("San Francisco");
+  await page
+    .getByRole("button", { name: "Update profile", exact: true })
+    .click();
+  await expect(page).toHaveURL(/\/crab-research\?tab=settings$/);
+  await page.getByRole("link", { name: "Overview", exact: true }).click();
+  await expect(page.getByText("@crab-research")).toBeVisible();
+  await expect(page.getByText("San Francisco")).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "crab.build", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "ops@crab.build", exact: true }),
+  ).toBeVisible();
+  await page.goto(`${root}?tab=settings`);
   state.role = "member";
   await page.reload();
   await expect(page.getByRole("alert")).toContainText(

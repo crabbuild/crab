@@ -4,16 +4,34 @@ use super::*;
 #[serde(deny_unknown_fields)]
 pub(crate) struct BootstrapInput {
     pub actor: Uuid,
+    pub handle: String,
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub website: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub location: String,
+    #[serde(default)]
+    pub avatar: Option<crate::cells::directory::avatar::AvatarConfig>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct EditInput {
     pub actor: Uuid,
     pub version: u64,
+    pub handle: String,
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub website: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub location: String,
+    #[serde(default)]
+    pub avatar: Option<crate::cells::directory::avatar::AvatarConfig>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -42,7 +60,16 @@ impl Mutation for Bootstrap {
         input: Self::Input,
     ) -> Result<MutationResult<Self::Output>> {
         actor(input.actor)?;
-        details(&input.name, &input.description)?;
+        validate_profile(
+            &input.handle,
+            &input.name,
+            &input.description,
+            &input.website,
+            &input.email,
+            &input.location,
+            input.avatar.as_ref(),
+        )
+        .map_err(Error::Invalid)?;
         let digest = blake3::hash(&serde_json::to_vec(&input)?);
         let old = context.query(
             "SELECT actor, digest FROM organization_bootstrap WHERE singleton = 1",
@@ -62,6 +89,16 @@ impl Mutation for Bootstrap {
         teams::initialize(context)?;
         super::projects::initialize(context)?;
         context.query("INSERT INTO organization_details(singleton, name, description, created_at_ms, updated_at_ms) VALUES (1, ?, ?, ?, ?)", &[SqlValue::Text(input.name), SqlValue::Text(input.description), SqlValue::Integer(context.now_ms()), SqlValue::Integer(context.now_ms())])?;
+        context.put_document(
+            PROFILE_DOC_KEY,
+            &OrganizationProfileExtras {
+                handle: input.handle,
+                website: input.website,
+                email: input.email,
+                location: input.location,
+                avatar: input.avatar,
+            },
+        )?;
         context.query("INSERT INTO organization_members(actor, role, active, version) VALUES (?, 'owner', 1, 1)", &[blob(input.actor)])?;
         context.query(
             "INSERT INTO organization_bootstrap(singleton, actor, digest) VALUES (1, ?, ?)",
@@ -96,21 +133,49 @@ impl Mutation for Edit {
         context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> Result<MutationResult<Self::Output>> {
-        details(&input.name, &input.description)?;
+        validate_profile(
+            &input.handle,
+            &input.name,
+            &input.description,
+            &input.website,
+            &input.email,
+            &input.location,
+            input.avatar.as_ref(),
+        )
+        .map_err(Error::Invalid)?;
         let Some(mut current) = record(context)? else {
             return Ok(MutationResult::Rejected(ChangeOutcome::NotFound));
         };
         if current.version != input.version {
             return Ok(MutationResult::Rejected(ChangeOutcome::Conflict));
         }
-        if current.name != input.name || current.description != input.description {
+        let handle_changed = current.handle != input.handle;
+        let name_changed = current.name != input.name;
+        let description_changed = current.description != input.description;
+        let profile_changed = current.website != input.website
+            || current.email != input.email
+            || current.location != input.location
+            || current.avatar != input.avatar;
+        if handle_changed || name_changed || description_changed || profile_changed {
             // Wall-clock rollback cannot make valid persisted metadata unreadable.
             let now = context.now_ms().max(current.updated_at_ms as i64);
             let action = Action::Edited {
-                name: current.name != input.name,
-                description: current.description != input.description,
+                name: name_changed,
+                description: description_changed,
+                handle: handle_changed,
+                profile: profile_changed,
             };
             context.query("UPDATE organization_details SET name = ?, description = ?, updated_at_ms = ? WHERE singleton = 1", &[SqlValue::Text(input.name), SqlValue::Text(input.description), SqlValue::Integer(now)])?;
+            context.put_document(
+                PROFILE_DOC_KEY,
+                &OrganizationProfileExtras {
+                    handle: input.handle,
+                    website: input.website,
+                    email: input.email,
+                    location: input.location,
+                    avatar: input.avatar,
+                },
+            )?;
             advance(context, input.actor, action)?;
             current =
                 record(context)?.ok_or(Error::Invalid("organization edit lost its record"))?;

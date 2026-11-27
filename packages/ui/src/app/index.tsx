@@ -22,6 +22,7 @@ import {
 import { OrganizationDirectory } from "@/features/organizations/directory";
 import { NewOrganization } from "@/features/organizations/new";
 import {
+  matchOrganizationHandleRoute,
   matchOrganizationRoute,
   organizationHref,
 } from "@/lib/organization-route";
@@ -179,6 +180,25 @@ export function App() {
     url.pathname,
   )?.[1];
   const organizationRoute = matchOrganizationRoute(url.pathname);
+  const organizationHandle =
+    !profileSettings &&
+    !actorRoute &&
+    !allRepositories &&
+    !personalRepositories &&
+    !publicRepositories &&
+    !transferId &&
+    !organizationRoute &&
+    !organizations &&
+    !newOrganization &&
+    !newRepository &&
+    !notifications &&
+    !myWork &&
+    !workSearch &&
+    !codeSearch &&
+    !homeDashboard &&
+    !repositoryCatalogPage
+      ? matchOrganizationHandleRoute(url.pathname)
+      : undefined;
   const route =
     profileSettings ||
     actorRoute ||
@@ -187,6 +207,7 @@ export function App() {
     publicRepositories ||
     transferId ||
     organizationRoute ||
+    organizationHandle ||
     organizations ||
     newOrganization ||
     newRepository ||
@@ -207,10 +228,13 @@ export function App() {
     organizationRoute && !organizationRoute[2]
       ? organizationRoute[1]
       : undefined;
+  const organizationEndpoint = organizationPage
+    ? `/api/organizations/${organizationPage}`
+    : organizationHandle
+      ? `/api/organizations/by-handle/${encodeURIComponent(organizationHandle)}`
+      : null;
   const organizationView = useRequest<OrganizationView>(
-    authenticated && organizationPage
-      ? `/api/organizations/${organizationPage}`
-      : null,
+    authenticated && organizationEndpoint ? organizationEndpoint : null,
   );
   const viewedOrganization = organizationView.data?.organization;
   useLayoutEffect(() => {
@@ -555,14 +579,14 @@ export function App() {
                 avatar={currentAvatar}
                 url={url}
               />
-            ) : organizationRoute ? (
-              organizationRoute[2]?.startsWith("/projects") ? (
+            ) : organizationRoute || organizationHandle ? (
+              organizationRoute?.[2]?.startsWith("/projects") ? (
                 <OrganizationProjects
                   organization={organizationRoute[1]}
                   project={organizationRoute[3]}
                   url={url}
                 />
-              ) : organizationRoute[2] ? (
+              ) : organizationRoute?.[2] ? (
                 <OrganizationInvitation
                   key={organizationRoute[1]}
                   id={organizationRoute[1]}
@@ -571,8 +595,7 @@ export function App() {
               ) : (
                 <OrganizationPage
                   commands={teamCommands}
-                  key={organizationRoute[1]}
-                  id={organizationRoute[1]}
+                  key={organizationHandle ?? organizationRoute?.[1]}
                   own={organizationView}
                   url={url}
                   csrf={session.data.csrf ?? ""}
