@@ -30,21 +30,7 @@ import {
 } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import type { LabelCatalog } from "./model";
-
-function foreground(hex: string) {
-  const channels = [0, 2, 4].map(
-    (offset) => parseInt(hex.slice(offset, offset + 2), 16) / 255,
-  );
-  const luminance = channels
-    .map((value) =>
-      value <= 0.03928 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4),
-    )
-    .reduce(
-      (sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index],
-      0,
-    );
-  return luminance > 0.45 ? "#0d1117" : "#ffffff";
-}
+import { contrastForeground } from "./color";
 
 type BadgeLabel = Pick<RepositoryLabel, "id" | "name" | "color"> &
   Partial<Pick<RepositoryLabel, "description">>;
@@ -55,7 +41,7 @@ export function LabelBadge({ label }: { label: BadgeLabel }) {
       className="discussion-label"
       style={{
         backgroundColor: `#${label.color}`,
-        color: foreground(label.color),
+        color: contrastForeground(label.color),
       }}
       title={label.description ?? undefined}
     >

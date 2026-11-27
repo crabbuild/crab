@@ -2735,9 +2735,14 @@ main {
   margin: 0;
 }
 .label-form label,
-.label-row-edit label {
+.label-row-edit label,
+.label-form .label-color-field,
+.label-row-edit .label-color-field {
   display: grid;
   gap: --spacing(1.5);
+}
+.label-form label,
+.label-row-edit label {
   font-weight: 600;
   font-size: var(--text-xs);
 }

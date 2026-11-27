@@ -11,42 +11,9 @@ import {
 } from "@/lib/api";
 import { TagIcon } from "@primer/octicons-react";
 import { useState } from "react";
+import { LabelColorPicker } from "./color-picker";
 import type { LabelCatalog } from "./model";
 import { LabelBadge } from "./selection";
-
-function LabelColor({
-  color,
-  onChange,
-}: {
-  color: string;
-  onChange: (color: string) => void;
-}) {
-  return (
-    <label>
-      Color
-      <span className="flex items-center gap-2">
-        <span
-          aria-hidden="true"
-          className="size-6 shrink-0 rounded border"
-          style={{
-            backgroundColor: /^\p{ASCII_Hex_Digit}{6}$/u.test(color)
-              ? `#${color}`
-              : undefined,
-          }}
-        />
-        <Input
-          className="w-24 font-mono"
-          required
-          pattern="[0-9a-fA-F]{6}"
-          title="Enter a six-digit hex color"
-          maxLength={6}
-          value={color}
-          onChange={(event) => onChange(event.target.value.toLowerCase())}
-        />
-      </span>
-    </label>
-  );
-}
 
 export function LabelsPage({ repo, csrf }: { repo: Repository; csrf: string }) {
   const catalog = useRequest<LabelCatalog>(endpoint(repo, "labels"));
@@ -99,7 +66,7 @@ export function LabelsPage({ repo, csrf }: { repo: Repository; csrf: string }) {
                     onChange={(event) => setName(event.target.value)}
                   />
                 </label>
-                <LabelColor color={color} onChange={setColor} />
+                <LabelColorPicker color={color} onChange={setColor} />
                 <label className="label-description-input">
                   Description
                   <Input
@@ -205,7 +172,7 @@ function LabelRow({
             onChange={(event) => setName(event.target.value)}
           />
         </label>
-        <LabelColor color={color} onChange={setColor} />
+        <LabelColorPicker color={color} onChange={setColor} />
         <label className="label-description-input">
           Description
           <Input

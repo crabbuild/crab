@@ -193,6 +193,40 @@ test("repository metadata can be managed and assigned to an issue", async ({
 
   await page.goto("/team/project/labels");
   await page.getByLabel("Name", { exact: true }).fill("bug");
+
+  // Pick color via interactive popover (predefined swatches + HSV sliders)
+  await page.getByRole("button", { name: "Choose label color" }).click();
+  const picker = page.getByRole("dialog", { name: "Label color picker" });
+  await expect(picker).toBeVisible();
+  await expect(
+    picker.getByRole("slider", { name: "Color saturation and brightness" }),
+  ).toBeVisible();
+  const hueSlider = picker.getByRole("slider", { name: "Color hue" });
+  await expect(hueSlider).toBeVisible();
+  await expect(
+    picker
+      .getByRole("group", { name: "Predefined colors" })
+      .getByRole("button"),
+  ).toHaveCount(14);
+  await expectNoAccessibilityViolations(page);
+
+  const greenPreset = picker.getByRole("button", {
+    name: "Green (#3fb950)",
+    exact: true,
+  });
+  await greenPreset.click();
+  await expect(greenPreset).toHaveAttribute("aria-pressed", "true");
+  const colorInput = page.getByLabel("Color", { exact: true });
+  await expect(colorInput).toHaveValue("3fb950");
+
+  await hueSlider.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(colorInput).not.toHaveValue("3fb950");
+
+  await greenPreset.click();
+  await expect(colorInput).toHaveValue("3fb950");
+  await page.keyboard.press("Escape");
+
   await page
     .getByLabel("Description", { exact: true })
     .fill("Confirmed defect");
@@ -204,6 +238,13 @@ test("repository metadata can be managed and assigned to an issue", async ({
   await page.getByRole("button", { name: "Edit", exact: true }).click();
   const edit = page.locator(".label-row-edit");
   await expectNoAccessibilityViolations(page);
+  await edit.getByRole("button", { name: "Choose label color" }).click();
+  const editPicker = page.getByRole("dialog", { name: "Label color picker" });
+  await editPicker
+    .getByRole("button", { name: "Purple (#8250df)", exact: true })
+    .click();
+  await expect(edit.getByLabel("Color", { exact: true })).toHaveValue("8250df");
+  await page.keyboard.press("Escape");
   await edit.getByLabel("Name", { exact: true }).fill("kind/bug");
   await edit.getByRole("button", { name: "Save changes" }).click();
   await expect(page.getByText("kind/bug", { exact: true })).toBeVisible();

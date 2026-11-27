@@ -4586,3 +4586,112 @@ test("revision picker creates a branch from the exact viewed commit", async ({
     }),
   ).toHaveAttribute("aria-checked", "true");
 });
+
+test("repository header places View forks to the right of Search code and stays responsive", async ({
+  page,
+}) => {
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/session") {
+      return route.fulfill({
+        json: {
+          authenticated: true,
+          mode: "local",
+          user: {
+            issuer: "https://auth.example",
+            subject: "user-1",
+            name: "Alice",
+          },
+          csrf: "test-csrf",
+        },
+      });
+    }
+    if (url.pathname === "/api/notifications/unread") {
+      return route.fulfill({ json: { count: 0 } });
+    }
+    if (url.pathname === "/api/repos") {
+      return route.fulfill({
+        json: {
+          repositories: [
+            {
+              id: "00000000-0000-4000-8000-000000000099",
+              owner: "team",
+              name: "project",
+              description: "A repository for our team.",
+              visibility: "public",
+              organization_id: "00000000-0000-4000-8000-000000000100",
+              access: "write",
+              can_admin: true,
+              can_maintain: true,
+              archive_version: 0,
+              archived: false,
+              protection_version: 0,
+              protected_branches: [],
+            },
+          ],
+        },
+      });
+    }
+    if (
+      url.pathname === "/api/organizations/00000000-0000-4000-8000-000000000100"
+    ) {
+      return route.fulfill({
+        json: {
+          organization: {
+            id: "00000000-0000-4000-8000-000000000100",
+            name: "team",
+            display_name: "Team",
+          },
+          role: "owner",
+        },
+      });
+    }
+    return route.fallback();
+  });
+
+  for (const viewport of [
+    { width: 1280, height: 720 },
+    { width: 1024, height: 768 },
+    { width: 768, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+    if (viewport.width === 1280) {
+      await page.goto("/team/project");
+    }
+
+    const header = page.locator(".repo-header");
+    const nav = header.getByRole("navigation", { name: "Repository" });
+    const watch = header.getByRole("button", { name: "Watch", exact: true });
+    const searchCode = header.getByRole("link", {
+      name: "Search code",
+      exact: true,
+    });
+    const viewForks = header.getByRole("link", {
+      name: "View forks",
+      exact: true,
+    });
+
+    await expect(nav).toBeVisible();
+    await expect(watch).toBeVisible();
+    await expect(searchCode).toBeVisible();
+    await expect(viewForks).toBeVisible();
+
+    const searchBox = await searchCode.boundingBox();
+    const forksBox = await viewForks.boundingBox();
+    expect(searchBox).not.toBeNull();
+    expect(forksBox).not.toBeNull();
+    expect(forksBox!.x).toBeGreaterThanOrEqual(
+      searchBox!.x + searchBox!.width - 1,
+    );
+    const searchCenterY = searchBox!.y + searchBox!.height / 2;
+    const forksCenterY = forksBox!.y + forksBox!.height / 2;
+    expect(Math.abs(forksCenterY - searchCenterY)).toBeLessThanOrEqual(2);
+
+    const scrollWidth = await page.evaluate(
+      () => document.documentElement.scrollWidth,
+    );
+    expect(scrollWidth).toBeLessThanOrEqual(viewport.width);
+    await expectNoAccessibilityViolations(page);
+  }
+});
