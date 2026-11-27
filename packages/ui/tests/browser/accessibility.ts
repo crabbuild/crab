@@ -72,8 +72,12 @@ export async function selectTheme(
   if (await direct.isVisible()) {
     await direct.click();
   } else {
-    await userMenu.click();
-    await page.getByRole("menuitemradio", { name: label, exact: true }).click();
+    const item = page.getByRole("menuitemradio", { name: label, exact: true });
+    // Page content that finishes loading can take focus and close the menu.
+    await expect(async () => {
+      if (!(await item.isVisible())) await userMenu.click({ timeout: 2_000 });
+      await item.click({ timeout: 2_000 });
+    }).toPass({ timeout: 15_000 });
   }
   if (theme === "light" || theme === "dark") {
     await expect(page.locator("html")).toHaveCSS("color-scheme", theme);
