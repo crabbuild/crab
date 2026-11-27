@@ -168,7 +168,7 @@ async fn personal_fork_is_retired_on_removal_and_restored_only_with_previous_acc
     .await
     .error_for_status()
     .unwrap();
-    let fork_access = catalog.membership(&namespace, "library").await.unwrap();
+    let fork_access = catalog.membership(namespace, "library").await.unwrap();
     assert_eq!(
         fork_access.baseline,
         crate::catalog::RepositoryBaseline::Read
