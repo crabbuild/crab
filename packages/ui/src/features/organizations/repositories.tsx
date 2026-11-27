@@ -26,47 +26,47 @@ export function OrganizationRepositories({
   const requestedImport = url.searchParams.get("import") ?? undefined;
   return (
     <section className="grid gap-4" aria-labelledby="organization-repositories">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <h2 id="organization-repositories" className="text-lg font-semibold">
-          Organization repositories
-        </h2>
-        <div className="flex flex-wrap items-start gap-2">
-          <Button asChild variant="outline" size="sm">
-            <Link
-              href={`/-/code-search?${new URLSearchParams({ organization: id })}`}
-            >
-              Search organization code
-            </Link>
-          </Button>
-          {canCreate && (
-            <Button asChild size="sm">
-              <Link
-                href={`/-/new?${new URLSearchParams({ organization: id })}`}
-              >
-                <RepoIcon data-icon="inline-start" />
-                New repository
-              </Link>
-            </Button>
-          )}
-          {(canCreate || requestedImport) && (
-            <GitImport
-              key={`${id}:${actor}:${requestedImport ?? ""}`}
-              account={actor}
-              organization={{
-                id,
-                name,
-                requestedJob: requestedImport,
-                canStart: canCreate,
-              }}
-              csrf={csrf}
-              onImported={(repo) => navigate(repoHref(repo))}
-            />
-          )}
-        </div>
-      </header>
+      <h2 id="organization-repositories" className="sr-only">
+        Organization repositories
+      </h2>
       <BrowseRepositories
         url={url}
         scope={{ kind: "organization", organization: id, owner }}
+        actions={
+          <>
+            <Button asChild variant="ghost">
+              <Link
+                href={`/-/code-search?${new URLSearchParams({ organization: id })}`}
+              >
+                Search organization code
+              </Link>
+            </Button>
+            {canCreate && (
+              <Button asChild>
+                <Link
+                  href={`/-/new?${new URLSearchParams({ organization: id })}`}
+                >
+                  <RepoIcon data-icon="inline-start" />
+                  New repository
+                </Link>
+              </Button>
+            )}
+            {(canCreate || requestedImport) && (
+              <GitImport
+                key={`${id}:${actor}:${requestedImport ?? ""}`}
+                account={actor}
+                organization={{
+                  id,
+                  name,
+                  requestedJob: requestedImport,
+                  canStart: canCreate,
+                }}
+                csrf={csrf}
+                onImported={(repo) => navigate(repoHref(repo))}
+              />
+            )}
+          </>
+        }
       />
     </section>
   );

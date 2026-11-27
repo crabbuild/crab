@@ -68,7 +68,9 @@ async fn git_changes(path: &Path, old: &str, new: &str) -> Changes {
         .collect();
     assert_eq!(records.len() % 2, 0);
     records
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|record| {
             let metadata = std::str::from_utf8(record[0]).unwrap();
             let fields: Vec<_> = metadata

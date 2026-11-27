@@ -280,7 +280,7 @@ fn decode_candidate(oid: ObjectId, object: &crab_remote_git::RemoteGitObject) ->
     let [base, head] = parents.as_slice() else {
         return Err(Error::CellContract("Expected a two-parent merge candidate"));
     };
-    let message = std::str::from_utf8(&commit.message)
+    let message = std::str::from_utf8(commit.message)
         .map_err(|_| Error::CellContract("Invalid merge candidate message"))?;
     let source = message
         .split_once(TRAILER)

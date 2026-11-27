@@ -212,7 +212,7 @@ impl Decision {
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum RetireOutcome {
-    Committed { decision: Decision },
+    Committed { decision: Box<Decision> },
     Missing,
     Conflict,
     Changed,
@@ -254,7 +254,9 @@ impl Mutation for Retire {
         validate_source_reservation(context, &reservation)?;
         if let Some(decision) = moved(context, reservation.source.issue)? {
             return Ok(if decision.reservation == reservation {
-                MutationResult::Success(RetireOutcome::Committed { decision })
+                MutationResult::Success(RetireOutcome::Committed {
+                    decision: Box::new(decision),
+                })
             } else {
                 MutationResult::Rejected(RetireOutcome::Conflict)
             });
@@ -314,7 +316,7 @@ impl Mutation for Retire {
         context.put_document(&move_key(issue.number), &decision)?;
         recovery::arm(context, Work::Publish(issue.number), PUBLICATION_GRACE_MS)?;
         Ok(MutationResult::Success(RetireOutcome::Committed {
-            decision,
+            decision: Box::new(decision),
         }))
     }
 }

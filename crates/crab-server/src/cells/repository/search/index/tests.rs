@@ -638,7 +638,7 @@ async fn format_17_backfills_admitted_queue_entries_in_bounded_pages() {
                 &cell,
                 Change::Arm {
                     version: 1,
-                    job: Job {
+                    job: Box::new(Job {
                         pull,
                         id: Uuid::now_v7(),
                         actor: actor(),
@@ -656,7 +656,7 @@ async fn format_17_backfills_admitted_queue_entries_in_bounded_pages() {
                         message: String::new(),
                         when_ready: pull == 10,
                         queue: None,
-                    },
+                    }),
                     queue: true,
                     configured_queue_required: true,
                     ruleset_queue_required: false,

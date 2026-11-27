@@ -1,4 +1,4 @@
-import { emptyPullRollup } from "./fixtures";
+import { emptyPullRollup, fulfillIdleReads } from "./fixtures";
 import { conversationPage } from "./conversation";
 import { expect, test, type Page } from "@playwright/test";
 import { emptyReactions, emptyReviewers } from "./fixtures";
@@ -89,6 +89,7 @@ async function setup(
     },
   });
   await page.route("**/api/**", async (route) => {
+    if (await fulfillIdleReads(route)) return;
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (
@@ -100,6 +101,21 @@ async function setup(
       return route.fulfill({
         json: { items: [], can_manage: canManage && !archived },
       });
+    // Branch reads around the pull page; none affects readiness.
+    if (request.method() === "GET") {
+      if (path.endsWith("/pulls/open-comparison"))
+        return route.fulfill({ json: { pull_number: null } });
+      if (path.endsWith("/pulls/templates"))
+        return route.fulfill({
+          json: { default: null, items: [], truncated: false, source: null },
+        });
+      if (path.endsWith("/pulls/recent-pushes"))
+        return route.fulfill({
+          json: { base_ref: "refs/heads/main", items: [] },
+        });
+      if (path.endsWith("/head-branch"))
+        return route.fulfill({ json: { branch: null } });
+    }
     if (path.endsWith("/conversation"))
       return conversationPage(route, { activity: events, head });
     if (path === "/api/session")

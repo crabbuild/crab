@@ -726,7 +726,7 @@ pub(crate) async fn fast_forward(
                 old: Some(old),
                 new: Some(new),
             },
-            publication: publish::Publication::PullRequest(pull),
+            publication: Box::new(publish::Publication::PullRequest(pull)),
         },
     )
     .await
@@ -771,7 +771,7 @@ pub(crate) async fn create_issue_branch(
         (target.config.owner.clone(), target.config.name.clone()),
         RefPublication::Update {
             update,
-            publication: publish::Publication::IssueBranch(publication),
+            publication: Box::new(publish::Publication::IssueBranch(publication)),
         },
     )
     .await
@@ -816,7 +816,7 @@ async fn create_reference(
                 old: None,
                 new: Some(new),
             },
-            publication: publish::Publication::NativePush,
+            publication: Box::new(publish::Publication::NativePush),
         },
     )
     .await
@@ -839,7 +839,7 @@ pub(crate) async fn delete_branch(
                 old: Some(old),
                 new: None,
             },
-            publication: publish::Publication::NativePush,
+            publication: Box::new(publish::Publication::NativePush),
         },
     )
     .await
@@ -881,7 +881,7 @@ pub(crate) async fn edit_pull_branch(
         key,
         RefPublication::Update {
             update,
-            publication: publish::Publication::PullBranch(edit),
+            publication: Box::new(publish::Publication::PullBranch(edit)),
         },
     )
     .await
@@ -911,7 +911,7 @@ pub(crate) async fn set_default_branch(
 enum RefPublication {
     Update {
         update: crab_git::receive_plan::RefUpdate,
-        publication: publish::Publication,
+        publication: Box<publish::Publication>,
     },
     DefaultBranch {
         expected_head: String,
@@ -967,7 +967,7 @@ pub(crate) async fn remove_merge_candidate(
                 old: Some(old),
                 new: None,
             },
-            publication: publish::Publication::PullRequest(pull),
+            publication: Box::new(publish::Publication::PullRequest(pull)),
         },
     )
     .await
@@ -1003,7 +1003,7 @@ async fn publish_ref(
                         &principal,
                         &key,
                         update,
-                        publication,
+                        *publication,
                         &worker_cancel,
                     )
                     .await

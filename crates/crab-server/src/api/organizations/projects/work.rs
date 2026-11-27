@@ -74,11 +74,15 @@ impl Scope<'_> {
                 continue;
             };
             self.enrich(&mut sources, &repo, &subjects).await?;
-            missing.extend(subjects.into_iter().filter_map(|subject| {
-                (subject.kind == SubjectKind::Issue
-                    && !sources.work.contains_key(&key(repo.id, subject)))
-                .then(|| (Arc::clone(&repo), subject))
-            }));
+            missing.extend(
+                subjects
+                    .into_iter()
+                    .filter(|subject| {
+                        subject.kind == SubjectKind::Issue
+                            && !sources.work.contains_key(&key(repo.id, *subject))
+                    })
+                    .map(|subject| (Arc::clone(&repo), subject)),
+            );
         }
 
         // A Project placement keeps its original address. Only missing issues

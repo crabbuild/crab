@@ -2500,6 +2500,19 @@ main {
     min-width: --spacing(8);
     min-height: --spacing(8);
   }
+  /* The bar overlays the filters; wrapping would shift the selected rows. */
+  .discussion-bulk-row {
+    flex-wrap: nowrap;
+  }
+  .discussion-bulk-actions {
+    flex-wrap: nowrap;
+    min-width: 0;
+    overflow-x: auto;
+    padding: --spacing(1);
+  }
+  .discussion-bulk-actions > * {
+    flex-shrink: 0;
+  }
 }
 .discussion-toolbar-selection {
   display: flex;

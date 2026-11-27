@@ -48,7 +48,9 @@ test("owners can review and change a parent team and browse inherited grants", a
   await page.setViewportSize({ width: 390, height: 850 });
   await page.goto(`${root}?tab=teams&team=${parent}&view=children`);
   await page.getByRole("link", { name: "Infrastructure" }).click();
-  await expect(page.getByRole("link", { name: "Engineering" })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Engineering", exact: true }),
+  ).toBeVisible();
   const teamNav = page.getByRole("navigation", { name: "Team", exact: true });
   await teamNav.getByRole("link", { name: "Repositories" }).click();
   await expect(page.getByText("Write · Inherited")).toBeVisible();
@@ -783,9 +785,12 @@ test("lost acknowledgements retain the exact submission across navigation and ac
   const original = state.writes[0].body;
   await page.getByRole("link", { name: "People", exact: true }).click();
   state.revoked = true;
+  // Leave and return in the same document so the organization is read again.
   await page
-    .getByRole("button", { name: "Refresh organization", exact: true })
+    .getByRole("link", { name: "Crab repositories", exact: true })
+    .first()
     .click();
+  await page.goBack();
   await expect(
     page.getByText("Organization not found", { exact: true }),
   ).toBeVisible();

@@ -26,8 +26,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    Config, app, auth::Principal, catalog::visibility::Visibility,
-    cells::organization::properties::PropertyValue, repository::Repository, server::Server,
+    Config, app, auth::Principal, cells::organization::properties::PropertyValue,
+    repository::Repository, server::Server,
 };
 
 #[derive(Clone)]

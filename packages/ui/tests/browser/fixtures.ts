@@ -1,4 +1,32 @@
+import type { Route } from "@playwright/test";
 import type { ReactionSummary } from "@/components/discussion/reactions";
+
+// Repository pages also read the notification dot and each conversation's lock.
+// Specs about neither answer both with the idle state.
+export async function fulfillIdleReads(route: Route) {
+  const request = route.request();
+  if (request.method() !== "GET") return false;
+  const { pathname } = new URL(request.url());
+  if (pathname === "/api/notifications/unread") {
+    await route.fulfill({ json: { unread: false } });
+    return true;
+  }
+  if (
+    /^\/api\/repos\/[^/]+\/[^/]+\/(issues|pulls)\/\d+\/lock$/.test(pathname)
+  ) {
+    await route.fulfill({
+      json: {
+        version: 1,
+        locked: false,
+        reason: null,
+        can_manage: false,
+        can_post: true,
+      },
+    });
+    return true;
+  }
+  return false;
+}
 
 export function emptyReactions(revision = 1): ReactionSummary {
   return {

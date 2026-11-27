@@ -7,7 +7,7 @@ use crate::test_support::{git::git, http::Harness};
 use crate::{
     RepositoryAccess, RepositoryMember,
     auth::Identity,
-    catalog::{BrowserNamespace, GitImportReservation, MembershipActor},
+    catalog::{BrowserNamespace, GitImportReservation, MembershipActor, visibility::Visibility},
 };
 use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;

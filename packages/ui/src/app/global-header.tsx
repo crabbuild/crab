@@ -124,8 +124,10 @@ export function GlobalHeader({
   useEffect(() => {
     if (!authenticated) return;
     const onKeyDown = (event: KeyboardEvent) => {
+      // Page searches that own "/" handle it first and prevent the default.
       if (
         event.key === "/" &&
+        !event.defaultPrevented &&
         !event.metaKey &&
         !event.ctrlKey &&
         !event.altKey &&
@@ -378,9 +380,9 @@ export function GlobalHeader({
                   asChild
                   className="h-8.5 gap-2 rounded-md px-2"
                 >
-                  <Link href="/-/organizations">
-                    <Building2Icon aria-hidden="true" />
-                    Your organizations
+                  <Link href="/-/organizations/new">
+                    <OrganizationIcon size={15} aria-hidden="true" />
+                    New organization
                   </Link>
                 </DropdownMenuItem>
               </DropdownMenuContent>

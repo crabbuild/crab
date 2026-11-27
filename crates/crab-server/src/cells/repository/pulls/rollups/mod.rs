@@ -59,10 +59,10 @@ impl Read for GetRollups {
             ));
         }
         search::index::ensure_ready(context)?;
-        if let Some(expected) = input.check_revision {
-            if summary::revision(context)? != expected {
-                return Ok(None);
-            }
+        if let Some(expected) = input.check_revision
+            && summary::revision(context)? != expected
+        {
+            return Ok(None);
         }
         let mut commits = BTreeMap::<String, Checks>::new();
         let mut items = Vec::with_capacity(input.heads.len());

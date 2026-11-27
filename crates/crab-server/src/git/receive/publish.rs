@@ -772,9 +772,7 @@ fn updated_default<'a>(
 
 impl RefMutation<'_> {
     fn linear_violation(&self, update: &crab_git::receive_plan::RefUpdate) -> Option<&'static str> {
-        if update.new.is_none() {
-            return None;
-        }
+        update.new?;
         match self.linear_history.as_ref()?.get(&update.name) {
             Some(true) => None,
             Some(false) => Some("ref requires linear history; merge commits are prohibited"),

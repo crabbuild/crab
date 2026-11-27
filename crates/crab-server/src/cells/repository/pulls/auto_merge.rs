@@ -115,7 +115,7 @@ pub(crate) struct State {
 pub(crate) enum Change {
     Arm {
         version: u64,
-        job: Job,
+        job: Box<Job>,
         #[serde(default)]
         queue: bool,
         #[serde(default)]
@@ -519,7 +519,7 @@ impl Mutation for Edit {
                     // The original comparison remains the submission binding
                     // even when the sweep has followed a later publication.
                     job.tracked_head.clone_from(&existing.tracked_head);
-                    return Ok(if same_mode && existing == job {
+                    return Ok(if same_mode && existing == *job {
                         Success(Outcome::Saved)
                     } else {
                         Rejected(Outcome::Changed)

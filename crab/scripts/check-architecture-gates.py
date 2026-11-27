@@ -463,7 +463,6 @@ CACHE_STORE_DIRECT_FORBIDDEN_PACKAGES = {
     "crab-coordination",
     "crab-diff",
     "crab-git",
-    "crab-lfs",
     "crab-metadata",
     "crab-read",
     "crab-workflow",
@@ -581,6 +580,8 @@ CACHE_STORE_SOURCE_FORBIDDEN_PATTERNS = {
     "xet_data",
     "xet_runtime",
 }
+# The lfs feature's read-through adapts crab-lfs to the shared disk cache.
+CACHE_STORE_FEATURE_SOURCE_PATTERNS = {"crates/crab-cache-store/src/lfs.rs": {"crab_lfs"}}
 CACHE_STORE_SCAN_PATHS = ("crates/crab-cache-store/src",)
 METADATA_DEFAULT_FORBIDDEN_PACKAGES = {
     "async-trait",
@@ -607,13 +608,13 @@ AUTH_CLIENT_FEATURE_FORBIDDEN_PACKAGES = {
     "object_store",
 }
 AUTH_CLIENT_FEATURE_DEFINITIONS = {
-    "aws-oidc-client": ["dep:sha2", "dep:tokio", "oidc-client"],
+    "aws-oidc-client": ["dep:tokio", "oidc-client"],
     "azure-entra-client": ["dep:tokio", "oidc-client"],
     "azure-management": ["dep:azure_identity", "dep:reqwest"],
-    # Private CDN checkout pins an issuer and subject fingerprint across processes.
-    "crab-auth-client": ["dep:sha2", "dep:tokio", "oidc-client"],
+    "crab-auth-client": ["dep:tokio", "oidc-client"],
     "gcp-workload-identity-client": ["dep:tokio", "oidc-client"],
-    "oidc-client": ["dep:reqwest", "dep:tokio"],
+    # Private CDN checkout pins an issuer and subject fingerprint across processes.
+    "oidc-client": ["dep:reqwest", "dep:sha2", "dep:tokio"],
 }
 AUTH_CLIENT_FEATURE_REQUIRED_PACKAGES = {
     "aws-oidc-client": {"reqwest", "sha2", "tokio"},
@@ -993,6 +994,9 @@ READ_MODULE_FORBIDDEN_PATTERNS = {
     "xet-core-structures",
     "xet_core_structures",
 }
+# Registers pointer-catalog captures for readers in other processes, so it owns
+# the coordination types that the rest of crab-read leaves to callers.
+READ_MODULE_CAPTURE_OWNERS = {"crates/crab-read/src/read_retention.rs"}
 READ_MODULE_SCAN_PATHS = (
     "crates/crab-read/Cargo.toml",
     "crates/crab-read/src",
@@ -1493,6 +1497,11 @@ STORAGE_MODULE_FORBIDDEN_PATTERNS = {
     "xet_data",
     "xet_runtime",
 }
+# A fixture may name another domain's keys without depending on it: the CDN tests
+# check cache namespaces for LFS object paths.
+STORAGE_MODULE_FIXTURE_PATTERNS = {
+    "crates/crab-storage/src/cdn/tests.rs": {"lfs/objects"},
+}
 STORAGE_MODULE_SCAN_PATHS = (
     "crates/crab-storage/Cargo.toml",
     "crates/crab-storage/src",
@@ -1930,7 +1939,8 @@ WORKSPACE_DEPENDENCY_POLICY = {
         },
     },
     "crab-auth-store": {
-        "normal": {"crab-auth", "crab-git", "crab-storage", "crab-types"},
+        # view-retention renews captured CDN views with coordination leases.
+        "normal": {"crab-auth", "crab-coordination", "crab-git", "crab-storage", "crab-types"},
     },
     "crab-cache": {"normal": {"crab-types", "crab-xet"}},
     "crab-cache-server": {
@@ -1938,7 +1948,8 @@ WORKSPACE_DEPENDENCY_POLICY = {
         "dev": {"crab-cache"},
     },
     "crab-cache-store": {
-        "normal": {"crab-cache", "crab-storage", "crab-xet"},
+        # The lfs feature keeps CDN LFS reads in the shared disk cache.
+        "normal": {"crab-cache", "crab-lfs", "crab-storage", "crab-xet"},
         "dev": {"crab-cache-server", "crab-storage"},
     },
     "crab-coordination": {},
@@ -1999,7 +2010,8 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-types",
             "crab-xet",
         },
-        "dev": {"crab-metadata", "crab-storage"},
+        # Retention tests hold coordination claims while mounts read.
+        "dev": {"crab-coordination", "crab-metadata", "crab-storage"},
     },
     "crab-workflow": {
         "normal": {"crab-coordination", "crab-storage", "crab-types"}
@@ -2559,23 +2571,44 @@ def dependency_kind(dependency: dict) -> str:
     return dependency["kind"] or "normal"
 
 
+# Edges that only provider-cdn may add, and what else that feature may enable
+# besides the operator CDN adapter.
+OPTIONAL_CDN_COMPOSITION = {
+    "crab-server": {
+        "edges": {"crab-auth-store": [], "crab-cache": ["local-cache"], "crab-cache-store": []},
+        "enables": {"dep:crab-cache", "dep:crab-cache-store", "crab-cache-store/lfs"},
+    },
+    "crab-s3-gateway": {
+        "edges": {"crab-auth-store": []},
+        "enables": {"crab-cache-store/lfs"},
+    },
+}
+
+
 def is_optional_cdn_composition(package: dict, dependency: dict) -> bool:
-    if (package["name"] not in {"crab-server", "crab-s3-gateway"}
-            or dependency["name"] != "crab-auth-store" or dependency_kind(dependency) != "normal"
+    composition = OPTIONAL_CDN_COMPOSITION.get(package["name"])
+    if composition is None:
+        return False
+    edges = composition["edges"]
+    name = dependency["name"]
+    if (name not in edges or dependency_kind(dependency) != "normal"
             or not dependency.get("optional") or dependency.get("uses_default_features", True)
-            or dependency.get("features") != [] or dependency.get("rename") is not None):
+            or dependency.get("features") != edges[name] or dependency.get("rename") is not None):
         return False
     features = package.get("features", {})
-    if set(features.get("provider-cdn", [])) != {"dep:crab-auth-store", "crab-auth-store/operator-cdn"}:
+    adapter = {"dep:crab-auth-store", "crab-auth-store/operator-cdn"}
+    if not adapter <= set(features.get("provider-cdn", [])) <= adapter | composition["enables"]:
         return False
     qualification = {"provider-cdn", "crab-storage/provider-cdn-qualification"}
     if set(features.get("provider-cdn-qualification", [])) != qualification:
         return False
     # Any additional path into these features could activate the adapter on an
     # ordinary build, including through an intermediate feature.
-    protected = {"provider-cdn", "provider-cdn-qualification", "dep:crab-auth-store", "crab-auth-store"}
-    return all(item not in protected and not item.startswith(("crab-auth-store/", "crab-auth-store?/"))
-               for name, enabled in features.items() if name not in {"provider-cdn", "provider-cdn-qualification"}
+    protected = {"provider-cdn", "provider-cdn-qualification"} | set(edges) | {f"dep:{edge}" for edge in edges}
+    scoped = tuple(f"{edge}{separator}" for edge in edges for separator in ("/", "?/"))
+    return all(item not in protected and not item.startswith(scoped)
+               for feature, enabled in features.items()
+               if feature not in {"provider-cdn", "provider-cdn-qualification"}
                for item in enabled)
 
 
@@ -3528,6 +3561,12 @@ def check_cache_store_module_scope(root: Path, metadata: dict) -> bool:
         if normal_dependency(package, name) is not None:
             violations.append(f"crab-cache-store: {name} must not be a normal dependency")
 
+    lfs = normal_dependency(package, "crab-lfs")
+    if lfs is not None and (
+        not lfs["optional"] or "dep:crab-lfs" not in package.get("features", {}).get("lfs", [])
+    ):
+        violations.append("crab-cache-store: crab-lfs must stay lfs-gated")
+
     if dev_dependency(package, "crab-cache-server") is None:
         violations.append("crab-cache-store: cache-server fixture dependency should stay dev-only")
 
@@ -3550,8 +3589,11 @@ def check_cache_store_module_scope(root: Path, metadata: dict) -> bool:
             except UnicodeDecodeError:
                 continue
             production_text = text.partition("\n#[cfg(test)]")[0]
+            patterns = CACHE_STORE_SOURCE_FORBIDDEN_PATTERNS - CACHE_STORE_FEATURE_SOURCE_PATTERNS.get(
+                rel(root, candidate), set()
+            )
             for index, line in enumerate(production_text.splitlines(), start=1):
-                if any(pattern in line for pattern in CACHE_STORE_SOURCE_FORBIDDEN_PATTERNS):
+                if any(pattern in line for pattern in patterns):
                     violations.append(f"{rel(root, candidate)}:{index}: {line.strip()}")
 
     if not violations:
@@ -4326,7 +4368,11 @@ def check_read_module_scope(root: Path, metadata: dict) -> bool:
                 continue
             test_lines = rust_test_only_lines(text) if candidate.suffix == ".rs" else set()
             for index, line in enumerate(text.splitlines(), start=1):
-                if candidate.suffix == ".rs" and index not in test_lines:
+                if (
+                    candidate.suffix == ".rs"
+                    and index not in test_lines
+                    and rel(root, candidate) not in READ_MODULE_CAPTURE_OWNERS
+                ):
                     modules = re.findall(r"\bcrab_coordination(?:::([A-Za-z_]\w*))?", line)
                     invalid_module = any(module not in {"read_retention_runtime", "CoordinationError"} for module in modules)
                     owns_capture = re.search(
@@ -4762,12 +4808,15 @@ def check_storage_module_scope(root: Path, metadata: dict) -> bool:
                 text = candidate.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 continue
+            patterns = STORAGE_MODULE_FORBIDDEN_PATTERNS - STORAGE_MODULE_FIXTURE_PATTERNS.get(
+                rel(root, candidate), set()
+            )
             for index, line in enumerate(text.splitlines(), start=1):
                 # A dependency prefix may name a crate family (aws_sdk_*), but
                 # embedded words in a test/function name are not imports.
                 if any(
                     re.search(r"(?<!\w)" + re.escape(pattern), line)
-                    for pattern in STORAGE_MODULE_FORBIDDEN_PATTERNS
+                    for pattern in patterns
                 ):
                     violations.append(f"{rel(root, candidate)}:{index}: {line.strip()}")
 

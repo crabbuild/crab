@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type RefObject } from "react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -10,7 +10,6 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Empty, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { useRequest } from "@/lib/api";
@@ -23,22 +22,28 @@ export function MemberAccess({
   organization,
   actor,
   name,
+  open,
+  onOpenChange,
+  returnFocus,
 }: {
   organization: string;
   actor: string;
   name: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  returnFocus: RefObject<HTMLButtonElement | null>;
 }) {
   return (
-    <Dialog>
-      <DialogTrigger asChild>
-        <Button
-          variant="outline"
-          aria-label={`View repository access for ${name}`}
-        >
-          View repository access
-        </Button>
-      </DialogTrigger>
-      <DialogContent className="max-h-[85dvh] grid-rows-[auto_minmax(0,1fr)] sm:max-w-2xl">
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        className="max-h-[85dvh] grid-rows-[auto_minmax(0,1fr)] sm:max-w-2xl"
+        onCloseAutoFocus={(event) => {
+          if (returnFocus.current) {
+            event.preventDefault();
+            returnFocus.current.focus();
+          }
+        }}
+      >
         <DialogHeader className="pr-8">
           <DialogTitle>Repository access</DialogTitle>
           <DialogDescription className="break-words">{name}</DialogDescription>

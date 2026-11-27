@@ -24,7 +24,6 @@ use url::Url;
 use uuid::Uuid;
 
 mod provider;
-pub(crate) mod storage_proxy;
 pub(crate) use provider::{KEY_ONE, KEY_TWO, Provider, start_provider};
 
 pub(crate) const TEST_SCIM_TOKEN: &str = "crab-fixture-user-provisioning-token-only";

@@ -42,7 +42,7 @@ impl Status {
             context: record.context,
             state: record.state,
             updated_at: record.created_at_ms,
-            evidence: include_evidence.then(|| Evidence {
+            evidence: include_evidence.then_some(Evidence {
                 author: record.author.name,
                 description: record.description,
                 target_url: record.target_url,
@@ -72,7 +72,7 @@ impl Run {
             status: record.status,
             conclusion: record.conclusion,
             updated_at: record.updated_at_ms,
-            evidence: include_evidence.then(|| Evidence {
+            evidence: include_evidence.then_some(Evidence {
                 author: record.author.name,
                 description: Some(record.output_title),
                 target_url: record.details_url,

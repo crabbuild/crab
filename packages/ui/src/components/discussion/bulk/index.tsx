@@ -262,7 +262,7 @@ export function BulkActions({
         aria-label="Bulk discussion actions"
         role="region"
       >
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="discussion-bulk-row flex flex-wrap items-center gap-2">
           <div className="discussion-counts gap-2">
             <strong className="text-sm" aria-live="polite">
               {bulk.selected.length} selected
@@ -276,7 +276,7 @@ export function BulkActions({
               )}
             </span>
           </div>
-          <div className="ml-auto flex flex-wrap items-center gap-1">
+          <div className="discussion-bulk-actions ml-auto flex flex-wrap items-center gap-1">
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button

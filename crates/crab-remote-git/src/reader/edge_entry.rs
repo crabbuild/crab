@@ -127,10 +127,6 @@ impl RemoteGitReader {
         Ok(object)
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the verifier owns one located entry and its delta state"
-    )]
     async fn verify_edge_entry(
         self: &Arc<Self>,
         session: &GitObjectLocatorSession,

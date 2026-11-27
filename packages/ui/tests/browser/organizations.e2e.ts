@@ -180,7 +180,13 @@ async function fixture(page: Page) {
           can_manage: state.role === "owner",
         },
       });
-    if (path === `${base}/members/${alice}` && method === "DELETE")
+    if (path === `${base}/members/${alice}` && method === "GET") {
+      const { role, version } = state.members[0];
+      return route.fulfill({
+        json: { member: { actor: alice, role, active: true, version } },
+      });
+    }
+    if (path === `${base}/members/removal` && method === "POST")
       return route.fulfill({
         status: 400,
         json: {
@@ -609,10 +615,9 @@ test("owners see identity-provider management and blocked access in People", asy
         } satisfies MemberRepositoryAccess,
       }),
   );
-  await page.goto(root);
-  await page
-    .getByRole("button", { name: "View repository access for Alice" })
-    .click();
+  await page.goto(`${root}?tab=people`);
+  await page.getByRole("button", { name: "Actions for Alice" }).click();
+  await page.getByRole("menuitem", { name: "View repository access" }).click();
   const dialog = page.getByRole("dialog", { name: "Repository access" });
   await expect(
     dialog.getByText("Provisioned by identity provider"),
@@ -666,7 +671,7 @@ test("owners find an outside collaborator, inspect grants, and invite them", asy
       }),
   );
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(root);
+  await page.goto(`${root}?tab=people`);
   await page.getByRole("link", { name: "Outside collaborators" }).click();
   const search = page.getByRole("search", {
     name: "Outside collaborator search",
@@ -707,9 +712,9 @@ test("owners find an outside collaborator, inspect grants, and invite them", asy
   expect(state.invitation?.recipient).toBe(bob);
 
   state.role = "member";
-  await page.goto(root);
+  await page.goto(`${root}?tab=people`);
   await expect(
-    page.getByRole("heading", { name: "Organization members" }),
+    page.getByRole("heading", { name: "Members", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("link", { name: "Outside collaborators" }),
@@ -896,7 +901,7 @@ test("owners can review and convert multiple selected members", async ({
       }),
   );
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(root);
+  await page.goto(`${root}?tab=people`);
   const all = page.getByRole("checkbox", { name: "Select page" });
   const trigger = page.getByRole("button", {
     name: "2 selected",
@@ -992,7 +997,7 @@ test("owners review and remove selected members from People", async ({
     },
   );
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(root);
+  await page.goto(`${root}?tab=people`);
   await page.getByRole("checkbox", { name: "Select Bob" }).check();
   await page.getByRole("checkbox", { name: "Select Casey" }).check();
   const trigger = page.getByRole("button", { name: "2 selected", exact: true });
@@ -1034,7 +1039,7 @@ test("owners invite by stable account, preserve a conflicted form, and cancel wi
   page,
 }) => {
   const state = await fixture(page);
-  await page.goto(root);
+  await page.goto(`${root}?tab=people`);
   await page
     .getByRole("button", { name: "Invite member", exact: true })
     .click();
@@ -1081,10 +1086,11 @@ test("owners invite by stable account, preserve a conflicted form, and cancel wi
     page.getByText("No pending invitations.", { exact: true }),
   ).toBeVisible();
   expect(state.invitation?.state).toBe("cancelled");
-  await page.goto(root);
-  await page.getByRole("button", { name: "Remove", exact: true }).click();
+  await page.goto(`${root}?tab=people`);
+  await page.getByRole("button", { name: "Actions for Alice" }).click();
+  await page.getByRole("menuitem", { name: "Leave organization…" }).click();
   await page
-    .getByRole("button", { name: "Remove member", exact: true })
+    .getByRole("button", { name: "Leave organization", exact: true })
     .click();
   await expect(page.getByRole("alert").last()).toContainText(
     "retain at least one owner",
@@ -1133,7 +1139,7 @@ test("owners can choose to restore a former member's previous access", async ({
 }) => {
   const state = await fixture(page);
   state.reinstatement = { role: "owner", version: 4 };
-  await page.goto(root);
+  await page.goto(`${root}?tab=people`);
   await page
     .getByRole("button", { name: "Invite member", exact: true })
     .click();
@@ -1169,33 +1175,39 @@ test("organization settings and read-only people remain accessible at mobile wid
 }) => {
   const state = await fixture(page);
   await page.goto(`${root}?tab=settings`);
-  await page.getByLabel("Display name", { exact: true }).fill("Crab research");
+  await page
+    .getByLabel("Organization display name", { exact: true })
+    .fill("Crab research");
   state.organization = {
     ...state.organization,
     name: "Concurrent saved name",
     version: 2,
   };
-  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Update profile", exact: true })
+    .click();
   await expect(
     page.getByText("Concurrent saved name", { exact: true }),
   ).toBeVisible();
-  await expect(page.getByLabel("Display name", { exact: true })).toHaveValue(
-    "Crab research",
-  );
+  await expect(
+    page.getByLabel("Organization display name", { exact: true }),
+  ).toHaveValue("Crab research");
   await page
     .getByRole("button", {
       name: "Keep draft with current version",
       exact: true,
     })
     .click();
-  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Update profile", exact: true })
+    .click();
   await expect(
     page.getByRole("status").filter({ hasText: /^Organization updated\.$/ }),
   ).toBeVisible();
   await page.reload();
-  await expect(page.getByLabel("Display name", { exact: true })).toHaveValue(
-    "Crab research",
-  );
+  await expect(
+    page.getByLabel("Organization display name", { exact: true }),
+  ).toHaveValue("Crab research");
   await page.setViewportSize({ width: 390, height: 844 });
   await expectNoAccessibilityViolations(page);
   await selectDarkTheme(page);
@@ -1215,13 +1227,13 @@ test("organization settings and read-only people remain accessible at mobile wid
   await expect(page.getByRole("alert")).toContainText(
     "This organization page is unavailable.",
   );
-  await page.goto(root);
+  await page.goto(`${root}?tab=people`);
   await expect(
     page.getByRole("link", { name: "Settings", exact: true }),
   ).toHaveCount(0);
-  await expect(
-    page.getByRole("button", { name: "Remove", exact: true }),
-  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Actions for Alice" }).click();
+  await expect(page.getByRole("menuitem")).toHaveText(["Leave organization…"]);
+  await page.keyboard.press("Escape");
   await expect(
     page.getByRole("link", { name: "Alice", exact: true }),
   ).toBeVisible();
@@ -1230,6 +1242,72 @@ test("organization settings and read-only people remain accessible at mobile wid
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
   ).toBe(true);
+});
+
+test("members leave from their own People row or from Your organizations", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  state.role = "member";
+  state.members = [{ ...state.members[0], role: "member", version: 3 }];
+  let member = true;
+  const removals: unknown[] = [];
+  await page.route(
+    (url) => url.pathname === `/api/organizations/${id}/members/removal`,
+    (route) => {
+      removals.push(route.request().postDataJSON());
+      member = false;
+      return route.fulfill({ json: { removed: 1 } });
+    },
+  );
+  await page.route(
+    (url) => url.pathname === "/api/organizations",
+    (route) =>
+      route.fulfill({
+        json: {
+          items: member
+            ? [
+                {
+                  kind: "member",
+                  organization: state.organization,
+                  actor: alice,
+                  role: "member",
+                  can_create: false,
+                  can_create_private: false,
+                  can_create_public: false,
+                },
+              ]
+            : [],
+          next: null,
+        },
+      }),
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${root}?tab=people`);
+  const actions = page.getByRole("button", { name: "Actions for Alice" });
+  await actions.click();
+  await page.getByRole("menuitem", { name: "Leave organization…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Leave Crab engineering?" });
+  await expect(dialog).toContainText("private forks");
+  await expectNoAccessibilityViolations(page);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(actions).toBeFocused();
+  expect(removals).toEqual([]);
+
+  await page.goto("/-/organizations");
+  await page
+    .getByRole("button", { name: "Leave Crab engineering", exact: true })
+    .click();
+  await dialog
+    .getByRole("button", { name: "Leave organization", exact: true })
+    .click();
+  await expect(
+    page.getByRole("status").filter({ hasText: "You left Crab engineering." }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Crab engineering", exact: true }),
+  ).toHaveCount(0);
+  expect(removals).toEqual([{ members: [{ actor: alice, version: 3 }] }]);
 });
 
 test("a former member can inspect their old decision without current metadata or an access link", async ({

@@ -144,6 +144,7 @@ pub(crate) struct DepartureMember {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Departure {
+    /// The requester: an owner, or a member removing only themselves.
     pub(crate) owner: Uuid,
     pub(crate) members: Vec<DepartureMember>,
     pub(crate) mode: DepartureMode,
@@ -157,6 +158,12 @@ pub(crate) enum DepartureMode {
 }
 
 impl Departure {
+    /// Leaving removes only the requester, so membership suffices.
+    pub(crate) fn is_self_removal(&self) -> bool {
+        self.mode == DepartureMode::Remove
+            && matches!(self.members.as_slice(), [member] if member.actor == self.owner)
+    }
+
     pub(crate) fn valid(&self) -> bool {
         let distinct: std::collections::BTreeSet<_> =
             self.members.iter().map(|member| member.actor).collect();
@@ -196,7 +203,8 @@ fn check_departure(
     input: &Departure,
     selected: &[Member],
 ) -> Result<ChangeOutcome<()>> {
-    if !member(context, input.owner)?.is_some_and(|entry| entry.active && entry.role == Role::Owner)
+    if !member(context, input.owner)?
+        .is_some_and(|entry| entry.active && (entry.role == Role::Owner || input.is_self_removal()))
     {
         return Err(Error::AccessDenied);
     }

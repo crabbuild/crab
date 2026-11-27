@@ -103,7 +103,10 @@ async fn change(
                 return Err(Error::Conflict);
             }
             let comment = prepare_thread(&server, pull, &actor, &comparison, comment).await?;
-            pending::Edit::Save { comment, replace }
+            pending::Edit::Save {
+                comment: Box::new(comment),
+                replace,
+            }
         }
         Edit::Remove { id } => pending::Edit::Remove(id),
         Edit::Discard => pending::Edit::Discard,

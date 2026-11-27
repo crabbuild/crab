@@ -56,26 +56,6 @@ export function Invitations({
   };
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-lg font-semibold">
-          {pending ? "Pending invitations" : "Organization invitations"}
-        </h2>
-        <div className="flex gap-2">
-          <Button variant="outline" onClick={refresh}>
-            Refresh invitations
-          </Button>
-          <InviteDialog
-            endpoint={endpoint}
-            csrf={csrf}
-            onInvited={() => {
-              setNotice(
-                "Invitation created. It appears in the invitee’s notifications.",
-              );
-              refresh();
-            }}
-          />
-        </div>
-      </div>
       <p className="text-sm text-muted-foreground">
         People must accept before becoming members. Invitations expire after
         seven days.
@@ -199,7 +179,7 @@ export function InviteDialog({
     </Dialog>
   );
 }
-function InviteForm({
+export function InviteForm({
   endpoint,
   csrf,
   onInvited,
@@ -207,7 +187,7 @@ function InviteForm({
 }: {
   endpoint: string;
   csrf: string;
-  onInvited: () => void;
+  onInvited: (recipient: ActorSummary, role: OrganizationRole) => void;
   recipient?: ActorSummary;
 }) {
   const [search, setSearch] = useState(recipient?.handle ?? "");
@@ -248,7 +228,11 @@ function InviteForm({
               : { role }),
           })
           .then((value) => {
-            if (value) onInvited();
+            if (value)
+              onInvited(
+                selected,
+                restore && reinstatement ? reinstatement.role : role,
+              );
           });
       }}
     >

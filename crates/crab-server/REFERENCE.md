@@ -6112,8 +6112,19 @@ The `Organization` native class uses schema 3 under `cells/organization/` and
 shares the Cellar transaction, receipt and output gate. Explicit private
 `cells bootstrap-organization --organization UUID --input-file JSON` resolves the
 first owner's exact `{issuer, subject}` through Directory without profile
-enrollment. It returns `/-/organizations/UUID`. Public HTTP has no bootstrap route.
-Use fresh Organization Cell UUIDs for schema 3.
+enrollment. It returns `/-/organizations/UUID`. Use fresh Organization Cell
+UUIDs for schema 3.
+
+Signed-in accounts with a public profile can also create an organization from
+**New organization** at `/-/organizations/new`, or from the **+** menu.
+`POST /api/organizations` accepts `{id, name, description}` and returns the
+organization. The browser generates the fresh `id`, and the caller becomes the
+first owner. Retrying with the same `id` and details returns the same
+organization. Different details for that `id` conflict, and another account
+cannot use it.
+Signed-out sessions, repository Git tokens and automation identities cannot
+create organizations. After creation, the browser offers **Add organization
+members**, which sends ordinary invitations.
 
 `/api/organizations/{id}` reads/edits metadata; `/members` lists bounded current
 members, and `/members/{actor}` changes/removes active grants with expected
@@ -6142,6 +6153,13 @@ access changes before confirming. `POST /api/organizations/{id}/members/removal`
 accepts `{members: [{actor, version}]}` for 1–50 distinct current members and
 returns `{removed}`. Crab validates the whole selection and requires a surviving
 owner before committing any repository or membership changes.
+
+Any member can leave with **Leave** in **Your organizations** or **Leave
+organization…** in their own People row. Leaving is that removal naming only the
+requester, with the same grant, fork and invitation effects. A member who is not
+an owner can name only themselves, and can read only their own
+`/members/{actor}` record for its version. Conversion and removing anyone else
+remain owner-only, and the last owner cannot leave.
 
 For 90 days after a member is removed or converted to an outside collaborator,
 an owner can invite them from **People → Invite member** and choose **Restore

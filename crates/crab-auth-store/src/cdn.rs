@@ -75,10 +75,6 @@ pub fn build_direct_cdn_store<P: CredentialProvider + ?Sized + 'static>(
     )
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "bound native store and CDN composition share the captured read context"
-)]
 pub(crate) fn bind_read_store<P: Send + Sync + ?Sized + 'static>(
     bucket: &str,
     endpoint: Option<&str>,

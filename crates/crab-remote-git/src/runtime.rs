@@ -4,6 +4,7 @@ use read_flight::ReadFlights;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crab_xet::hash::MerkleHash;
@@ -293,6 +294,7 @@ pub struct RemoteGitRuntime {
     generated_pack_flight_admission: Arc<Semaphore>,
     object_cache: Mutex<BoundedLru<ObjectCacheKey, Arc<GitObject>>>,
     pack_windows: Mutex<BoundedLru<(PackIndexCacheKey, u64), bytes::Bytes>>,
+    pack_windows_enabled: AtomicBool,
     pack_index_cache: Mutex<BoundedLru<PackIndexCacheKey, Arc<PackIndex>>>,
     parsed_cache: Mutex<BoundedLru<ObjectCacheKey, ParsedObject>>,
     blame_cache: Mutex<BoundedLru<BlameCacheKey, BlameCacheValue>>,
@@ -413,6 +415,7 @@ impl RemoteGitRuntime {
                 options.max_object_cache_entries,
                 options.max_object_cache_bytes,
             )),
+            pack_windows_enabled: AtomicBool::new(true),
             pack_windows: Mutex::new(BoundedLru::new(
                 options.max_object_cache_entries.min(PACK_WINDOWS),
                 options
@@ -630,6 +633,17 @@ impl RemoteGitRuntime {
 
     pub(crate) async fn remove_object(&self, key: &ObjectCacheKey) {
         self.object_cache.lock().await.remove(key);
+    }
+
+    /// Integration tests count origin reads per object, which a shared pack
+    /// window would merge. No production caller turns windows off.
+    #[doc(hidden)]
+    pub fn disable_pack_windows(&self) {
+        self.pack_windows_enabled.store(false, Ordering::Relaxed);
+    }
+
+    pub(crate) fn pack_windows_enabled(&self) -> bool {
+        self.pack_windows_enabled.load(Ordering::Relaxed)
     }
 
     pub(crate) async fn cached_pack_window(

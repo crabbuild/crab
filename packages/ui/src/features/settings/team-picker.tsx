@@ -32,7 +32,7 @@ export function TeamPicker({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button disabled={disabled}>
+        <Button disabled={disabled} variant={filter ? "outline" : "default"}>
           {!filter && <PlusIcon data-icon="inline-start" />}
           {filter ? "Filter by team" : "Add team"}
         </Button>

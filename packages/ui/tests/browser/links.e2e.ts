@@ -1,6 +1,6 @@
 import { conversationPage } from "./conversation";
 import { expect, test, type Page } from "@playwright/test";
-import { emptyReactions, emptyReviewers } from "./fixtures";
+import { emptyReactions, emptyReviewers, fulfillIdleReads } from "./fixtures";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
@@ -31,6 +31,7 @@ async function setup(page: Page) {
     reactions: emptyReactions(),
   };
   await page.route("**/api/**", async (route) => {
+    if (await fulfillIdleReads(route)) return;
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (

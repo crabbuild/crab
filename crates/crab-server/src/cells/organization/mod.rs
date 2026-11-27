@@ -418,9 +418,13 @@ pub(in crate::cells) fn authorize(
         // Self-removal may already have ended the original owner's access.
         (CheckDeparture::ID, false) | (FinalizeDeparture::ID, true) => return Ok(()),
         (GetOrganization::ID | ListMembers::ID | FindMembers::ID, false) => false,
+        // A member reads their own record for the version that leaving names.
+        (GetMember::ID, false) => {
+            let key: MemberKey = serde_json::from_value(input.clone())?;
+            key.actor != key.member
+        }
         (
-            GetMember::ID
-            | ListActivity::ID
+            ListActivity::ID
             | ListInvitations::ID
             | FindInvitations::ID
             | rulesets::Get::ID

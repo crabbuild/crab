@@ -1,12 +1,15 @@
-import { useState } from "react";
-import { Building2Icon } from "lucide-react";
+import { useRef, useState } from "react";
+import { PlusIcon } from "@primer/octicons-react";
 import { timestamp } from "@/components/discussion/time";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { OrganizationAvatar } from "@/components/ui/user-avatar";
 import { useRequest } from "@/lib/api";
 import { organizationHref } from "@/lib/organization-route";
+import { cn } from "@/lib/utils";
+import { LeaveOrganizationDialog } from "./leave";
 import type {
   Invitation,
   Organization,
@@ -38,30 +41,46 @@ export const organizationInvitationsHref =
 
 export function OrganizationDirectory({
   invitations = false,
+  title = true,
+  csrf,
 }: {
   invitations?: boolean;
+  title?: boolean;
+  csrf?: string;
 }) {
   const [after, setAfter] = useState<string>();
   const state = useOrganizationDirectory(after);
-  const title = invitations ? "Organization invitations" : "Your organizations";
+  const leaveTrigger = useRef<HTMLButtonElement>(null);
+  const [leaving, setLeaving] =
+    useState<Extract<OrganizationEntry, { kind: "member" }>>();
+  const [left, setLeft] = useState<string>();
+  const label = invitations ? "Organization invitations" : "Your organizations";
   return (
     <section
-      className="mx-auto w-full max-w-4xl space-y-4"
-      aria-labelledby="organization-directory"
+      className={cn(
+        "grid w-full gap-4",
+        title && !invitations && "mx-auto max-w-4xl",
+      )}
+      aria-label={label}
     >
       {invitations ? (
-        <h2 id="organization-directory" className="text-lg font-semibold">
-          {title}
-        </h2>
+        <h2 className="text-lg font-semibold">{label}</h2>
       ) : (
-        <h1
-          id="organization-directory"
-          className="text-2xl font-semibold tracking-tight"
-        >
-          {title}
-        </h1>
+        title && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-4">
+            <h1 className="m-0 text-2xl font-semibold tracking-tight">
+              {label}
+            </h1>
+            <NewOrganizationButton />
+          </div>
+        )
       )}
-      <Result state={state} timingLabel={title}>
+      {left && (
+        <p role="status" className="m-0 text-sm text-muted-foreground">
+          You left {left}.
+        </p>
+      )}
+      <Result state={state} timingLabel={label}>
         {({ items, next }) => {
           const visible = invitations
             ? items.filter((item) => item.kind === "invitation")
@@ -69,19 +88,18 @@ export function OrganizationDirectory({
           return (
             <>
               {visible.length ? (
-                <ul className="divide-y rounded-lg border" aria-label={title}>
+                <ul className="divide-y rounded-lg border" aria-label={label}>
                   {visible.map((entry) => {
                     const { organization } = entry;
                     const pending = entry.kind === "invitation";
+                    const owner =
+                      entry.kind === "member" && entry.role === "owner";
                     return (
                       <li
                         key={organization.id}
-                        className="flex flex-wrap items-start gap-3 p-4"
+                        className="flex flex-wrap items-center gap-3 px-4 py-3"
                       >
-                        <Building2Icon
-                          aria-hidden="true"
-                          className="mt-0.5 size-5 shrink-0 text-muted-foreground"
-                        />
+                        <OrganizationAvatar id={organization.id} size={32} />
                         <div className="min-w-0 flex-1 basis-44">
                           <Link
                             href={organizationHref(
@@ -93,7 +111,7 @@ export function OrganizationDirectory({
                             {organization.name}
                           </Link>
                           {pending ? (
-                            <p className="mt-1 text-sm text-muted-foreground">
+                            <p className="m-0 text-sm text-muted-foreground">
                               Expires{" "}
                               {timestamp(entry.invitation.expires_at_ms)}
                             </p>
@@ -101,35 +119,65 @@ export function OrganizationDirectory({
                             organization.description && (
                               <p
                                 dir="auto"
-                                className="mt-1 line-clamp-2 text-sm wrap-anywhere text-muted-foreground"
+                                className="m-0 line-clamp-2 text-sm wrap-anywhere text-muted-foreground"
                               >
                                 {organization.description}
                               </p>
                             )
                           )}
                         </div>
-                        <Badge variant={pending ? "secondary" : "outline"}>
-                          {pending
-                            ? "Invitation pending"
-                            : entry.role === "owner"
-                              ? "Owner"
-                              : "Member"}
-                        </Badge>
+                        {pending ? (
+                          <Badge variant="secondary">Invitation pending</Badge>
+                        ) : (
+                          <span className="text-sm text-muted-foreground">
+                            {owner ? "Owner" : "Member"}
+                          </span>
+                        )}
+                        {owner && (
+                          <Button asChild variant="outline" size="sm">
+                            <Link
+                              href={organizationHref(
+                                organization,
+                                "?tab=settings",
+                              )}
+                              aria-label={`Settings for ${organization.name}`}
+                            >
+                              Settings
+                            </Link>
+                          </Button>
+                        )}
+                        {entry.kind === "member" && csrf !== undefined && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            aria-label={`Leave ${organization.name}`}
+                            onClick={(event) => {
+                              leaveTrigger.current = event.currentTarget;
+                              setLeft(undefined);
+                              setLeaving(entry);
+                            }}
+                          >
+                            Leave
+                          </Button>
+                        )}
                       </li>
                     );
                   })}
                 </ul>
               ) : (
-                <p
+                <div
                   role="status"
-                  className="rounded-lg border p-6 text-sm text-muted-foreground"
+                  className="grid justify-items-center gap-3 rounded-lg border p-8 text-center text-sm text-muted-foreground"
                 >
-                  {next || after
-                    ? "No matching organizations on this page."
-                    : invitations
-                      ? "You have no pending organization invitations."
-                      : "You don’t belong to any organizations yet. Pending invitations will appear here."}
-                </p>
+                  <p className="m-0">
+                    {next || after
+                      ? "No matching organizations on this page."
+                      : invitations
+                        ? "You have no pending organization invitations."
+                        : "You don’t belong to any organizations yet. Create one, or accept an invitation to join one."}
+                  </p>
+                  {!invitations && !next && !after && <NewOrganizationButton />}
+                </div>
               )}
               {(after || next) && (
                 <div className="flex flex-wrap gap-2">
@@ -152,6 +200,32 @@ export function OrganizationDirectory({
           );
         }}
       </Result>
+      {leaving && csrf !== undefined && (
+        <LeaveOrganizationDialog
+          open
+          organization={leaving.organization}
+          actor={leaving.actor}
+          csrf={csrf}
+          returnFocus={leaveTrigger}
+          onClose={() => setLeaving(undefined)}
+          onLeft={() => {
+            setLeft(leaving.organization.name);
+            setLeaving(undefined);
+            state.retry();
+          }}
+        />
+      )}
     </section>
+  );
+}
+
+export function NewOrganizationButton() {
+  return (
+    <Button asChild size="sm">
+      <Link href="/-/organizations/new">
+        <PlusIcon aria-hidden="true" />
+        New organization
+      </Link>
+    </Button>
   );
 }

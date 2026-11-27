@@ -1,6 +1,6 @@
 import { chooseSelectOption } from "./select";
 import { conversationPage } from "./conversation";
-import { emptyReactions } from "./fixtures";
+import { emptyReactions, fulfillIdleReads } from "./fixtures";
 import { expect, test, type Page } from "@playwright/test";
 import {
   expectNoAccessibilityViolations,
@@ -25,6 +25,7 @@ async function openDiscussion(page: Page) {
   const repositoryId = "00000000-0000-4000-8000-000000000099";
   let preference = { mode: "inherit", version: 0 };
   await page.route("**/api/**", async (route) => {
+    if (await fulfillIdleReads(route)) return;
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (path.endsWith("/issues/pins") && request.method() === "GET")

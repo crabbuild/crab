@@ -165,10 +165,11 @@ fn attach(context: &mut Transaction<'_>, pull: &PullRecord, issue: u64) -> Resul
     if !previous.active && previous.version != 0 {
         return Ok(false);
     }
-    let closes_on_merge = previous
-        .active
-        .then_some(previous.closes_on_merge)
-        .unwrap_or(pull.state == PullState::Open);
+    let closes_on_merge = if previous.active {
+        previous.closes_on_merge
+    } else {
+        pull.state == PullState::Open
+    };
     let result = SetLink::execute(
         context,
         Selection {

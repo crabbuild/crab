@@ -2899,6 +2899,7 @@ async fn content_metadata_distinguishes_git_and_logical_representations() {
 #[tokio::test(flavor = "multi_thread")]
 async fn directory_reads_are_immediate_and_metadata_is_page_bounded() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    fixture.runtime.disable_pack_windows();
     let cancellation = CancellationToken::new();
     let operation = fixture
         .repository
@@ -3280,6 +3281,7 @@ async fn object_cache_eviction_reconstructs_the_same_verified_bytes() {
         runtime_options,
     )
     .await;
+    fixture.runtime.disable_pack_windows();
     let cancellation = CancellationToken::new();
     let operation = fixture
         .repository
@@ -3326,6 +3328,7 @@ async fn object_cache_eviction_reconstructs_the_same_verified_bytes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn distinct_delta_objects_share_one_cold_base_fetch() {
     let fixture = publish(DeltaKind::RefShared, false, RepositoryOptions::default()).await;
+    fixture.runtime.disable_pack_windows();
     let [(first_path, first_expected), (second_path, second_expected)] =
         fixture.shared_paths.clone().expect("shared-base paths");
     let setup_cancellation = CancellationToken::new();
@@ -3390,6 +3393,7 @@ async fn distinct_delta_objects_share_one_cold_base_fetch() {
 #[tokio::test(flavor = "multi_thread")]
 async fn batched_delta_read_reuses_a_base_verified_by_an_earlier_operation() {
     let fixture = publish(DeltaKind::RefShared, false, RepositoryOptions::default()).await;
+    fixture.runtime.disable_pack_windows();
     let [(first_path, _), (second_path, expected)] = fixture.shared_paths.clone().unwrap();
     let cancellation = CancellationToken::new();
     let setup = fixture
@@ -3907,6 +3911,7 @@ async fn aggregate_inflated_budget_rejects_before_decode_and_cache_insert() {
     };
     let options = RepositoryOptions::new(ObjectLimits::default(), operation).expect("options");
     let fixture = publish(DeltaKind::Ref, false, options).await;
+    fixture.runtime.disable_pack_windows();
     let first = read_target(&fixture)
         .await
         .expect_err("aggregate inflated bytes must fail");

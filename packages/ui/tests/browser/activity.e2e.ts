@@ -1,7 +1,7 @@
 import type { ActivityEvent } from "@/components/discussion/conversation/model";
 import { expect, test, type Page } from "@playwright/test";
 import { conversationPage } from "./conversation";
-import { emptyReactions } from "./fixtures";
+import { emptyReactions, fulfillIdleReads } from "./fixtures";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
@@ -10,6 +10,7 @@ import {
 async function repository(page: Page) {
   const unexpected: string[] = [];
   await page.route("**/api/**", async (route) => {
+    if (await fulfillIdleReads(route)) return;
     const path = new URL(route.request().url()).pathname;
     if (
       route.request().method() === "GET" &&

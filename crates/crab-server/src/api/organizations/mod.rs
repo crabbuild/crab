@@ -18,8 +18,8 @@ use crate::{
         Address, CellClient,
         directory::ActorSummary,
         organization::{
-            self, Caller, ChangeMember, ChangeOutcome, Collection, Edit, EditInput, FindMembers,
-            GetOrganization, MemberChange, Role,
+            self, Bootstrap, BootstrapInput, Caller, ChangeMember, ChangeOutcome, Collection, Edit,
+            EditInput, FindMembers, GetOrganization, MemberChange, Role,
         },
     },
     repository::settings::{RulesetScope, with_ruleset_lease},
@@ -88,7 +88,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .merge(repository_access::routes())
         .merge(repository_policy::routes())
         .merge(teams::routes())
-        .route("/api/organizations", get(discovery::list))
+        .route("/api/organizations", get(discovery::list).post(create))
         .route("/api/organizations/{id}", get(own).patch(edit))
         .route("/api/organizations/{id}/members", get(members))
         .route(
@@ -139,6 +139,52 @@ async fn own(
         can_create,
         actor,
     }))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateRequest {
+    id: Uuid,
+    name: String,
+    #[serde(default)]
+    description: String,
+}
+// A signed-in account founds an organization and becomes its first owner. The
+// browser supplies the fresh UUID, so a retry replays the same bootstrap rather
+// than founding a second organization; a different intent for it conflicts.
+async fn create(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Json(input): Json<CreateRequest>,
+) -> Result<Json<organization::Organization>> {
+    let address = target(input.id)?;
+    organization::details(&input.name, &input.description)
+        .map_err(|_| Error::Invalid("Organization name or description is invalid"))?;
+    let identity = app::account(&principal)?;
+    let actor = crate::repository::access::actor_id(&server, identity)
+        .await?
+        .ok_or(Error::Invalid(
+            "Create your public profile before creating an organization",
+        ))?;
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    // Discovery must know the candidate before ownership commits, or an
+    // interrupted creation could leave an owner unable to find the organization.
+    discovery::record_candidate(&cells, input.id, actor).await?;
+    cells.initialize(address).await.map_err(Error::Cell)?;
+    app::account(&principal)?;
+    let outcome = app::command_output(
+        cells
+            .command::<Bootstrap>(
+                address,
+                app::mutation_identity()?,
+                BootstrapInput {
+                    actor,
+                    name: input.name,
+                    description: input.description,
+                },
+            )
+            .await,
+    )?;
+    Ok(Json(applied(outcome)?))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

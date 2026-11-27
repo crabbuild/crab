@@ -1,7 +1,7 @@
 import { conversationPage } from "./conversation";
 import { expect, test, type Page } from "@playwright/test";
 import type { RepositoryAssignee } from "@/lib/contracts";
-import { emptyReactions } from "./fixtures";
+import { emptyReactions, fulfillIdleReads } from "./fixtures";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
@@ -29,6 +29,7 @@ async function fixture(page: Page) {
     writes: [] as Array<{ version: number; assignee_ids: string[] }>,
   };
   await page.route("**/api/**", async (route) => {
+    if (await fulfillIdleReads(route)) return;
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (

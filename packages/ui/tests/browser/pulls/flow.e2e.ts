@@ -4,6 +4,7 @@ import { mockPullRequest } from "./fixture";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
+  selectTheme,
 } from "../accessibility";
 
 test("pull creation and review navigation preserve GitHub-style controls", async ({
@@ -539,7 +540,9 @@ test("viewed files survive reload and clear when the file changes", async ({
   const viewed = page.getByRole("checkbox", { name: "Viewed README.md" });
   await expect(viewed).toBeVisible();
   await expect(viewed).not.toBeChecked();
-  await viewed.check();
+  // The box follows the saved state, so wait for the write rather than check().
+  await viewed.click();
+  await expect(viewed).toBeChecked();
   await expect(page.getByText("1 of 1 files viewed")).toBeVisible();
   const filter = page.getByRole("searchbox", { name: "Filter changed files" });
   const hideViewed = page.getByRole("checkbox", { name: "Hide viewed" });
@@ -908,7 +911,7 @@ test("review conversations and ambiguous merge recovery preserve the pull workfl
   await expect(
     page.getByRole("button", { name: "Apply suggestion" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Light", exact: true }).click();
+  await selectTheme(page, "light");
   await expectNoAccessibilityViolations(page);
   await selectDarkTheme(page);
   await react(page.locator(".review-thread-card"));
