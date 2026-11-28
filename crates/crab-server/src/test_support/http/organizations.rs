@@ -97,3 +97,62 @@ pub(crate) async fn bootstrap_on(
         .unwrap();
     (id, actors[0], actors[1])
 }
+
+pub(crate) async fn bootstrap_local(h: &Harness, handle: &str) -> (Uuid, Uuid) {
+    let cells = h.server.cells().unwrap();
+    let local = crate::auth::Principal::local().identity().unwrap();
+    let actors = cells
+        .command::<RegisterAccounts>(
+            Address::Directory,
+            app::mutation_identity().unwrap(),
+            vec![IdentityKey {
+                issuer: local.issuer,
+                subject: local.subject,
+            }],
+        )
+        .await
+        .unwrap()
+        .output;
+    let id = Uuid::now_v7();
+    cells
+        .command::<RecordCandidate>(
+            Address::Directory,
+            app::mutation_identity().unwrap(),
+            Candidate {
+                actor: actors[0],
+                organization: id,
+            },
+        )
+        .await
+        .unwrap();
+    cells.initialize(Address::Organization(id)).await.unwrap();
+    cells
+        .command::<crate::cells::directory::organizations::ClaimOrganizationHandle>(
+            Address::Directory,
+            app::mutation_identity().unwrap(),
+            crate::cells::directory::organizations::HandleClaimInput {
+                organization: id,
+                handle: handle.to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    cells
+        .command::<Bootstrap>(
+            Address::Organization(id),
+            app::mutation_identity().unwrap(),
+            BootstrapInput {
+                actor: actors[0],
+                handle: handle.to_owned(),
+                name: "Local organization".into(),
+                description: String::new(),
+                website: String::new(),
+                email: String::new(),
+                location: String::new(),
+                avatar: None,
+            },
+        )
+        .await
+        .unwrap();
+    (id, actors[0])
+}

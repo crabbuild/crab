@@ -223,7 +223,12 @@ export function App() {
   const projectWorkspace = organizationRoute?.[2]?.startsWith("/projects")
     ? organizationRoute[1]
     : undefined;
-  const session = useRequest<Session>("/api/session");
+  // Revalidate in place so a 401 from an individual endpoint while the
+  // session stays active shows the request error instead of remounting in a loop.
+  const [sessionCheck, setSessionCheck] = useState(0);
+  const session = useRequest<Session>("/api/session", undefined, undefined, {
+    revision: sessionCheck,
+  });
   const authenticated = session.data?.authenticated;
   // The organization page and the global header share one read of the
   // organization, so the header can name it like GitHub's breadcrumb.
@@ -264,10 +269,10 @@ export function App() {
       ? avatarState.avatar
       : (session.data?.avatar ?? null);
   useEffect(() => {
-    const expired = () => session.retry();
+    const expired = () => setSessionCheck((value) => value + 1);
     window.addEventListener("crab-session-expired", expired);
     return () => window.removeEventListener("crab-session-expired", expired);
-  });
+  }, []);
   const catalog = useRequest<{ repositories: Repository[] }>(
     session.data?.authenticated && (inbox || subscriptions)
       ? "/api/repos"

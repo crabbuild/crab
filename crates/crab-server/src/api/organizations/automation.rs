@@ -56,7 +56,7 @@ async fn list(
     Path(id): Path<Uuid>,
 ) -> Result<Json<AutomationSnapshot>> {
     // Automation credentials are managed only from an interactive session.
-    if !principal.has_browser_session() {
+    if !(principal.has_browser_session() || principal.is_local()) {
         return Err(Error::SessionRequired);
     }
     let actor = actor(&server, &principal).await?;
@@ -165,7 +165,7 @@ async fn change(
     Json(input): Json<Input>,
 ) -> Result<Json<ChangeResult>> {
     // Automation credentials are managed only from an interactive session.
-    if !principal.has_browser_session() {
+    if !(principal.has_browser_session() || principal.is_local()) {
         return Err(Error::SessionRequired);
     }
     let actor = actor(&server, &principal).await?;

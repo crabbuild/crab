@@ -144,5 +144,84 @@ async fn deletion_policy_and_restore_preserve_repository_identity() {
             .status(),
         StatusCode::CONFLICT
     );
+    let git_token: Value = h
+        .write(
+            Method::POST,
+            "/api/git-token",
+            &alice,
+            json!({"owner":owner,"repository":"library","access":"write"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        h.http
+            .get(format!("{}{deleted}", h.origin))
+            .basic_auth("crab", git_token["token"].as_str())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn local_operator_lists_deletes_and_restores_organization_repositories() {
+    let h = Harness::local().await;
+    let session = h.json("/api/session", "").await;
+    assert_eq!(session["authenticated"], true);
+    assert_eq!(session["mode"], "local");
+
+    let (organization, _) = organizations::bootstrap_local(&h, "aaaa").await;
+    let by_handle = h.json("/api/organizations/by-handle/aaaa", "").await;
+    assert_eq!(by_handle["organization"]["id"], json!(organization));
+
+    let root = format!("/api/organizations/{organization}");
+    let deleted = format!("{root}/deleted-repositories");
+    assert_eq!(h.json(&deleted, "").await["items"], json!([]));
+
+    let created: Value = h
+        .write(
+            Method::POST,
+            &format!("{root}/repositories/creation"),
+            "",
+            json!({"request_id": Uuid::now_v7(), "name": "library", "description": ""}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap();
+    let owner = created["owner"].as_str().unwrap();
+    let deletion = format!("/api/repositories/{id}/deletion");
+    let restore = format!("{deleted}/{id}");
+    assert_eq!(h.json(&deletion, "").await["can_delete"], true);
+
+    let request = Uuid::now_v7();
+    h.write(
+        Method::DELETE,
+        &deletion,
+        "",
+        json!({"request_id": request, "version": 0, "confirmation": format!("{owner}/library")}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let rows = h.json(&deleted, "").await;
+    assert_eq!(rows["items"][0]["id"], id);
+    assert_eq!(rows["items"][0]["can_restore"], true);
+
+    h.write(Method::PUT, &restore, "", json!({"deletion_id": request}))
+        .await
+        .error_for_status()
+        .unwrap();
+    assert_eq!(h.json(&deleted, "").await["items"], json!([]));
     h.close().await;
 }

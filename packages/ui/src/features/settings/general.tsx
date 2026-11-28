@@ -97,7 +97,7 @@ export function GeneralSettings({
                 csrf={csrf}
                 onChanged={onRepositoryChanged}
               />
-              {repo.organization_id && csrf && (
+              {repo.organization_id && (
                 <DeleteRepositorySettings
                   repo={repo}
                   csrf={csrf}

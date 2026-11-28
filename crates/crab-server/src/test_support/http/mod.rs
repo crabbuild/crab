@@ -233,9 +233,13 @@ impl Harness {
         let mut request = self
             .http
             .request(method, format!("{}{path}", self.origin))
-            .header(header::COOKIE, cookie)
-            .header(header::ORIGIN, &self.origin)
-            .header("x-csrf-token", session["csrf"].as_str().unwrap());
+            .header(header::ORIGIN, &self.origin);
+        if !cookie.is_empty() {
+            request = request.header(header::COOKIE, cookie);
+        }
+        if let Some(csrf) = session["csrf"].as_str() {
+            request = request.header("x-csrf-token", csrf);
+        }
         if let Some(repository) = self
             .server
             .repositories
@@ -244,6 +248,13 @@ impl Harness {
             request = request.header("x-crab-repository-id", repository.id.to_string());
         }
         request.json(&body).send().await.unwrap()
+    }
+
+    pub(crate) async fn local() -> Self {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let harness = Self::configured(false, false, store, "", None, None, None, None).await;
+        harness.initialize_directory().await;
+        harness
     }
 
     pub(crate) async fn new(confidential: bool) -> Self {
@@ -280,7 +291,7 @@ impl Harness {
             github,
             store,
             catalog_prefix,
-            TestAuthFiles::default(),
+            Some(TestAuthFiles::default()),
             None,
             None,
             None,
@@ -304,10 +315,10 @@ impl Harness {
             false,
             store,
             catalog_prefix,
-            TestAuthFiles {
+            Some(TestAuthFiles {
                 state_key: Some(file.path().to_owned()),
                 ..Default::default()
-            },
+            }),
             github_actions,
             None,
             None,
@@ -324,7 +335,7 @@ impl Harness {
             github,
             store,
             "",
-            TestAuthFiles::default(),
+            Some(TestAuthFiles::default()),
             None,
             Some(endpoint),
             None,
@@ -351,10 +362,10 @@ impl Harness {
             false,
             store,
             catalog_prefix,
-            TestAuthFiles {
+            Some(TestAuthFiles {
                 state_key: Some(file.path().to_owned()),
                 ..Default::default()
-            },
+            }),
             None,
             None,
             Some((endpoints.into_iter().collect(), repository)),
@@ -373,10 +384,10 @@ impl Harness {
             false,
             store,
             "",
-            TestAuthFiles {
+            Some(TestAuthFiles {
                 scim_token: Some(file.path().to_owned()),
                 ..Default::default()
-            },
+            }),
             None,
             None,
             None,
@@ -391,7 +402,7 @@ impl Harness {
         github: bool,
         store: Store,
         catalog_prefix: &str,
-        auth_files: TestAuthFiles,
+        auth_files: Option<TestAuthFiles>,
         github_actions: Option<TestGitHubActions>,
         email_endpoint: Option<Url>,
         webhook_endpoints: Option<(Vec<Url>, Option<Uuid>)>,
@@ -407,34 +418,38 @@ impl Harness {
         let address = listener.local_addr().unwrap();
         let origin = format!("http://{address}");
         let root = crate::storage_root::StorageRoot::memory(store.clone(), catalog_prefix);
-        let auth_config = if github {
-            crate::OidcConfig {
-                provider: crate::AuthProvider::GitHub,
-                issuer: openidconnect::IssuerUrl::new(provider.issuer.clone()).unwrap(),
-                public_url: Url::parse(&origin).unwrap(),
-                client_id: "crab-browser".into(),
-                client_secret_file: secret_file.as_ref().map(|file| file.path().to_owned()),
-                state_key_file: auth_files.state_key,
-                scim_token_file: None,
-                github: Some(crate::GitHubConfig {
-                    authorize_url: format!("{}/github/authorize", provider.issuer),
-                    token_url: format!("{}/github/token", provider.issuer),
-                    api_url: format!("{}/github/", provider.issuer),
-                }),
-            }
+        let auth = if let Some(auth_files) = auth_files {
+            let auth_config = if github {
+                crate::OidcConfig {
+                    provider: crate::AuthProvider::GitHub,
+                    issuer: openidconnect::IssuerUrl::new(provider.issuer.clone()).unwrap(),
+                    public_url: Url::parse(&origin).unwrap(),
+                    client_id: "crab-browser".into(),
+                    client_secret_file: secret_file.as_ref().map(|file| file.path().to_owned()),
+                    state_key_file: auth_files.state_key,
+                    scim_token_file: None,
+                    github: Some(crate::GitHubConfig {
+                        authorize_url: format!("{}/github/authorize", provider.issuer),
+                        token_url: format!("{}/github/token", provider.issuer),
+                        api_url: format!("{}/github/", provider.issuer),
+                    }),
+                }
+            } else {
+                crate::OidcConfig {
+                    provider: crate::AuthProvider::Oidc,
+                    issuer: openidconnect::IssuerUrl::new(provider.issuer.clone()).unwrap(),
+                    public_url: Url::parse(&origin).unwrap(),
+                    client_id: "crab-browser".into(),
+                    client_secret_file: secret_file.as_ref().map(|file| file.path().to_owned()),
+                    state_key_file: auth_files.state_key,
+                    scim_token_file: auth_files.scim_token,
+                    github: None,
+                }
+            };
+            Some(Authentication::new(auth_config, &root).await.unwrap())
         } else {
-            crate::OidcConfig {
-                provider: crate::AuthProvider::Oidc,
-                issuer: openidconnect::IssuerUrl::new(provider.issuer.clone()).unwrap(),
-                public_url: Url::parse(&origin).unwrap(),
-                client_id: "crab-browser".into(),
-                client_secret_file: secret_file.as_ref().map(|file| file.path().to_owned()),
-                state_key_file: auth_files.state_key,
-                scim_token_file: auth_files.scim_token,
-                github: None,
-            }
+            None
         };
-        let auth = Authentication::new(auth_config, &root).await.unwrap();
         let protected_branches = vec![crate::BranchProtection {
             branch: "main".into(),
             required_approvals: 1,
@@ -524,7 +539,7 @@ impl Harness {
             server.cells = Some(cells.client.clone());
             server.cell_test_runtime = Some(cells);
             server.cursor_key = [7; 32];
-            server.auth = Some(auth);
+            server.auth = auth;
             server.github_actions = github_actions.map(|configure| configure(record.id));
             server.webhook_sender = webhook_endpoints.map(|(urls, repository)| {
                 let destinations: Vec<_> = urls
@@ -683,13 +698,11 @@ impl Harness {
     }
 
     pub(crate) async fn json(&self, path: &str, cookie: &str) -> Value {
-        let response = self
-            .http
-            .get(format!("{}{path}", self.origin))
-            .header(header::COOKIE, cookie)
-            .send()
-            .await
-            .unwrap();
+        let mut request = self.http.get(format!("{}{path}", self.origin));
+        if !cookie.is_empty() {
+            request = request.header(header::COOKIE, cookie);
+        }
+        let response = request.send().await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         serde_json::from_slice(&response.bytes().await.unwrap()).unwrap()

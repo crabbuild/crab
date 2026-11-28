@@ -71,7 +71,7 @@ pub(super) async fn list(
 }
 
 pub(in crate::api) async fn has_pending(server: &Server, principal: &Principal) -> Result<bool> {
-    if !principal.is_user() {
+    if !(principal.is_user() || principal.is_local()) {
         return Ok(false);
     }
     let Some(catalog) = server.catalog() else {
