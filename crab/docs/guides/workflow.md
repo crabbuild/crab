@@ -1443,7 +1443,7 @@ env:
   - CUDA_VISIBLE_DEVICES
   - PYTHONPATH
 
-# Option 2: empty (strictest; only PATH, HOME, TMPDIR injected)
+# Option 2: empty (PATH, HOME, TMPDIR, plus SystemRoot on Windows)
 env: empty
 
 # Option 3: inherit (full process env; EXCLUDED from hash)
@@ -1748,6 +1748,11 @@ includes:
 - the referenced stage hash list at `workflow/exp/<id>/stage-refs.json`;
 - the captured apply snapshot, including files, empty directories, symlinks,
   modes, and paths deleted by the experiment.
+
+Pull restores every published apply snapshot, including saved and failed
+experiments, independently of execution status.
+Saved and successful experiments require that snapshot on push and pull; a
+partial replica retries the primary instead of returning metadata alone.
 
 By default, `exp push` skips an experiment id that already exists remotely and
 `exp pull` skips an experiment id that already exists locally. Pass `--force`

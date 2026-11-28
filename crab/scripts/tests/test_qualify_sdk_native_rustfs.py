@@ -142,6 +142,15 @@ class NativeRustfsTests(unittest.TestCase):
         self.assertNotIn("fixture-access", str(failure.exception))
         self.assertNotIn("fixture-secret", str(failure.exception))
 
+    def test_fixture_leaves_cache_creation_to_the_native_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = RUNNER.fixture_environment(
+                root, root, "http://127.0.0.1:12345", "owned-fixture",
+                root / "git", root / "crab", root,
+            )
+            self.assertFalse(Path(environment["CRAB_CACHE_DIR"]).exists())
+
     def test_parent_provider_selectors_cannot_retarget_fixture(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
             "AWS_PROFILE": "production", "AWS_SESSION_TOKEN": "old-session",

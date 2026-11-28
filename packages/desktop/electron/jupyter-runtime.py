@@ -35,12 +35,18 @@ class LocalKernel:
         self.client = None
 
     async def launch(self, restart=False):
-        if restart:
-            self.client.stop_channels()
-            await self.manager.restart_kernel(now=False)
-            return
-        # Keep native kernel writes out of the worker's stdout protocol.
-        await self.manager.start_kernel(cwd=self.cwd, stdin=subprocess.DEVNULL, stdout=sys.stderr, stderr=sys.stderr)
+        try:
+            if restart:
+                self.client.stop_channels()
+                await self.manager.restart_kernel(now=False)
+                return
+            # Keep native kernel writes out of the worker's stdout protocol.
+            await self.manager.start_kernel(cwd=self.cwd, stdin=subprocess.DEVNULL, stdout=sys.stderr, stderr=sys.stderr)
+        except OSError as error:
+            # Windows process errors omit the filename. Keep launch context at
+            # the kernel owner so both startup and restart remain actionable.
+            executable = self.manager.format_kernel_cmd()[0]
+            raise RuntimeError(f'Could not launch kernel {self.manager.kernel_name!r} using "{executable}" in "{self.cwd}": {error}') from error
 
     async def ready(self):
         self.client = self.manager.client()

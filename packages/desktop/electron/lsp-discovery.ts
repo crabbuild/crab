@@ -1,5 +1,5 @@
 import { app } from "electron";
-import { execSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -143,24 +143,32 @@ function resolveCommand(command: string, searchDirs: string[]): string | null {
 /**
  * Try to get the version string from a server binary.
  */
-function getVersion(binaryPath: string, versionFlag?: string): string | undefined {
-  if (!versionFlag) return undefined;
-  try {
-    const output = execSync(`"${binaryPath}" ${versionFlag}`, {
-      encoding: "utf8",
-      timeout: 5000,
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-    const firstLine = output.split("\n")[0].trim();
-    return firstLine || undefined;
-  } catch {
-    return undefined;
-  }
+function getVersion(binaryPath: string, versionFlag: string | undefined, signal: AbortSignal): Promise<string | undefined> {
+  if (!versionFlag) return Promise.resolve(undefined);
+  return new Promise((resolve, reject) => {
+    let version: string | undefined;
+    const child = execFile(binaryPath, [versionFlag], { encoding: "utf8", timeout: 5000, windowsHide: true, signal }, (error, stdout) => {
+      if (!error) version = stdout.trim().split("\n")[0].trim() || undefined;
+    });
+    child.stdin?.end();
+    // The abort callback can precede process exit. Own the pipes and child
+    // until close so application shutdown cannot leave a version probe behind.
+    child.once("close", () => signal.aborted ? reject(signal.reason) : resolve(version));
+  });
 }
 
 // ── Cache ───────────────────────────────────────────────────────────
 
-let cachedResults: DiscoveredServer[] | null = null;
+interface Discovery {
+  controller: AbortController;
+  result: Promise<DiscoveredServer[]>;
+}
+
+let cached: Discovery | null = null;
+let stopping = false;
+// Refresh can replace the cache while older callers still await their scan.
+// Shutdown must retain ownership of those probes too.
+const active = new Set<Discovery>();
 
 /**
  * Discover available language servers.
@@ -172,14 +180,24 @@ let cachedResults: DiscoveredServer[] | null = null;
  *
  * Results are cached in memory; call `refresh()` to re-scan.
  */
-export function discoverServers(): DiscoveredServer[] {
-  if (cachedResults !== null) return cachedResults;
+export function discoverServers(): Promise<DiscoveredServer[]> {
+  if (stopping) return Promise.reject(new Error("Language server discovery is stopping"));
+  if (cached) return cached.result;
+  const controller = new AbortController();
+  const discovery = { controller, result: scanServers(controller.signal) };
+  cached = discovery;
+  active.add(discovery);
+  void discovery.result.then(() => active.delete(discovery), () => active.delete(discovery));
+  return discovery.result;
+}
 
+async function scanServers(signal: AbortSignal): Promise<DiscoveredServer[]> {
   const searchDirs = buildSearchPath();
   const results: DiscoveredServer[] = [];
   const seenLanguages = new Set<string>();
 
   for (const server of KNOWN_SERVERS) {
+    signal.throwIfAborted();
     if (seenLanguages.has(server.language)) continue;
 
     // 1. Bundled (typescript only for now)
@@ -205,7 +223,7 @@ export function discoverServers(): DiscoveredServer[] {
         language: server.language,
         command: server.commands[0],
         path: installedPath,
-        version: getVersion(installedPath, server.versionFlag),
+        version: await getVersion(installedPath, server.versionFlag, signal),
         source: "installed",
       });
       seenLanguages.add(server.language);
@@ -220,7 +238,7 @@ export function discoverServers(): DiscoveredServer[] {
           language: server.language,
           command,
           path: resolved,
-          version: getVersion(resolved, server.versionFlag),
+          version: await getVersion(resolved, server.versionFlag, signal),
           source: "system",
         });
         seenLanguages.add(server.language);
@@ -229,8 +247,17 @@ export function discoverServers(): DiscoveredServer[] {
     }
   }
 
-  cachedResults = results;
+  signal.throwIfAborted();
   return results;
+}
+
+/** Cancel and join discovery children before the application exits. */
+export async function stopDiscovery(): Promise<void> {
+  stopping = true;
+  const scans = [...active];
+  for (const scan of scans) scan.controller.abort(new Error("Language server discovery stopped"));
+  await Promise.allSettled(scans.map(scan => scan.result));
+  cached = null;
 }
 
 /**
@@ -259,8 +286,8 @@ function findInstalledBinary(language: string): string | null {
 /**
  * Clear the discovery cache and re-scan.
  */
-export function refresh(): DiscoveredServer[] {
-  cachedResults = null;
+export function refresh(): Promise<DiscoveredServer[]> {
+  cached = null;
   return discoverServers();
 }
 

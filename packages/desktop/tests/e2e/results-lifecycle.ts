@@ -130,7 +130,7 @@ export async function checkResultsLifecycle({
   output: string;
   checkReport: (page: Page, id: string) => Promise<void>;
 }) {
-  const main = app.process().pid;
+  const main = await app.evaluate(() => process.pid);
   if (!main)
     throw new Error("The packaged application has no process identity");
   const agent = await nativeProcess(main);

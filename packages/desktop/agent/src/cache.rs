@@ -182,14 +182,12 @@ mod tests {
         assert_eq!(std::fs::read(retained).unwrap(), b"keep");
     }
 
-    #[cfg(unix)]
     #[test]
     fn partial_inspection_keeps_issues_but_failed_cleanup_is_never_success() {
-        use std::os::unix::process::ExitStatusExt;
         let data = json!({ "issues": [{ "error": "busy" }], "omitted_issues": 0 });
         for operation in [Operation::Stats, Operation::Clean { dry_run: false }] {
             let output = Output {
-                status: std::process::ExitStatus::from_raw(1 << 8),
+                status: shellout::test_exit_status(1),
                 stdout: serde_json::to_vec(
                     &json!({ "schema": operation.schema(), "version": "1.0", "data": data }),
                 )

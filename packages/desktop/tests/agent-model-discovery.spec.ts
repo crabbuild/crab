@@ -65,7 +65,7 @@ describe("installed provider model discovery", () => {
       models: [
         { value: "provider-alias", label: "Provider Alias", description: "Configured model", intelligenceLevels: ["high", "max"] },
         { value: "no-effort-model", label: "No effort", description: "Provider default effort", intelligenceLevels: [] },
-      ], requests: [{ subtype: "initialize", supportedDialogKinds: [] }], binary: "/configured/claude",
+      ], requests: [{ subtype: "initialize", supportedDialogKinds: [], forwardSubagentText: true }], binary: "/configured/claude",
     });
   });
 

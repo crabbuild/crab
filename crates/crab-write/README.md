@@ -30,9 +30,10 @@ separate immutable snapshot clone explicitly; that snapshot stays unchanged.
 The capsule prefix identity, admission indexes and canonical run bytes remain
 verified before immutable upload and conditional publication.
 
-`PreparedCapsulePublication::ref_frontier_bytes` reports the exact physical run
-bytes in a prepared ref successor, after native compaction. Product callers can
-enforce their read budget before publication without estimating append sizes.
+`PreparedCapsulePublication::ref_frontier_run_count` and `ref_frontier_bytes`
+report the exact physical run count and bytes in a prepared ref successor, after
+native compaction. Product callers can enforce segment and read budgets before
+publication without estimating append sizes or counting rolled-up transactions.
 
 A single-ref push commits by conditionally replacing only that ref head.
 

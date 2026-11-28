@@ -154,6 +154,10 @@ covered prefix; their complete source admission stays unchanged. Foreground
 checkpointing checks this logical count before opening bulk metadata and reuses
 the same captured authority when the threshold is met.
 
+Physical admission uses `CapsuleRepositoryView::ref_frontier_run_count` and
+`ref_frontier_bytes` separately from logical maintenance counts. Both describe
+the exact retained runs of one captured ref, including any covered run prefix.
+
 Full-capsule and control-only views share borrowed visibility readiness/application
 checks. Canonical transaction decoding guarantees unique ref names; matched-row
 counts reject extra evidence without copying the per-object edit lists.

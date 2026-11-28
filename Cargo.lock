@@ -2452,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "crab"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -2627,7 +2627,7 @@ dependencies = [
 
 [[package]]
 name = "crab-auth-server"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 dependencies = [
  "blake3",
  "bytes",
@@ -2720,7 +2720,7 @@ dependencies = [
 
 [[package]]
 name = "crab-cache-server"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2810,7 +2810,7 @@ dependencies = [
 
 [[package]]
 name = "crab-desktop-agent"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 dependencies = [
  "arrow 55.2.0",
  "async-trait",

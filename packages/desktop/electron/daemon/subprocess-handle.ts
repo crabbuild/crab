@@ -6,9 +6,9 @@
  * - Explicit dispose() releases the master fd (node-pty leaks it until GC)
  * - After dispose(), kill() is neutralized to prevent SIGHUP-to-recycled-PID
  *
- * The `forceKill()` method uses `process.kill(pid, 'SIGKILL')` directly,
- * bypassing the neutralization — callers must ensure forceKill is called
- * BEFORE dispose() when both are needed (kill timeout path).
+ * On POSIX, forceKill bypasses neutralization with SIGKILL and must precede
+ * disposal. Windows termination belongs to ConPTY, which enumerates console
+ * members before killing them; terminating the shell first can orphan children.
  */
 
 import type { IPty } from "node-pty";
@@ -38,14 +38,16 @@ export type SubprocessSpawner = (opts: SubprocessSpawnOptions) => SubprocessHand
  * Production SubprocessHandle wrapping a node-pty IPty instance.
  *
  * After dispose(), the kill() method becomes a no-op to prevent sending
- * signals to a recycled PID. forceKill() is NOT neutralized by dispose —
- * callers must call forceKill BEFORE dispose when both are needed.
+ * signals to a recycled PID. POSIX forceKill is not neutralized by dispose;
+ * callers must call it first. Windows requests console termination only once.
  */
 export class NodePtySubprocessHandle implements SubprocessHandle {
   readonly pid: number;
   readonly fd: number;
   private pty: IPty;
   private disposed = false;
+  private conptyClosing = false;
+  private readonly closed: Promise<void>;
   private dataCallbacks: Array<(data: string) => void> = [];
   private exitCallbacks: Array<(exitCode: number) => void> = [];
 
@@ -62,11 +64,15 @@ export class NodePtySubprocessHandle implements SubprocessHandle {
       }
     });
 
-    this.pty.onExit(({ exitCode }) => {
-      this.cleanup();
-      for (const cb of this.exitCallbacks) {
-        cb(exitCode);
-      }
+    this.closed = new Promise(resolve => {
+      this.pty.onExit(({ exitCode }) => {
+        // Natural exit already closed the console. Enumerating it again can
+        // fail AttachConsole and leave node-pty's helper waiting five seconds.
+        this.conptyClosing = true;
+        this.cleanup();
+        resolve();
+        for (const cb of this.exitCallbacks) cb(exitCode);
+      });
     });
   }
 
@@ -83,12 +89,15 @@ export class NodePtySubprocessHandle implements SubprocessHandle {
   kill(signal?: string): void {
     // Neutralized after dispose to prevent SIGHUP-to-recycled-PID
     if (this.disposed) return;
-    // ConPTY owns termination on Windows; node-pty rejects signal arguments
-    // before killing anything, leaving the shell and its working directory live.
-    this.pty.kill(process.platform === "win32" ? undefined : signal);
+    if (process.platform === "win32") this.closeConpty();
+    else this.pty.kill(signal);
   }
 
   forceKill(): void {
+    if (process.platform === "win32") {
+      this.closeConpty();
+      return;
+    }
     // Uses process.kill directly — NOT neutralized by dispose.
     // Callers MUST call forceKill BEFORE dispose when both are needed.
     try {
@@ -125,15 +134,28 @@ export class NodePtySubprocessHandle implements SubprocessHandle {
    * Release the PTY master fd. After this call:
    * - kill() becomes a no-op (SIGHUP neutralization)
    * - write/resize/signal/pause/resume become no-ops
-   * - The underlying node-pty socket is destroyed
+   * - On Windows, the returned promise waits for the output socket to close
    */
-  dispose(): void {
-    if (this.disposed) return;
-    this.disposed = true;
-    this.dataCallbacks = [];
-    this.exitCallbacks = [];
+  dispose(): void | Promise<void> {
+    if (!this.disposed) {
+      this.disposed = true;
+      this.dataCallbacks = [];
+      this.exitCallbacks = [];
+      if (process.platform === "win32") this.closeConpty();
+      else this.pty.kill();
+      this.cleanup();
+    }
+    // ConPTY termination runs asynchronously. Its exit event follows process
+    // termination and output-pipe closure; callers must join it before exit.
+    if (process.platform === "win32") return this.closed;
+  }
+
+  private closeConpty(): void {
+    // A second kill can enumerate after the console has closed. Let the first
+    // request retain ownership of node-pty's asynchronous process-tree teardown.
+    if (this.conptyClosing) return;
+    this.conptyClosing = true;
     this.pty.kill();
-    this.cleanup();
   }
 }
 

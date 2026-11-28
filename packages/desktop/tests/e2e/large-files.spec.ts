@@ -107,7 +107,7 @@ test("tracking wizard commits literal selected files and preserves unrelated sta
     await page.screenshot({ path: test.info().outputPath("selected-tracking-commit.png") });
     await page.getByRole("button", { name: "Skip push — I'll push later", exact: true }).click();
     await page.getByRole("button", { name: "Hydrate", exact: true }).last().click();
-    await page.getByRole("tab", { name: "Pattern", exact: true }).click();
+    await page.getByRole("radio", { name: "Pattern", exact: true }).click();
     const rule = page.getByText("/data\\[1\\].bin", { exact: true }).locator("../..");
     await expect(rule).toContainText("1 file");
     await page.screenshot({ path: test.info().outputPath("selected-tracking-pattern.png") });

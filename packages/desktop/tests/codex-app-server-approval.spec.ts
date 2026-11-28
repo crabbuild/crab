@@ -141,10 +141,11 @@ describe("CodexAppServerAdapter — Approval round-trip (CA9.3, CA5.2)", () => {
     adapter.onEvent((event) => events.push(event));
 
     // Spawn the adapter (triggers initialization)
-    await adapter.spawn("Hello, write a test", "/tmp/test-cwd");
+    const startup = adapter.spawn("Hello, write a test", "/tmp/test-cwd");
 
     // Complete the handshake
     await completeHandshake(fakeProc.stdin, fakeProc.stdout);
+    await startup;
   });
 
   afterEach(() => {
@@ -159,7 +160,7 @@ describe("CodexAppServerAdapter — Approval round-trip (CA9.3, CA5.2)", () => {
     await new Promise(resolve => setTimeout(resolve, 10));
     drainFrames(fakeProc.stdin);
     adapter.respondApproval(JSON.stringify("permissions"), decision);
-    expect(drainFrames(fakeProc.stdin).map(frame => JSON.parse(frame))).toEqual([{ id: "permissions", result: { permissions: decision === "deny" ? {} : permissions, scope } }]);
+    await vi.waitFor(() => expect(drainFrames(fakeProc.stdin).map(frame => JSON.parse(frame))).toEqual([{ id: "permissions", result: { permissions: decision === "deny" ? {} : permissions, scope } }]));
   });
 
   it("allow → acceptForSession", async () => {
@@ -303,10 +304,14 @@ describe("CodexAppServerAdapter — Approval round-trip (CA9.3, CA5.2)", () => {
     await new Promise(resolve => setTimeout(resolve, 20));
     adapter.respondApproval("301", "allow_once");
     adapter.respondApproval(JSON.stringify("301"), "deny");
-    expect(drainFrames(fakeProc.stdin).map(frame => JSON.parse(frame))).toEqual([
-      { id: 301, result: { decision: "accept" } },
-      { id: "301", result: { decision: "decline" } },
-    ]);
+    const responses: unknown[] = [];
+    await vi.waitFor(() => {
+      responses.push(...drainFrames(fakeProc.stdin).map(frame => JSON.parse(frame)));
+      expect(responses).toEqual([
+        { id: 301, result: { decision: "accept" } },
+        { id: "301", result: { decision: "decline" } },
+      ]);
+    });
   });
 
   it("file change approval also works correctly", async () => {

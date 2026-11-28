@@ -244,7 +244,9 @@ export function useWorkflowEditor(repoId: string, repoPath?: string) {
     });
     saveQueue.current = saved;
     const resolved = await saved;
-    lastSaved.current = resolved;
+    // Management can reload before React commits "saved". Remember the input
+    // identity so that reload cannot save it again after rename or deletion.
+    lastSaved.current = workflow;
     dispatch({ type: "saved", workflow, resolved });
     setCatalog(files => files.map(file => file.path === workflow.path ? resolved : file));
   }, [repoId]);

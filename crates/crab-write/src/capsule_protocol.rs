@@ -217,9 +217,32 @@ pub struct PreparedCapsulePublication {
 }
 
 impl PreparedCapsulePublication {
+    /// Return the physical run count retained by one prepared ref successor.
+    ///
+    /// Returns an error if the publication does not edit this ref.
+    pub fn ref_frontier_run_count(&self, ref_name: &str) -> Result<usize> {
+        Ok(self.ref_successor(ref_name)?.frontier().len())
+    }
+
     /// Return the physical frontier bytes retained by one prepared ref successor.
+    ///
+    /// Returns an error if the publication does not edit this ref.
     pub fn ref_frontier_bytes(&self, ref_name: &str) -> Result<u64> {
-        let state = self
+        self.ref_successor(ref_name)?
+            .frontier()
+            .iter()
+            .try_fold(0u64, |total, pointer| {
+                total.checked_add(pointer.size()).ok_or_else(|| {
+                    WriteError::Internal("prepared ref frontier byte count overflowed".to_owned())
+                })
+            })
+    }
+
+    fn ref_successor(
+        &self,
+        ref_name: &str,
+    ) -> Result<&crab_metadata::capsule_protocol::CapsuleRefState> {
+        Ok(self
             .refs
             .iter()
             .find(|prepared| prepared.candidate.ref_name() == ref_name)
@@ -227,12 +250,7 @@ impl PreparedCapsulePublication {
                 WriteError::Internal("prepared publication does not contain the ref".to_owned())
             })?
             .candidate
-            .visible(&std::collections::BTreeSet::new());
-        state.frontier().iter().try_fold(0u64, |total, pointer| {
-            total.checked_add(pointer.size()).ok_or_else(|| {
-                WriteError::Internal("prepared ref frontier byte count overflowed".to_owned())
-            })
-        })
+            .visible(&std::collections::BTreeSet::new()))
     }
 
     /// Return the exact coordinator payload that authorizes this publication.

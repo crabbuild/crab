@@ -312,7 +312,8 @@ jobs:
   cross-platform-contract:
     name: Protocol contract (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    # Cold native compilation and post-job cache upload share this deadline.
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -533,7 +534,8 @@ jobs:
             (
               cd "$source_dir"
               make configure
-              ./configure --prefix="$prefix" --without-tcltk
+              # These Git releases predate C23's unreachable() macro.
+              ./configure --prefix="$prefix" --without-tcltk CFLAGS="-O2 -std=gnu99"
               make -j"$(nproc)" all
               make install
             )

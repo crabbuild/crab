@@ -72,9 +72,10 @@ read descriptors and concurrent publishers are skipped using nonblocking locks.
 Reports count actual removals (or eligible files in a dry run) and separately
 count retained, busy, and unsafe entries. It does not create missing roots.
 Unix parent-directory locks coordinate payload publication and deletion.
-Completed fills wait for sibling publication on a blocking worker through fsync
-and rename; maintenance keeps nonblocking admission. A concurrent fill must not
-be discarded merely because another fill is publishing in the same directory.
+Fill identity registration, publication and anonymous-stream unlink wait up to
+two seconds for a sibling namespace operation. This avoids discarding concurrent
+ranges during ordinary writer contention; persistent contention still fails the
+cache write. Maintenance and temporary-drop cleanup remain nonblocking.
 Object/range prune and verify, clean, targeted eviction, and read-side corrupt
 entry removal now share catalog row retirement. A healthy catalog's immediate
 writer transaction excludes lease/reservation changes through deletion and

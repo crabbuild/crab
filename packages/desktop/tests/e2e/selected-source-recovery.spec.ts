@@ -62,7 +62,7 @@ for (const target of ["text preview", "Markdown editor", "pending text", "pendin
     } else {
       await navigation.getByRole("button", { name: "Git", exact: true }).click();
       await page.getByRole("navigation", { name: "Git", exact: true }).getByRole("button", { name: "Changes", exact: true }).click();
-      await page.getByRole("radio", { name: "List", exact: true }).click();
+      await page.getByLabel("List view", { exact: true }).and(page.locator(":visible")).click();
       if (target === "Changes file") {
         await page.getByRole("listbox", { name: "Changed files", exact: true }).getByRole("option").filter({ has: page.getByText(file, { exact: true }) }).hover();
         await page.getByRole("button", { name: `Open file ${file}`, exact: true }).click();
@@ -146,12 +146,12 @@ for (const target of ["text preview", "Markdown editor", "pending text", "pendin
       await expect.poll(() => readFileSync(path.join(source, file), "utf8")).toBe("PENDING_BUFFER_SURVIVES_REPAIR");
       await expect(page.getByLabel("Unsaved changes", { exact: true })).toHaveCount(0);
     }
-    if (target.endsWith("diff")) await expect(page.getByRole("combobox", { name: "Compare file versions", exact: true })).toHaveValue("unstaged");
+    if (target.endsWith("diff")) await expect(page.getByRole("combobox", { name: "Compare file versions", exact: true })).toHaveText("Index → Working tree");
     expect(readFileSync(path.join(source, file)).equals(Buffer.from(pending ? "PENDING_BUFFER_SURVIVES_REPAIR" : value("AFTER_NATIVE_REPAIR")))).toBe(true);
     expect(readFileSync(path.join(metadata, "index")).equals(index)).toBe(true);
     await page.screenshot({ path: test.info().outputPath("selected-source-repaired.png") });
     if (target === "Changes file") {
-      await page.getByTitle("Close file view and return to diff", { exact: true }).click();
+      await page.getByRole("button", { name: "Close file view and return to diff", exact: true }).click();
       const row = page.getByRole("listbox", { name: "Changed files", exact: true }).getByRole("option").filter({ has: page.getByText(file, { exact: true }) });
       await row.click(); await row.hover();
       await page.getByRole("button", { name: `Stage ${file}`, exact: true }).click();

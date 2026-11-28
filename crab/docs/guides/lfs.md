@@ -132,6 +132,10 @@ With `--skip-smudge`, `filter.lfs.smudge` is set to
 `/path/to/crab lfs smudge --skip -- %f`, so checkout leaves pointers in place
 until a later `crab lfs pull` or `crab lfs checkout`.
 
+Filter commands quote the selected executable for Git’s shell; the custom
+transfer agent keeps its native filename. After moving or upgrading Crab, run
+`crab lfs update` inside the repository to refresh these commands.
+
 ---
 
 ## crab lfs uninstall

@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { LspServer, LspServerConfig, ServerCapabilities } from "./lsp-server";
-import { discoverServers, refresh as refreshDiscovery, resolveSpawnSpec, DiscoveredServer } from "./lsp-discovery";
+import { discoverServers, refresh as refreshDiscovery, resolveSpawnSpec, stopDiscovery, DiscoveredServer } from "./lsp-discovery";
 import { lspInstaller } from "./lsp-installer";
 
 /**
@@ -25,6 +25,8 @@ export class LspManager extends EventEmitter {
   private servers = new Map<string, LspServer>();
   private serverConfigs = new Map<string, LspServerConfig>();
   private crashTimestamps = new Map<string, number[]>();
+  private stopped = false;
+  private revisions = new Map<string, number>();
   private static readonly CRASH_WINDOW_MS = 30_000;
   private static readonly MAX_AUTO_RESTARTS = 1;
 
@@ -37,6 +39,8 @@ export class LspManager extends EventEmitter {
    * Checks discovery cache, reads config overrides, spawns LspServer.
    */
   async start(language: string, rootPath: string): Promise<ServerCapabilities> {
+    if (this.stopped) throw new Error("Language server manager is stopping");
+    const revision = this.revisions.get(language);
     // If already running, return existing capabilities
     const existing = this.servers.get(language);
     if (existing && existing.isRunning()) {
@@ -45,7 +49,10 @@ export class LspManager extends EventEmitter {
     }
 
     // Find the server config
-    const config = this.resolveConfig(language);
+    const config = await this.resolveConfig(language);
+    // Stop may arrive while a version probe is running. Discovery completing
+    // must never turn that cancelled request into a newly spawned server.
+    if (this.stopped || this.revisions.get(language) !== revision) throw new Error("Language server startup was stopped");
     if (!config) {
       throw new Error(`No language server found for "${language}"`);
     }
@@ -72,6 +79,10 @@ export class LspManager extends EventEmitter {
 
     // Start the server
     const capabilities = await server.start();
+    if (this.stopped || this.revisions.get(language) !== revision) {
+      await server.shutdown();
+      throw new Error("Language server startup was stopped");
+    }
     this.servers.set(language, server);
     this.serverConfigs.set(language, config);
     this.emitStatus(language, "running", config.command);
@@ -95,6 +106,8 @@ export class LspManager extends EventEmitter {
    * Graceful shutdown of all running servers.
    */
   async stopAll(): Promise<void> {
+    this.stopped = true;
+    await stopDiscovery();
     const shutdowns: Promise<void>[] = [];
     for (const [language, server] of this.servers) {
       shutdowns.push(
@@ -113,6 +126,7 @@ export class LspManager extends EventEmitter {
    * Stop a specific language server.
    */
   async stop(language: string): Promise<void> {
+    this.revisions.set(language, (this.revisions.get(language) ?? 0) + 1);
     const server = this.servers.get(language);
     if (!server) return;
     await server.shutdown();
@@ -123,8 +137,8 @@ export class LspManager extends EventEmitter {
   /**
    * Return status of all configured servers.
    */
-  status(): LspServerStatus[] {
-    const discovered = discoverServers();
+  async status(): Promise<LspServerStatus[]> {
+    const discovered = await discoverServers();
     const statuses: LspServerStatus[] = [];
 
     // Include running servers
@@ -154,7 +168,7 @@ export class LspManager extends EventEmitter {
   /**
    * Refresh the discovery cache.
    */
-  refreshDiscovery(): DiscoveredServer[] {
+  refreshDiscovery(): Promise<DiscoveredServer[]> {
     return refreshDiscovery();
   }
 
@@ -164,8 +178,8 @@ export class LspManager extends EventEmitter {
    * Resolve the config for a language: check user overrides, then
    * fall back to discovery.
    */
-  private resolveConfig(language: string): LspServerConfig | null {
-    const discovered = discoverServers();
+  private async resolveConfig(language: string): Promise<LspServerConfig | null> {
+    const discovered = await discoverServers();
     const match = discovered.find((s) => s.language === language);
     if (!match) return null;
 
@@ -190,8 +204,7 @@ export class LspManager extends EventEmitter {
   /** Install a language server on demand and refresh discovery. */
   async installLanguage(language: string): Promise<DiscoveredServer> {
     await lspInstaller.install(language);
-    refreshDiscovery();
-    const discovered = discoverServers();
+    const discovered = await refreshDiscovery();
     const match = discovered.find((s) => s.language === language);
     if (!match) {
       throw new Error(`Installation succeeded but discovery couldn't find "${language}"`);

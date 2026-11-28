@@ -5,6 +5,90 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
+## 2.0.0-alpha.2 - 2026-11-18
+
+The second Crab v2 alpha includes the changes since `v2.0.0-alpha.1`.
+Download the platform CLI archive or desktop installer from the GitHub
+prerelease. Stable downloads and Homebrew remain on the current stable release.
+Alpha installers remain unsigned: macOS requires manual installation and may
+require approval in Privacy & Security; Windows may show a publisher warning.
+macOS automatic update installation requires a future signed release.
+
+### Desktop
+
+- Added native Codex and Claude sub-agent transcripts, tool output, and agent
+  messages, plus mixed Codex/Claude teams with shared delegation and messaging.
+- Aligned native agent start, resume, cancellation, and task ownership, with
+  durable child transcripts and full-text output access.
+- Added complex workflow editing and execution, resizable Workflow Studio
+  panels, local runs, and restored workflow output.
+- Added a desktop Results workspace for comparing captured workflow runs, metrics,
+  curves, and retained evidence, with matching CLI and server access.
+- Added a runnable machine-learning Results example with compound plots and
+  exact metric-value round trips.
+- Improved Results cursor and zoom responsiveness, preserving custom tooltips
+  and plot selections.
+- Kept editor controls responsive during language-server version discovery and
+  cancelled pending probes during shutdown.
+- Simplified workspace, repository, Explorer, Search, and Git navigation;
+  standardized controls, themes, and terminal font rendering.
+- Unified normal, durable daemon, and SSH terminal controls, preserving sessions
+  across reconnects and recovering stale daemon owners.
+- Joined terminal cleanup before daemon shutdown completes, including retired
+  sessions and Windows ConPTY output closure.
+- Fixed forced terminal shutdown on Windows so foreground console programs are
+  reaped with their shell.
+- Quoted installed Git filter commands so paths with spaces, quotes,
+  and Windows separators launch the selected Crab executable.
+- Kept Windows file transfers compatible with open previews, preserving captured
+  preview bytes while atomically publishing hydrated or restored content.
+- Kept repository sessions available when worktree detail panels inherit the
+  current storage connection.
+- Identified the selected kernel executable and working directory in notebook
+  launch failures, including opaque Windows process errors.
+- Kept file context menus within the viewport and docked Activity below the
+  workspace so file actions remain reachable while viewing transfer progress.
+- Kept hydration recovery warnings visible above scrollable controls when
+  Activity reduces the available workspace height.
+- Opened Results stores on Windows through canonical repository paths while
+  preserving parent-directory symlink checks.
+- Preserved checkpoint state when Windows metadata publication encounters a
+  directory where a file is required.
+- Shared the large-file cache across desktop consumers and streamed Git checkout
+  content without buffering complete large blobs.
+- Released Git index copy handles before converted-file publication so Windows
+  can update the stat cache without leaving restored files marked as modified.
+- Improved Xet and LFS hydration, selective reads, transfer recovery, and visible
+  retry results. Passive storage metadata reads no longer initialize an unused
+  OS keyring provider and block environment-credential retries.
+- Fixed terminal packaging and mount startup, and expanded native, packaged-app,
+  and cross-platform qualification.
+- Kept chat navigation reachable while completion menus are open in compact
+  windows, preserving drafts when switching to Skills.
+
+### Git and storage
+
+- Preserved repository history across forced pushes.
+- Reduced concurrent push discovery, startup work, redundant scratch syncs, and
+  remote-helper asynchronous worker overhead.
+- Added large LFS and Xet file admission to the repository server and expanded
+  native crash, restore, and Kubernetes recovery qualification.
+- Upgraded the embedded Cellar runtime to 0.1.2.
+- Added first-run Docker setup for the repository HTTP server and S3 gateway,
+  including generated configuration and client identity.
+- Patched Caddy's network dependency across server, Compose, and Cloudflare
+  runtime images.
+
+### Rust SDK
+
+- Reduced the inline size of repository handles so local handles stay compact
+  when Results support is enabled.
+- Retained concurrent decoded-range cache fills through sibling publication
+  contention, avoiding unnecessary origin downloads on warm reads.
+- Renamed Cargo features: `write` becomes `publish`, `content` becomes `files`,
+  and `managed` becomes `service`. Update SDK dependency feature lists before
+  building against this alpha; retired feature names are not accepted.
+
 ## 2.0.0-alpha.1 - 2026-11-02
 
 This is the first Crab v2 alpha. Download the platform CLI archive or desktop

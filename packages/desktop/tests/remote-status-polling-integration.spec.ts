@@ -54,6 +54,15 @@ describe("Remote status polling integration", () => {
     "/home/dev/projects/shared",
   ];
 
+  async function openForPolling(profileId: string, paths: string[]) {
+    const repos = paths.map(absolute_path => {
+      const name = absolute_path.slice(absolute_path.lastIndexOf("/") + 1);
+      return { absolute_path, relative_path: name, name };
+    });
+    vi.spyOn(orchestrator, "discoverRepos").mockResolvedValueOnce(repos);
+    await orchestrator.openWorkspace(profileId, "/home/dev/projects");
+  }
+
   beforeEach(() => {
     vi.useFakeTimers();
     mockRouter = makeMockRpcRouter();
@@ -178,18 +187,18 @@ describe("Remote status polling integration", () => {
       expect(mockRouter.sendToRemoteAgent).toHaveBeenCalledTimes(3);
     });
 
-    it("emits error event when batch_git_status RPC fails", async () => {
+    it("publishes repository errors when batch_git_status RPC fails", async () => {
       mockRouter.sendToRemoteAgent.mockRejectedValue(new Error("SSH channel closed"));
 
       const errors: any[] = [];
-      orchestrator.on("error", (e) => errors.push(e));
+      orchestrator.on("status-update", e => { if (e.statuses.some((status: RemoteRepoStatus) => status.error)) errors.push(e); });
 
-      orchestrator.startPolling(PROFILE_ID, REPO_PATHS);
+      await openForPolling(PROFILE_ID, REPO_PATHS);
       await vi.advanceTimersByTimeAsync(0);
 
       expect(errors).toHaveLength(1);
       expect(errors[0].profileId).toBe(PROFILE_ID);
-      expect(errors[0].message).toBe("SSH channel closed");
+      expect(errors[0].statuses.map((status: RemoteRepoStatus) => status.error)).toEqual(REPO_PATHS.map(() => "SSH channel closed"));
     });
 
     it("continues polling after a transient RPC failure", async () => {
@@ -203,10 +212,10 @@ describe("Remote status polling integration", () => {
 
       const events: any[] = [];
       const errors: any[] = [];
-      orchestrator.on("status-update", (e) => events.push(e));
-      orchestrator.on("error", (e) => errors.push(e));
+      orchestrator.on("status-update", e => { if (e.statuses.every((status: RemoteRepoStatus) => !status.error)) events.push(e); });
+      orchestrator.on("status-update", e => { if (e.statuses.some((status: RemoteRepoStatus) => status.error)) errors.push(e); });
 
-      orchestrator.startPolling(PROFILE_ID, ["/home/dev/projects/api"]);
+      await openForPolling(PROFILE_ID, ["/home/dev/projects/api"]);
 
       // First poll (fails)
       await vi.advanceTimersByTimeAsync(0);
@@ -362,7 +371,7 @@ describe("Remote status polling integration", () => {
       // Attach error listener to prevent unhandled error throw
       orchestrator.on("error", () => {});
 
-      orchestrator.startPolling(PROFILE_ID, REPO_PATHS);
+      await openForPolling(PROFILE_ID, REPO_PATHS);
 
       // Initial poll
       await vi.advanceTimersByTimeAsync(0);
@@ -382,16 +391,16 @@ describe("Remote status polling integration", () => {
       expect(mockRouter.sendToRemoteAgent).not.toHaveBeenCalled();
     });
 
-    it("emits error event on disconnect", async () => {
+    it("publishes repository errors on disconnect", async () => {
       mockRouter.sendToRemoteAgent.mockResolvedValue({
         statuses: [],
         poll_timestamp: Date.now() / 1000,
       });
 
       const errors: any[] = [];
-      orchestrator.on("error", (e) => errors.push(e));
+      orchestrator.on("status-update", e => { if (e.statuses.some((status: RemoteRepoStatus) => status.error)) errors.push(e); });
 
-      orchestrator.startPolling(PROFILE_ID, REPO_PATHS);
+      await openForPolling(PROFILE_ID, REPO_PATHS);
       await vi.advanceTimersByTimeAsync(0);
 
       // Simulate disconnection
@@ -402,7 +411,7 @@ describe("Remote status polling integration", () => {
 
       expect(errors).toHaveLength(1);
       expect(errors[0].profileId).toBe(PROFILE_ID);
-      expect(errors[0].message).toBe("SSH connection lost");
+      expect(errors[0].statuses.map((status: RemoteRepoStatus) => status.error)).toEqual(REPO_PATHS.map(() => "SSH connection unavailable"));
     });
 
     it("resumes polling when SSH connection is re-established", async () => {
@@ -478,8 +487,8 @@ describe("Remote status polling integration", () => {
       // Attach error listener to prevent unhandled error throw
       orchestrator.on("error", () => {});
 
-      // Start polling without opening a workspace (direct startPolling call)
-      orchestrator.startPolling(PROFILE_ID, REPO_PATHS);
+      await openForPolling(PROFILE_ID, REPO_PATHS);
+      orchestrator.closeWorkspace(PROFILE_ID);
       await vi.advanceTimersByTimeAsync(0);
 
       // Disconnect
@@ -490,8 +499,7 @@ describe("Remote status polling integration", () => {
 
       mockRouter.sendToRemoteAgent.mockClear();
 
-      // Reconnect — but since no workspace was opened via openWorkspace(),
-      // the orchestrator has no record of repos to resume polling for
+      // A closed workspace must not resume polling on reconnect.
       mockSessionManager.emit("ssh:status-changed", {
         profileId: PROFILE_ID,
         status: "connected",
@@ -514,8 +522,8 @@ describe("Remote status polling integration", () => {
       // Attach error listener to prevent unhandled error throw
       orchestrator.on("error", () => {});
 
-      orchestrator.startPolling(PROFILE_A, ["/home/dev/repo-a"]);
-      orchestrator.startPolling(PROFILE_B, ["/home/dev/repo-b"]);
+      await openForPolling(PROFILE_A, ["/home/dev/repo-a"]);
+      await openForPolling(PROFILE_B, ["/home/dev/repo-b"]);
 
       // Both poll immediately
       await vi.advanceTimersByTimeAsync(0);

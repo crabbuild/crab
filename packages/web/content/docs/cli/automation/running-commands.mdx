@@ -53,7 +53,7 @@ On first use, `crab run` ensures the workflow scratch directory is added to
 | `--deps` | | | Dependency paths. Repeatable. Changes to these files invalidate the cache. |
 | `--outs` | | | Output paths. Repeatable. Cached and restored on cache hits. |
 | `--env` | | | Environment variable allowlist. Only named vars participate in the stage hash. Repeatable. |
-| `--empty-env` | | `false` | Run with a minimal environment (PATH, HOME, TMPDIR only). Conflicts with `--env`. |
+| `--empty-env` | | `false` | Run with a minimal environment (PATH, HOME, TMPDIR, plus SystemRoot on Windows). Conflicts with `--env`. |
 | `--timeout` | | | Per-stage timeout (e.g. `30s`, `5m`, `1h`). No timeout if omitted. |
 | `--hermetic` | | `false` | Opt into hermetic sandbox (not yet implemented; participates in stage hash). |
 | `--nondeterministic` | | `false` | Mark stage as non-reproducible. Affects cache key isolation. |

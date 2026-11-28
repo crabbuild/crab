@@ -829,6 +829,8 @@ sets; promote those packages with versioned workspace dependencies and retain
 workspace paths for local development. Supporting implementation packages use
 a coordinated version and exact sibling version requirements; SDK public API
 has its own semver. Verify registry ownership/name availability before release.
+The Results profile includes `crab-workflow` and its retained chart runtime in
+that publishable dependency closure. Dev-only workspace fixtures stay excluded.
 Publish support crates in dependency order, then SDK. No vendored source copies
 or Git-only dependencies in registry packages.
 
@@ -865,7 +867,7 @@ user-visible contracts and are the initial matrix validator references.
 | 6 | `crates/crab-sdk/tests/managed.rs` | `managed_lifecycle_round_trip`, `revoked_push_never_commits`, `lost_finalize_reuses_push_id`, `placement_change_invalidates_cached_access` |
 | 6 | `crates/crab-sdk/tests/http_git.rs` | `native_http_round_trip`, `server_force_rejection_is_typed`, `lost_acknowledgement_is_indeterminate` |
 | 7 | `crab/scripts/qualify_sdk.py` | Runs real-backend targets and independent Git/byte checks; emits the required report fields |
-| 8 | `crates/crab-sdk/tests/package-consumer/` | Separate workspace for minimal, remote/files, Results, local and service published-package consumers |
+| 8 | `crates/crab-sdk/tests/package-consumer/` | Separate workspace for minimal, remote/files, Results, local and service published-package consumers; package closure follows Cargo's declared workspace runtime/build dependencies |
 
 Live-backend tests may be opt-in locally. The qualification runner must select
 them explicitly (including `--ignored` when necessary), verify their executed

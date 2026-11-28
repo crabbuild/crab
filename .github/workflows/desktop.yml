@@ -76,6 +76,13 @@ jobs:
       - name: Install Linux native build dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - name: Qualify Windows index ownership before building the CLI
+        if: runner.os == 'Windows'
+        run: |
+          mkdir -p "$CARGO_TARGET_DIR/restoration-test"
+          CRAB_CACHE_DIR="$CARGO_TARGET_DIR/restoration-test/cache" \
+            cargo test --release -p crab-desktop-agent --locked \
+              repository::content::restore::tests -- --test-threads=2
       - name: Build the matching native CLI and sidecar
         run: node scripts/build-native.mjs
       - name: Test native desktop integration
@@ -141,6 +148,11 @@ jobs:
           mkdir -p "$RUNNER_TEMP/crab-ssh-runtime"
           CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-ssh-runtime" npx vitest run tests/ssh-deployer.spec.ts --maxWorkers 1
       - uses: actions/upload-artifact@v4
+        if: ${{ always() && runner.os != 'Windows' }}
+        with:
+          name: Crab-ssh-runtime-proof-${{ matrix.target }}
+          path: ${{ runner.temp }}/crab-ssh-runtime/*.json
+      - uses: actions/upload-artifact@v4
         with:
           name: Crab-native-${{ matrix.target }}
           path: packages/desktop/resources/native/${{ matrix.target }}/
@@ -167,9 +179,10 @@ jobs:
           - { os: windows-2022, target: win-x64 }
     env:
       CARGO_INCREMENTAL: 0
-      # Every release channel needs a stable signing identity for auto-updates.
-      SIGN_RELEASE: ${{ inputs.release }}
-      CSC_IDENTITY_AUTO_DISCOVERY: ${{ inputs.release && 'true' || 'false' }}
+      # Alpha downloads retain their shipped unsigned installation contract.
+      # Later channels require a stable signing identity for auto-updates.
+      SIGN_RELEASE: ${{ inputs.release && !contains(inputs.version, '-alpha.') }}
+      CSC_IDENTITY_AUTO_DISCOVERY: ${{ inputs.release && !contains(inputs.version, '-alpha.') && 'true' || 'false' }}
     defaults:
       run:
         shell: bash
@@ -194,7 +207,7 @@ jobs:
           components: rustfmt
       - name: Install Linux build and Electron dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb tmux
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb tmux dbus-x11 gnome-keyring libsecret-1-0
       - name: Install macOS SSH terminal test dependency
         if: runner.os == 'macOS'
         run: command -v tmux || brew install tmux
@@ -242,13 +255,13 @@ jobs:
           done
       - run: npm run typecheck
       - run: npm run test:build
-      - name: Qualify repository sidebar scroll persistence
+      - name: Qualify renderer lifecycle persistence
         run: |
           mkdir -p "$RUNNER_TEMP/crab-sidebar-scroll"
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a env CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-sidebar-scroll" npm test -- tests/sidebar-scroll-live.spec.ts --maxWorkers 1
+            xvfb-run -a env CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-sidebar-scroll" npm test -- tests/sidebar-scroll-live.spec.ts tests/workflow-autosave-live.spec.ts --maxWorkers 1
           else
-            CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-sidebar-scroll" npm test -- tests/sidebar-scroll-live.spec.ts --maxWorkers 1
+            CRAB_AGENT_LIVE_ROOT="$RUNNER_TEMP/crab-sidebar-scroll" npm test -- tests/sidebar-scroll-live.spec.ts tests/workflow-autosave-live.spec.ts --maxWorkers 1
           fi
       - name: Qualify local native process group ownership
         if: runner.os != 'Windows'
@@ -262,6 +275,8 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           export E2E_SMOKE=1
+          # This gate verifies durable recovery; Normal terminals end on eviction.
+          export CRAB_PTY_MODE=daemon
           if [ "$RUNNER_OS" = Linux ]; then
             xvfb-run -a npx playwright test tests/e2e/terminal-recovery.spec.ts --project=e2e-smoke --workers=1
           else
@@ -393,7 +408,15 @@ jobs:
         if: matrix.os == 'macos-15' || runner.os == 'Windows' || runner.os == 'Linux'
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a python scripts/qualify-v2.py
+            # Saved connections and cold restarts require a real Secret Service;
+            # a private bus and keyring keep qualification independent of the host.
+            dbus-run-session -- bash -euo pipefail <<'KEYRING'
+              export XDG_CURRENT_DESKTOP=GNOME
+              export XDG_DATA_HOME="$RUNNER_TEMP/crab-desktop-keyring"
+              mkdir -m 700 -p "$XDG_DATA_HOME"
+              python -c "import secrets; print(secrets.token_hex(32), end=\"\")" | gnome-keyring-daemon --unlock --components=secrets
+              xvfb-run -a python scripts/qualify-v2.py
+          KEYRING
           else
             python scripts/qualify-v2.py
           fi
@@ -413,7 +436,7 @@ jobs:
             packages/desktop/release/rc*.yml
           if-no-files-found: error
       - name: Broad desktop regression suite
-        run: CRAB_TEST_JUPYTER_PYTHON="$(python -c 'import sys; print(sys.executable)')" npm test -- --maxWorkers 2 --minWorkers 1
+        run: CRAB_TEST_JUPYTER_PYTHON="$(python -c 'import sys; print(sys.executable)')" npm test -- --maxWorkers 2
       - name: Retain packaged app failure context
         if: failure()
         uses: actions/upload-artifact@v4

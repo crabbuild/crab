@@ -125,7 +125,7 @@ describe("CodexAppServerAdapter — Backpressure", () => {
       const events: AgentEvent[] = [];
       adapter.onEvent((e) => events.push(e));
 
-      await adapter.spawn("Hello backpressure test", "/tmp/bp-test");
+      const startup = adapter.spawn("Hello backpressure test", "/tmp/bp-test");
 
       // Complete the handshake (uses real-ish timing via advanceTimersByTimeAsync)
       // Step 1: initialize
@@ -208,6 +208,8 @@ describe("CodexAppServerAdapter — Backpressure", () => {
 
       await vi.advanceTimersByTimeAsync(50);
 
+      await startup;
+
       // Verify no error events were emitted (the turn started successfully
       // after two -32001 retries)
       const errorEvents = events.filter((e) => e.type === "error");
@@ -227,7 +229,7 @@ describe("CodexAppServerAdapter — Backpressure", () => {
       const events: AgentEvent[] = [];
       adapter.onEvent((e) => events.push(e));
 
-      await adapter.spawn("Hello exhaustion test", "/tmp/bp-exhaust");
+      const startup = adapter.spawn("Hello exhaustion test", "/tmp/bp-exhaust").catch(error => error);
 
       // Complete handshake
       // Step 1: initialize
@@ -310,6 +312,8 @@ describe("CodexAppServerAdapter — Backpressure", () => {
 
       // Allow the rejection to propagate
       await vi.advanceTimersByTimeAsync(100);
+
+      await startup;
 
       // Verify the adapter emitted an error AgentEvent
       const errorEvents = events.filter((e) => e.type === "error");

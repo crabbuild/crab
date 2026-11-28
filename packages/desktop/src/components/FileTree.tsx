@@ -1,6 +1,7 @@
 import { Button } from "@/components/ui/button";
+import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
 import { repositoryTreeTheme } from "@/lib/repository-tree-theme";
-import type { GitStatus, GitStatusEntry } from "@pierre/trees";
+import type { ContextMenuOpenContext, GitStatus, GitStatusEntry } from "@pierre/trees";
 import { prepareFileTreeInput } from "@pierre/trees";
 import { FileTree as PierreFileTree, useFileTree, useFileTreeSelection } from "@pierre/trees/react";
 import clsx from "clsx";
@@ -302,7 +303,7 @@ export const FileTree = memo(function FileTree({
   const renderContextMenu = useCallback(
     (
       item: { kind: "directory" | "file"; path: string },
-      context: { close: () => void },
+      context: ContextMenuOpenContext,
     ) => {
       const isDir = item.kind === "directory";
       const entry = entryByPath.get(item.path);
@@ -377,7 +378,7 @@ export const FileTree = memo(function FileTree({
       };
 
       return (
-        <ContextMenuBody>
+        <ContextMenuBody context={context}>
           {/* File operations */}
           {canEdit && workspacePath && (
             <>
@@ -640,14 +641,24 @@ function SelectionHandler({
   return null;
 }
 
-function ContextMenuBody({ children }: { children: React.ReactNode }) {
+function ContextMenuBody({ children, context }: { children: React.ReactNode; context: ContextMenuOpenContext }) {
   return (
-    <div
-      className="min-w-[240px] overflow-hidden rounded-md border border-border bg-card p-1 shadow-2xl"
-      data-file-tree-context-menu-root="true"
-    >
-      {children}
-    </div>
+    <Popover open onOpenChange={open => { if (!open) context.close(); }}>
+      <PopoverAnchor virtualRef={{ current: context.anchorElement }} />
+      <PopoverContent
+        align="start"
+        sideOffset={0}
+        collisionPadding={8}
+        className="max-h-[var(--radix-popover-content-available-height)] w-auto min-w-[240px] overflow-y-auto p-1"
+        aria-label="File actions"
+        // Pierre uses this marker to admit pointer events in a portaled menu;
+        // without it, the tree dismisses the menu before its action can run.
+        data-file-tree-context-menu-root="true"
+        onCloseAutoFocus={event => { event.preventDefault(); context.restoreFocus(); }}
+      >
+        {children}
+      </PopoverContent>
+    </Popover>
   );
 }
 

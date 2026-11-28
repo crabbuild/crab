@@ -360,13 +360,18 @@ definition and complete observed/authored domain. Compatible charts share cursor
 and numeric range controls. The shared renderer derives one scalar cursor from
 the owned single-field selection tuple; desktop and offline consumers
 use it without depending on Vega-Lite's rewritten selection-object keys.
+For simple encodings without authored configuration, the hidden hit layer groups
+retained coordinates by x and uses a constant y; series retain all sampled marks
+while zoom rebuilds one hit region per x. Authored channels and configuration
+keep complete sample metadata and two-dimensional hit regions for tooltips.
 ComparisonSpec.axes stores up to 32 finite ranges,
 validated against chart domains when saving. Runtime zoom uses Vega's domainRaw;
 clearing it restores authored zero/nice/bindings. Reports freeze ranges into their
 chart parameters. Report inspection keeps overrides only in memory; Reset
 restores frozen ranges. Transformed, compound and categorical custom axes do not
-acquire unproven numeric zoom semantics. Authored template parameters survive;
-conflicts with owned interaction names fail visibly.
+acquire unproven numeric zoom semantics. Authored selections retain their unit
+view and interaction signals without injected layers. Other template parameters
+survive; conflicts with owned interaction names fail visibly.
 
 Report transport/export retains metric/plot/image/template/workflow bodies and
 optional logs. Inputs, model outputs and checkpoints remain immutable links with

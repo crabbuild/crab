@@ -309,8 +309,18 @@ impl PackFixture {
         for object_index in 0..32usize {
             let mut data = vec![b'a'; 64 * 1024];
             let start = object_index * 97;
-            for (offset, byte) in data[start..start + 512].iter_mut().enumerate() {
-                *byte = b'A' + ((object_index + offset) % 26) as u8;
+            if matches!(delta_kind, DeltaKind::RefShared) {
+                // Keep base and delta entries larger than read-ahead windows so
+                // shared-base tests exercise origin admission independently.
+                blake3::Hasher::new().finalize_xof().fill(&mut data);
+                blake3::Hasher::new()
+                    .update(&(object_index as u64).to_le_bytes())
+                    .finalize_xof()
+                    .fill(&mut data[start..start + 8 * 1024]);
+            } else {
+                for (offset, byte) in data[start..start + 512].iter_mut().enumerate() {
+                    *byte = b'A' + ((object_index + offset) % 26) as u8;
+                }
             }
             data.extend_from_slice(format!("\nobject-{object_index:02}\n").as_bytes());
             let oid = hash_object(&git_dir, &data);
@@ -674,9 +684,9 @@ impl PackFixture {
                 }
             }
             let targets = by_base
-                .values()
-                .find(|targets| targets.len() >= 2)
-                .expect("depth-one fixture must contain a shared delta base");
+                .get(&base)
+                .filter(|targets| targets.len() >= 2)
+                .expect("selected base must have two depth-one deltas");
             Some(std::array::from_fn(|index| {
                 let oid = targets[index];
                 let (path, _, data) = blobs
@@ -2945,7 +2955,8 @@ async fn directory_reads_are_immediate_and_metadata_is_page_bounded() {
         let metadata_reads = fixture.backend.pack_gets();
         assert!(metadata.items.iter().all(|entry| entry.size == Some(9)));
         assert!(plain_reads > 0);
-        assert_eq!(metadata_reads, 1);
+        // Tree read-ahead may already retain the one shared blob body.
+        assert!(metadata_reads <= 1);
         Ok(())
     }
     .await;
@@ -3275,7 +3286,7 @@ async fn object_cache_eviction_reconstructs_the_same_verified_bytes() {
         ..RuntimeOptions::default()
     };
     let fixture = publish_with_runtime(
-        DeltaKind::Ref,
+        DeltaKind::RefShared,
         false,
         RepositoryOptions::default(),
         runtime_options,
@@ -3920,7 +3931,9 @@ async fn aggregate_inflated_budget_rejects_before_decode_and_cache_insert() {
         "unexpected first error: {first:?}"
     );
 
-    fixture.backend.reset_pack_gets();
+    // Encoded read-ahead may remain hot; failed inflation must not publish
+    // a verified object into the decoded cache.
+    assert_eq!(fixture.runtime.snapshot().await.object_entries, 0);
     let second = read_target(&fixture)
         .await
         .expect_err("failed decode must not become a cache hit");
@@ -3928,7 +3941,7 @@ async fn aggregate_inflated_budget_rejects_before_decode_and_cache_insert() {
         contains_limit_exceeded(&second, "inflated bytes"),
         "unexpected second error: {second:?}"
     );
-    assert!(fixture.backend.pack_gets() > 0);
+    assert_eq!(fixture.runtime.snapshot().await.object_entries, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]

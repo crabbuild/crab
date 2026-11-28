@@ -36,6 +36,7 @@ const execFile = promisify(execFileCb);
 async function createTempRepo(): Promise<string> {
   const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "crab-diff-test-"));
   await execFile("git", ["init", "--initial-branch=main"], { cwd: repoDir });
+  await execFile("git", ["config", "core.autocrlf", "false"], { cwd: repoDir });
   await execFile("git", ["config", "user.email", "test@crab.dev"], { cwd: repoDir });
   await execFile("git", ["config", "user.name", "Test"], { cwd: repoDir });
 

@@ -147,6 +147,7 @@ export class DaemonServer {
   private idleTimeoutMs: number;
   private startedAt: number = Date.now();
   private disposed = false;
+  private shutdownPromise?: Promise<void>;
   private shutdownPending = false;
   private metrics: DaemonMetrics;
   private hooks: DaemonServerHooks;
@@ -270,8 +271,12 @@ export class DaemonServer {
   /**
    * Graceful shutdown: close server, disconnect clients, dispose host.
    */
-  async shutdown(opts: { killSessions: boolean } = { killSessions: false }): Promise<void> {
-    if (this.disposed) return;
+  shutdown(opts: { killSessions: boolean } = { killSessions: false }): Promise<void> {
+    this.shutdownPromise ??= this.closeResources(opts.killSessions);
+    return this.shutdownPromise;
+  }
+
+  private async closeResources(killSessions: boolean): Promise<void> {
     this.disposed = true;
 
     this.clearIdleTimer();
@@ -287,9 +292,10 @@ export class DaemonServer {
     }
     this.clients.clear();
 
-    // Dispose host (kills all sessions if requested, otherwise just releases)
-    if (opts.killSessions) {
-      this.host.dispose();
+    // Idle retirement still owns cleanup from recently stopped terminals.
+    // Preserve live sessions when shutdown is part of a descriptor handoff.
+    if (killSessions || this.host.sessionCount === 0) {
+      await this.host.dispose();
     }
 
     // Close server
@@ -843,9 +849,10 @@ export class DaemonServer {
     payload: { successorPath: string },
   ): Promise<void> {
     try {
-      // Application upgrades reuse this daemon. The adopted-fd backend cannot
-      // resize live PTYs, so replacing their owner would break running TUIs.
-      if (this.host.sessionCount > 0) {
+      // Application upgrades reuse this daemon: handed-off PTYs cannot resize.
+      // Retired resources must also close before a successor starts its bounded
+      // socket-bind retries.
+      if (this.host.sessionCount > 0 || this.host.hasPendingDisposals) {
         this.sendResponse(client, { id: requestId, ok: false, error: "Daemon replacement is deferred while terminals are running. Application updates preserve these sessions; end the terminals before replacing their daemon." });
         return;
       }

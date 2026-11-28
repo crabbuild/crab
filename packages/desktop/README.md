@@ -37,12 +37,18 @@ Terminal layouts, scrollback, and logs stay inside the app profile. Layouts
 are isolated by repository or task, including when using a separate test profile.
 Markdown uses the editor's single Edit/Preview switch; the rendered preview has
 no nested Rendered/Source toolbar.
+Activity docks below the workspace so file actions remain reachable while jobs
+are visible. File context menus stay within the viewport and scroll when needed.
+Hydration warnings remain above scrollable selection controls, with separate
+space for progress output when Activity reduces the available height.
 
 Before opening a terminal, Crab checks the durable daemon's recorded runtime.
 If that runtime has been removed, a daemon advertising guarded idle shutdown is
 replaced only when it owns no terminals. Running terminals and older v2 daemons
 without that capability are preserved. Older daemons need one explicit shutdown
 after their terminals finish; subsequent daemons support automatic idle recovery.
+Explicit daemon shutdown waits for terminal resource cleanup, including Windows
+ConPTY closure and inherited PTY descriptors, before reporting completion.
 
 The repository toolbar orders Open Repository, Open Workspace, Clone Repository,
 then More actions. Filter repositories by name or path; Escape clears the filter.
@@ -71,6 +77,8 @@ failure cleanup before exiting.
 SSH document reads and saves retain the caller's native session. A replacement
 blocks stale saves, preserves pending input, and lets the observed new runtime
 retry the editor buffer.
+Worktree detail panels inherit the selected storage connection. Opening another
+context with that same identity preserves existing repository readers.
 
 Notebook previews recapture after repository services recover and offer
 **Retry notebook** after a read failure. HTML/SVG outputs render in isolated
@@ -78,6 +86,8 @@ static documents; scripts and automatic external resource loads are disabled.
 Audio/video restore position, volume, mute, playback rate and paused/playing
 intent after reader replacement. If automatic playback is denied, the recovered
 controls remain available for manual Play.
+Hydration, restoration and dehydration publish complete files atomically while
+existing previews retain their captured bytes, including on Windows.
 
 Notebook execution uses a selected local Python environment with Jupyter Client.
 Run All waits for each cell to finish and stops on failure. Live outputs and
@@ -87,6 +97,8 @@ discovery and optional installation use that Python environment asynchronously.
 Background outputs remain attached to the current cell after it becomes idle;
 rerunning that cell retires the old route. Cancel stops pending environment
 preparation or kernel readiness/restart and joins process cleanup before retry.
+Local launch errors identify the kernel, executable and working directory,
+including Windows errors that omit the failing filename.
 Fresh-environment installation has packaged macOS proof. To run a notebook on
 Jupyter Server, check the local Python runtime, enter the server base URL with
 its token, and select **Connect to server**. Enter a kernel name or use the
@@ -206,8 +218,9 @@ its private index; disconnect waits for its cleanup acknowledgement.
 The `Desktop v2` GitHub Actions workflow builds macOS arm64/x64, Linux x64, and
 Windows x64 artifacts. Pull requests build unsigned installers and test the
 unpacked application from the same build. The Crab release workflow calls it
-again for the tagged source. All release channels, including alpha, require
-signed and notarized macOS builds and a signed Windows installer. `scripts/package.mjs` selects the matching update channel for all
+again for the tagged source. Alpha installers remain unsigned downloads.
+Beta, RC, and stable releases require signed and notarized macOS builds and a
+signed Windows installer. `scripts/package.mjs` selects the matching update channel for all
 packaging commands. Publication runs only through the release workflow.
 
 Configure these repository Actions secrets before creating a signed Crab release:
@@ -223,8 +236,10 @@ Configure these repository Actions secrets before creating a signed Crab release
 Signed releases must use the same macOS signing identity and Windows publisher
 identity as installed builds so their platform updaters accept the replacement.
 If a signing secret is missing, a signed release fails before publication.
-Previously published unsigned alpha builds require one manual installation of a
-signed release on macOS before automatic installation can work. Local unsigned
+Unsigned alpha builds require manual installation on macOS, including approval
+in Privacy & Security after the first launch attempt. Windows may show a
+publisher warning. A signed release requires one manual installation over an
+unsigned alpha on macOS before automatic installation can work. Local unsigned
 builds can check the release feed but cannot verify macOS update installation.
 
 ## Desktop updates
@@ -279,6 +294,8 @@ The OS keyring must be available; Linux's plaintext `basic_text` backend is
 refused. Listing connection metadata initializes the keyring only when an
 encrypted vault must be read. Repositories using environment credentials can
 retry transfers without initializing an unused keyring.
+Linux CI qualifies saved connections with an unlocked GNOME keyring in a private
+D-Bus session, retaining the same encryption requirement as the application.
 Unsaved form values clear on save, cancel, or provider change. Credentials
 never belong in repository URLs. Connections and local checkout selections
 survive restart; cloning records the selection for the destination checkout.
@@ -333,7 +350,9 @@ npm run test:e2e-smoke
 Keep `CARGO_TARGET_DIR` set for all Cargo invocations. Run broad tests, packaged
 smoke, and cross-platform qualification in CI or a dedicated test environment.
 The packaged smoke opens a real Git repository through the real v2 sidecar and
-checks renderer-visible repository state. The Rust browse tests also exercise a
+checks renderer-visible repository state. The renderer lifecycle gate also
+verifies that pending saves cannot recreate renamed or deleted workflow files
+before React commits the saved state. The Rust browse tests also exercise a
 native v2 object-store snapshot against an isolated S3-compatible fixture. Set
 `CRAB_SDK_TEST_S3_BUCKET` and provider environment variables to enable the
 packaged add/push/reconstruction/clone/hydrate test. The fixture must own its
@@ -387,6 +406,9 @@ location; existing Unix addresses that fit the OS limit remain unchanged.
   until the native terminal response confirms cleanup. The UI reports Stopping
   while this work drains; it does not treat signal acknowledgement as completion.
 - Renderer RPC waits for the native startup ping and surfaces startup errors.
+- Language-server discovery probes versions asynchronously, so a slow system
+  executable cannot freeze editor controls. Shutdown cancels and joins version
+  probes; stopping a language prevents a pending discovery from starting it later.
 - Dashboard and dataset metadata refresh after native repository recovery while
   retaining view controls and selection. The Datasets tab under Large Files
   supports read-only inspection before Crab storage setup; tracking and storage

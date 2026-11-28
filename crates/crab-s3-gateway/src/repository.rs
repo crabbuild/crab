@@ -30,7 +30,7 @@ struct CachedReadView {
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct CapsuleFrontier {
-    pub count: u32,
+    pub count: usize,
     pub bytes: u64,
     root_digest: [u8; 32],
 }
@@ -54,7 +54,7 @@ impl CapsuleFrontier {
         branch: &str,
     ) -> Self {
         Self {
-            count: view.ref_capsule_count(branch),
+            count: view.ref_frontier_run_count(branch),
             bytes: view.ref_frontier_bytes(branch),
             root_digest: *blake3::hash(view.root().digest().as_bytes()).as_bytes(),
         }

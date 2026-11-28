@@ -270,6 +270,9 @@ export class Agent extends EventEmitter {
     const outcomes = await Promise.allSettled([...repositories].map(repoId => {
       const opening = () => {
         const repository = this.repositories.get(repoId);
+        // Auxiliary opens often inherit an unchanged binding. Replacing a
+        // current alias would revoke its parent and retrigger worktree effects.
+        if (openedRepoId && this.storageConnections?.repositorySourceCurrent(repoId)) return;
         return repository && affected(repository, repoId) ? repository : undefined;
       };
       if (state === "changed") return this.openRepository(run, repoId, opening);

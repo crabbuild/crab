@@ -48,7 +48,7 @@ impl IndexStatUpdate {
     }
 }
 
-/// Refresh only verified paths, preserving object IDs, modes and sibling entries.
+/// Refresh verified paths, preserving object IDs, modes and sibling staging.
 ///
 /// Callers must retain the stat captured during verification, rather than
 /// capturing a later external edit. Paths are worktree-relative. A changed
@@ -68,6 +68,7 @@ pub fn refresh(root: &Path, updates: &[IndexStatUpdate]) -> Result<usize> {
     let mut index = repo
         .open_index()
         .map_err(|error| operation("read Git index stat cache", error))?;
+    let timestamp = index.timestamp();
     let updates: HashMap<_, _> = updates
         .iter()
         .map(|update| (path_bytes(&update.path), update))
@@ -81,6 +82,12 @@ pub fn refresh(root: &Path, updates: &[IndexStatUpdate]) -> Result<usize> {
             )
         {
             continue;
+        }
+        // Rewriting advances the index timestamp. Unverified entries that alias
+        // its old timestamp must retain Git's zero-size dirty-check marker, or
+        // same-size sibling edits can become falsely clean after publication.
+        if entry.stat.is_racy(timestamp, Default::default()) {
+            entry.stat.size = 0;
         }
         let Some(update) = updates.get(path.as_bytes()) else {
             continue;
@@ -241,6 +248,78 @@ mod tests {
         std::fs::write(root.join("other.txt"), "modified").expect("same-size edit");
         refresh(root, &[update]).expect("refresh");
         assert!(git(root, &["status", "--porcelain", "--", "other.txt"]).contains(" M "));
+    }
+
+    #[test]
+    fn refresh_preserves_racy_sibling_edits() {
+        for content in [b"modified".as_slice(), b""] {
+            let directory = repository();
+            let root = directory.path();
+            git(root, &["config", "core.trustctime", "false"]);
+            git(root, &["config", "core.checkStat", "minimal"]);
+            std::fs::write(root.join("verified.txt"), b"verified").expect("verified file");
+            git(root, &["add", "verified.txt"]);
+            git(root, &["commit", "--quiet", "-m", "verified"]);
+            let entries = git(root, &["ls-files", "--stage"]);
+            std::fs::write(root.join("other.txt"), content).expect("sibling edit");
+
+            // Reproduce an edit whose stat aliases the staged file, while the
+            // old index timestamp still forces Git to inspect its actual bytes.
+            let repo = crate::facade::open_at(root).expect("repository");
+            let mut index = repo.open_index().expect("index");
+            let sibling = std::fs::File::options()
+                .read(true)
+                .write(true)
+                .open(root.join("other.txt"))
+                .expect("sibling");
+            sibling
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(2))
+                .expect("sibling timestamp");
+            let metadata = gix::index::fs::Metadata::from_file(&sibling).expect("metadata");
+            let stat = gix::index::entry::Stat::from_fs(&metadata).expect("stat");
+            for (entry, path) in index.entries_mut_with_paths() {
+                if path == "other.txt" {
+                    entry.stat = stat;
+                }
+            }
+            let mut temporary =
+                tempfile::NamedTempFile::new_in(root.join(".git")).expect("index temporary");
+            index
+                .write_to(temporary.as_file_mut(), Default::default())
+                .expect("write index");
+            drop(index);
+            drop(sibling);
+            temporary.persist(repo.index_path()).expect("publish index");
+            std::fs::File::options()
+                .write(true)
+                .open(repo.index_path())
+                .expect("index timestamp")
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+                .expect("racy index");
+            let status = || {
+                git(
+                    root,
+                    &[
+                        "--no-optional-locks",
+                        "status",
+                        "--porcelain",
+                        "--",
+                        "other.txt",
+                    ],
+                )
+            };
+            let before = status();
+            assert_eq!(before, " M other.txt\n");
+
+            let output = std::fs::File::open(root.join("verified.txt")).expect("verified file");
+            let update = IndexStatUpdate::from_file("verified.txt".into(), &output, b"verified")
+                .expect("verified stat");
+            refresh(root, &[update]).expect("refresh");
+            assert_eq!(
+                (status(), git(root, &["ls-files", "--stage"])),
+                (before, entries)
+            );
+        }
     }
 
     #[test]

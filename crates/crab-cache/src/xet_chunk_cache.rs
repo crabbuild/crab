@@ -890,6 +890,8 @@ mod tests {
     #[cfg(unix)]
     mod read_repair;
 
+    #[cfg(unix)]
+    mod concurrent_publication;
     mod namespaces;
 
     fn test_key() -> Key {

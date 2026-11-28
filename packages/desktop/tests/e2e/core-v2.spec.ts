@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { parse } from "yaml";
+import { daemonDirectory } from "../../electron/daemon/daemon-sessions";
 import { PROTOCOL_VERSION } from "../../electron/daemon/protocol";
 import { call, closeFixtureDaemon, packagedExecutable } from "./packaged-app";
 
@@ -182,7 +183,7 @@ test("workflow sidebar manages files, flushes edits, and runs cross-file depende
     await page.getByRole("button", { name: "Run All", exact: true }).click();
     await expect(sidebar.getByRole("button", { name: "New workflow", exact: true })).toBeDisabled();
     await expect(files.getByRole("button").filter({ hasText: "prepare.workflow.yaml" })).toBeDisabled();
-    await expect(page.getByText("Completed", { exact: true })).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByRole("tabpanel", { name: "Editor", exact: true }).getByText("Completed", { exact: true })).toBeVisible({ timeout: 20_000 });
     expect(readFileSync(path.join(repo, "model.txt"), "utf8")).toBe("preparedtrained");
     await expect(page.getByRole("region", { name: "Workflow output", exact: true })).toContainText("prepare.package: Completed");
     await page.screenshot({ path: test.info().outputPath("workflow-cross-file-run.png") });
@@ -285,7 +286,7 @@ test("workflow commands stream output and surface failures through the packaged 
     const primary = page.getByRole("navigation", { name: "Primary", exact: true });
     await primary.getByRole("button", { name: "Data Workflows", exact: true }).click();
     await page.getByRole("button", { name: "Run All", exact: true }).click();
-    await expect(page.getByText("Completed", { exact: true })).toBeVisible();
+    await expect(page.getByRole("tabpanel", { name: "Editor", exact: true }).getByText("Completed", { exact: true })).toBeVisible();
     const output = page.getByRole("region", { name: "Workflow output", exact: true });
     await expect(output.getByText("helloxxxx", { exact: true })).toBeVisible();
     await expect(output.getByText("hhhh", { exact: true })).toBeVisible();
@@ -298,7 +299,7 @@ test("workflow commands stream output and surface failures through the packaged 
     writeFileSync(path.join(repo, "crab.yaml"), workflow.replace('cmd: "echo hhhh"', `cmd: ${JSON.stringify(failedCommand)}`));
     await primary.getByRole("button", { name: "Data Workflows", exact: true }).click();
     await page.getByRole("button", { name: "Run All", exact: true }).click();
-    await expect(page.getByText("Failed", { exact: true })).toBeVisible();
+    await expect(page.getByRole("tabpanel", { name: "Editor", exact: true }).getByText("Failed", { exact: true })).toBeVisible();
     await expect(output.getByText("stage-failure", { exact: true })).toBeVisible();
     await expect(output.getByRole("alert")).toBeVisible();
     await expect(output.getByText(/xxxx: Failed/)).toBeVisible();
@@ -327,6 +328,10 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
   const home = path.join(root, "home");
   mkdirSync(cache);
   mkdirSync(home);
+  // Search belongs to a populated library; keep its input in this owned HOME.
+  const skill = path.join(home, ".crab/desktop/skills/fixture-review");
+  mkdirSync(skill, { recursive: true });
+  writeFileSync(path.join(skill, "SKILL.md"), "---\nname: fixture-review\ndescription: Review owned smoke fixtures\n---\nRead the fixture.\n");
   const git = (args: string[]) => execFileSync("git", args, { cwd: root });
   git(["init", "--initial-branch=main"]);
   writeFileSync(path.join(root, "desktop-smoke.txt"), "Crab Desktop v2 real-sidecar smoke\n");
@@ -335,7 +340,9 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
   git(["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Desktop fixture"]);
   git(["branch", "topic"]);
   const application = await electron.launch({
-    executablePath, args: [`--user-data-dir=${path.join(root, "profile")}`],
+    // Playwright uses this flag for Chromium cookie encryption. This fixture
+    // never stores credentials and must not wait for macOS keychain prompts.
+    executablePath, args: [`--user-data-dir=${path.join(root, "profile")}`, ...(process.platform === "darwin" ? ["--use-mock-keychain"] : [])],
     env: { ...process.env, HOME: home, USERPROFILE: home, CRAB_PTY_MODE: "auto", CRAB_CACHE_DIR: cache },
   });
   try {
@@ -350,7 +357,9 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
       const bridge = (window as unknown as { crab: { rpc: (method: string, params: unknown) => Promise<{ pong?: string }> } }).crab;
       try { return (await bridge.rpc("ping", {})).pong; } catch { return undefined; }
     })).toBe(desktopVersion);
-    expect(await page.evaluate(async () => (await window.crab.getPtyMode()).resolvedMode)).toBe("daemon");
+    await expect(async () => {
+      expect(await page.evaluate(async () => (await window.crab.getPtyMode()).resolvedMode)).toBe("daemon");
+    }).toPass({ timeout: 5000 });
     const text = await page.evaluate(async root => {
       const bridge = (window as unknown as { crab: { rpc: (method: string, params: unknown) => Promise<Record<string, unknown>> } }).crab;
       const handle = await bridge.rpc("open_local", { repo_id: "smoke", path: root });
@@ -378,17 +387,17 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
     const chatNavigation = page.getByRole("navigation", { name: "Agent chat", exact: true });
     await chatNavigation.getByRole("button", { name: "Skills", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Skills", exact: true })).toBeVisible();
-    const skillSearch = page.getByPlaceholder("Search skills...");
+    const skillSearch = page.getByRole("textbox", { name: "Search skills", exact: true });
     await expect(skillSearch).toBeVisible();
     await skillSearch.fill("Unmatched skill search");
     await skillSearch.press("Enter");
     await skillSearch.fill("");
     await expect(composer).toBeHidden();
-    await page.getByRole("button", { name: "New Skill", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "New Skill", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "New skill", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "New skill", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
-    await page.getByRole("button", { name: "Install from URL", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Install Skill from URL", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Install from GitHub", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Install from GitHub", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
     await page.screenshot({ path: test.info().outputPath("skills-in-chat.png") });
     await chatNavigation.getByRole("button", { name: "Chats", exact: true }).click();
@@ -448,7 +457,7 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
     await expect(page.getByRole("heading", { name: "topic", exact: true, level: 1 })).toHaveCount(0);
     await expect(page.getByRole("tab", { name: "Worktrees", exact: true })).toHaveCount(0);
     await page.getByRole("button", { name: `View worktree ${path.basename(root)}`, exact: true }).click();
-    await expect(page.getByTitle("Close detail panel", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Close", exact: true })).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("git-worktrees.png") });
     await page.setViewportSize({ width: 880, height: 560 });
     await expect(gitNavigation.getByRole("button", { name: "Branches", exact: true })).toBeVisible();
@@ -460,7 +469,7 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
     await expect(page.getByRole("heading", { name: "topic", exact: true, level: 1 })).toBeVisible();
     await page.getByRole("button", { name: "Go forward", exact: true }).click();
     await expect(gitNavigation.getByRole("button", { name: "Worktrees", exact: true })).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByTitle("Close detail panel", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Close", exact: true })).toBeVisible();
     await expect(primary.getByRole("button", { name: "Git", exact: true })).toHaveAttribute("aria-pressed", "true");
     await page.reload();
     await expect(page.getByRole("navigation", { name: "Git", exact: true }).getByRole("button", { name: "Worktrees", exact: true })).toHaveAttribute("aria-pressed", "true");
@@ -500,7 +509,7 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
     await expect(terminalPage).toBeVisible();
     await page.keyboard.press("Control+Backquote");
     await expect(terminalPage).toBeHidden();
-    await page.getByRole("button", { name: "Open Terminal", exact: true }).click();
+    await page.getByRole("banner").getByRole("button", { name: "Terminal", exact: true }).click();
     await expect(terminalPage).toBeVisible();
     const reopenedProof = path.join(root, "terminal-reopened-proof.txt");
     await terminal.focus();
@@ -531,7 +540,7 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
 });
 
 for (const deletion of ["before-launch", "after-launch"] as const) {
-  test(`terminal recovers when an idle daemon's bundle is removed ${deletion}`, async () => {
+  test(`new daemon terminals use the current app when the previous bundle is removed ${deletion}`, async () => {
     test.skip(process.platform !== "darwin", "macOS node-pty spawns through an on-disk helper");
     test.setTimeout(120_000);
     const executablePath = packagedExecutable();
@@ -543,9 +552,10 @@ for (const deletion of ["before-launch", "after-launch"] as const) {
     mkdirSync(repository);
     execFileSync("git", ["init", "--initial-branch=main"], { cwd: repository });
     cpSync(path.resolve(path.dirname(executablePath), "../.."), previousApp, { recursive: true, verbatimSymlinks: true });
-    const env = { ...process.env, HOME: home, USERPROFILE: home, CRAB_CACHE_DIR: path.join(root, "cache") };
+    const env = { ...process.env, HOME: home, USERPROFILE: home, CRAB_CACHE_DIR: path.join(root, "cache"), CRAB_PTY_MODE: "daemon" };
     const profile = path.join(root, "profile");
-    const pidFile = path.join(home, ".crab/desktop/daemon", `daemon-v${PROTOCOL_VERSION}.pid`);
+    const controlRoot = path.join(home, ".crab/desktop/daemon");
+    let daemonStarted = false;
     let application: ElectronApplication | undefined;
     let repositoryOpened = false;
     try {
@@ -553,8 +563,14 @@ for (const deletion of ["before-launch", "after-launch"] as const) {
       let page = await application.firstWindow();
       await page.getByRole("button", { name: "Skip", exact: true }).click();
       await page.getByRole("button", { name: "No thanks", exact: true }).click();
-      await expect.poll(async () => (await page.evaluate(() => window.crab.getPtyMode())).resolvedMode).toBe("daemon");
-      const previous = JSON.parse(readFileSync(pidFile, "utf8")) as { pid: number; entryPath: string };
+      // The window opens before terminal initialization; retry IPC readiness too.
+      await expect(async () => {
+        expect((await page.evaluate(() => window.crab.getPtyMode())).resolvedMode).toBe("daemon");
+      }).toPass({ timeout: 5000 });
+      const previousEntry = path.join(await application.evaluate(() => process.resourcesPath), "app.asar/dist-electron/daemon/daemon-main.cjs");
+      const previousPidFile = path.join(daemonDirectory(controlRoot, previousEntry), `daemon-v${PROTOCOL_VERSION}.pid`);
+      const previous = JSON.parse(readFileSync(previousPidFile, "utf8")) as { pid: number; entryPath: string };
+      daemonStarted = true;
       expect(previous.entryPath.startsWith(previousApp)).toBe(true);
       const previousPid = previous.pid;
       await application.close();
@@ -563,12 +579,19 @@ for (const deletion of ["before-launch", "after-launch"] as const) {
       application = await electron.launch({ executablePath, args: [`--user-data-dir=${profile}`], env });
       page = await application.firstWindow();
       await expect.poll(async () => { try { return (await call(page, "ping", {})).pong; } catch { return undefined; } }).toBe(desktopVersion);
+      // The window opens before terminal initialization; retry IPC readiness too.
+      await expect(async () => {
+        expect((await page.evaluate(() => window.crab.getPtyMode())).resolvedMode).toBe("daemon");
+      }).toPass({ timeout: 5000 });
+      const currentEntry = path.join(await application.evaluate(() => process.resourcesPath), "app.asar/dist-electron/daemon/daemon-main.cjs");
+      const pidFile = path.join(daemonDirectory(controlRoot, currentEntry), `daemon-v${PROTOCOL_VERSION}.pid`);
+      // New spawns use the current runtime; previous owners remain independent.
+      expect(JSON.parse(readFileSync(pidFile, "utf8")).pid).not.toBe(previousPid);
       if (deletion === "after-launch") {
-        await expect.poll(async () => (await page.evaluate(() => window.crab.getPtyMode())).resolvedMode).toBe("daemon");
-        expect(JSON.parse(readFileSync(pidFile, "utf8")).pid).toBe(previousPid);
+        expect(JSON.parse(readFileSync(previousPidFile, "utf8")).pid).toBe(previousPid);
         expect(await application.evaluate((_, entry) => process.getBuiltinModule("fs").existsSync(entry), previous.entryPath)).toBe(true);
         rmSync(previousApp, { recursive: true, force: true });
-        expect(await application.evaluate((_, entry) => process.getBuiltinModule("fs").existsSync(entry), previous.entryPath)).toBe(true);
+        expect(existsSync(previousApp)).toBe(false);
       }
       const handle = await call(page, "open_local", { repo_id: "runtime-recovery", path: repository });
       await page.evaluate(({ handle, repository }) => {
@@ -590,7 +613,7 @@ for (const deletion of ["before-launch", "after-launch"] as const) {
         try { if (repositoryOpened) await closeFixtureTerminals(application, repository); }
         finally { await application.close(); }
       }
-      if (existsSync(pidFile)) await closeFixtureDaemon(home);
+      if (daemonStarted) await closeFixtureDaemon(home);
       rmSync(root, { recursive: true, force: true });
     }
   });
@@ -672,9 +695,9 @@ test("workspace sidebar filters, pins, remembers recents and restores collapse a
     await page.getByRole("button", { name: "No thanks", exact: true }).click();
     const toolbar = page.locator("aside").first();
     const toolbarActions = toolbar.getByRole("button");
-    await expect(toolbarActions.nth(0)).toHaveAttribute("title", "Open Repository");
-    await expect(toolbarActions.nth(1)).toHaveAttribute("title", "Open Workspace");
-    await expect(toolbarActions.nth(2)).toHaveAttribute("title", "Clone Repository");
+    await expect(toolbarActions.nth(0)).toHaveAccessibleName("Open Repository");
+    await expect(toolbarActions.nth(1)).toHaveAccessibleName("Open Workspace");
+    await expect(toolbarActions.nth(2)).toHaveAccessibleName("Clone Repository");
     await page.evaluate(workspace => window.crab.workspace.open(workspace), workspace);
     const region = () => page.getByRole("region", { name: "workspace workspace", exact: true });
     await expect(region().getByRole("button", { name: "Pin repo-30", exact: true })).toBeAttached();

@@ -175,7 +175,7 @@ pub struct RunArgs {
     pub env: Vec<String>,
 
     /// Run the stage with an empty environment (plus the minimum
-    /// PATH / HOME / TMPDIR injected by `workflow::env`).
+    /// PATH / HOME / TMPDIR and Windows SystemRoot).
     #[arg(long, default_value_t = false)]
     pub empty_env: bool,
 
