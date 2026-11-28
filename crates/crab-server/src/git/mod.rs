@@ -522,41 +522,73 @@ async fn write_refs<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// The smart HTTP tail of a Git transport path: everything after the
+/// repository address at the native `/git/{owner}/{name}.git/` prefix or at
+/// GitHub's `/{owner}/{name}.git/` layout, which GitHub clients build from a
+/// host and an `owner/name` pair.
+pub(crate) fn transport_tail(path: &str) -> Option<&str> {
+    // Every native path stays a Git request, even when malformed, so it keeps
+    // the Git credential challenge instead of reaching browser routes.
+    if let Some(rest) = path.strip_prefix("/git/") {
+        return Some(rest.splitn(3, '/').nth(2).unwrap_or(""));
+    }
+    let mut segments = path.strip_prefix('/')?.splitn(3, '/');
+    let (owner, name, tail) = (segments.next()?, segments.next()?, segments.next()?);
+    let smart = matches!(tail, "info/refs" | "git-upload-pack" | "git-receive-pack")
+        || tail.starts_with("info/lfs/");
+    // Reserved owners name server routes, so the alias never shadows them.
+    (smart
+        && !owner.is_empty()
+        && !crate::config::reserved_owner(owner)
+        && name
+            .strip_suffix(".git")
+            .is_some_and(|repository| !repository.is_empty()))
+    .then_some(tail)
+}
+
 pub(crate) fn routes() -> axum::Router<Arc<Server>> {
     use axum::routing::{get, post};
 
-    axum::Router::new()
-        .route(
-            "/git/{owner}/{name}/info/lfs/objects/batch",
-            post(lfs::batch).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
-        )
-        .route(
-            "/git/{owner}/{name}/info/lfs/objects/{oid}",
-            get(lfs::download).put(lfs::upload),
-        )
-        .route(
-            "/git/{owner}/{name}/info/lfs/locks",
-            get(lfs::list_locks)
-                .post(lfs::create_lock)
-                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
-        )
-        .route(
-            "/git/{owner}/{name}/info/lfs/locks/verify",
-            post(lfs::verify_locks).layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
-        )
-        .route(
-            "/git/{owner}/{name}/info/lfs/locks/{id}/unlock",
-            post(lfs::unlock_lock).layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
-        )
-        .route("/git/{owner}/{name}/info/refs", get(advertise))
-        .route(
-            "/git/{owner}/{name}/git-receive-pack",
-            post(receive::receive),
-        )
-        .route(
-            "/git/{owner}/{name}/git-upload-pack",
-            post(upload_pack).layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES)),
-        )
+    let mut router = axum::Router::new();
+    // One handler set serves both layouts; the boundary admits either form.
+    for prefix in ["/git", ""] {
+        router = router
+            .route(
+                &format!("{prefix}/{{owner}}/{{name}}/info/lfs/objects/batch"),
+                post(lfs::batch).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+            )
+            .route(
+                &format!("{prefix}/{{owner}}/{{name}}/info/lfs/objects/{{oid}}"),
+                get(lfs::download).put(lfs::upload),
+            )
+            .route(
+                &format!("{prefix}/{{owner}}/{{name}}/info/lfs/locks"),
+                get(lfs::list_locks)
+                    .post(lfs::create_lock)
+                    .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
+            )
+            .route(
+                &format!("{prefix}/{{owner}}/{{name}}/info/lfs/locks/verify"),
+                post(lfs::verify_locks).layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
+            )
+            .route(
+                &format!("{prefix}/{{owner}}/{{name}}/info/lfs/locks/{{id}}/unlock"),
+                post(lfs::unlock_lock).layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
+            )
+            .route(
+                &format!("{prefix}/{{owner}}/{{name}}/info/refs"),
+                get(advertise),
+            )
+            .route(
+                &format!("{prefix}/{{owner}}/{{name}}/git-receive-pack"),
+                post(receive::receive),
+            )
+            .route(
+                &format!("{prefix}/{{owner}}/{{name}}/git-upload-pack"),
+                post(upload_pack).layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES)),
+            );
+    }
+    router
 }
 
 #[cfg(test)]

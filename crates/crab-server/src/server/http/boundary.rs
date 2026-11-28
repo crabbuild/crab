@@ -20,6 +20,14 @@ pub(super) async fn protect(
     request: Request,
     next: Next,
 ) -> Response {
+    // GitHub API dispatch runs inside its outer request's span and metrics.
+    if request
+        .extensions()
+        .get::<crate::github::Delegated>()
+        .is_some()
+    {
+        return boundary_request(server, request, next).await;
+    }
     let request_id = Uuid::now_v7().to_string();
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
@@ -79,14 +87,24 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     if !valid_host {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let git_request = request.uri().path().starts_with("/git/");
+    // A delegated request carries the principal its outer GitHub API request
+    // authenticated. Extensions never cross the network, so none is forged.
+    let delegated = request
+        .extensions_mut()
+        .remove::<crate::github::Delegated>();
+    let github_request = delegated.is_none() && crate::github::is_api_path(request.uri().path());
+    let git_request = crate::git::transport_tail(request.uri().path()).is_some();
     let machine_request = crate::api::webhook_path(request.method(), request.uri().path())
         || crate::api::ci_git_path(request.method(), request.uri().path())
         || crate::auth::scim::machine_path(request.uri().path());
     let integration_request = integration_api_path(request.uri().path());
     let token_request = integration_request && request.headers().contains_key("authorization");
     let authentication_started = Instant::now();
-    let mut principal = if machine_request {
+    let mut bad_credentials = false;
+    let delegated_request = delegated.is_some();
+    let mut principal = if let Some(crate::github::Delegated(principal)) = delegated {
+        principal
+    } else if machine_request {
         Principal::anonymous()
     } else if let Some(grant) = internal_import {
         grant.principal(&server).await
@@ -96,6 +114,14 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
                 auth.git_principal(&server, request.headers(), git_request)
                     .await
             }
+            // Only the Authorization header authenticates GitHub API requests.
+            Some(auth) if github_request => auth
+                .api_principal(request.headers())
+                .await
+                .unwrap_or_else(|| {
+                    bad_credentials = true;
+                    Principal::anonymous()
+                }),
             Some(auth) => auth.principal(request.headers()).await,
             None => Principal::local(),
         }
@@ -105,8 +131,11 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
         event = "http_authentication_completed",
         elapsed_us = authentication_started.elapsed().as_micros(),
     );
-    let protected =
-        request.uri().path().starts_with("/api/") && request.uri().path() != "/api/session";
+    // GitHub API handlers authorize every repository they dispatch to, and
+    // anonymous callers may read public data there.
+    let protected = request.uri().path().starts_with("/api/")
+        && request.uri().path() != "/api/session"
+        && !github_request;
     let public_read = public_read_route(request.method(), request.uri())
         && !machine_request
         && (!git_request || !request.headers().contains_key("authorization"));
@@ -143,10 +172,14 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
         axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
     );
     let backchannel_logout = request.uri().path() == "/auth/backchannel-logout";
+    // Header and delegated credentials are never ambient, so they need no
+    // browser CSRF proof.
     let rejected_mutation = !backchannel_logout
         && !machine_request
         && !anonymous_membership
         && !git_request
+        && !github_request
+        && !delegated_request
         && unsafe_method
         && !principal.is_git()
         && server
@@ -171,7 +204,11 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     let redirect_kind = if machine_request || principal.import_grant().is_some() {
         None
     } else if git_request {
-        Some(moved::Kind::Git)
+        Some(if request.uri().path().starts_with("/git/") {
+            moved::Kind::Git
+        } else {
+            moved::Kind::GitHubGit
+        })
     } else if browser_repository
         && !unsafe_method
         && (requested_repository.is_some()
@@ -333,7 +370,9 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
         elapsed_us = archive_check_started.elapsed().as_micros(),
     );
     request.extensions_mut().insert(principal.clone());
-    let mut response = if denied && git_request {
+    let mut response = if bad_credentials {
+        crate::github::bad_credentials()
+    } else if denied && git_request {
         (
             StatusCode::UNAUTHORIZED,
             [(
@@ -403,13 +442,11 @@ fn public_fork_creation(method: &axum::http::Method, uri: &axum::http::Uri) -> b
 fn public_read_route(method: &axum::http::Method, uri: &axum::http::Uri) -> bool {
     use axum::http::Method;
     let path = uri.path();
-    if let Some(path) = path.strip_prefix("/git/") {
-        return path.splitn(3, '/').nth(2).is_some_and(|tail| {
-            (*method == Method::POST && tail == "git-upload-pack")
-                || (*method == Method::GET
-                    && tail == "info/refs"
-                    && uri.query() == Some("service=git-upload-pack"))
-        });
+    if let Some(tail) = crate::git::transport_tail(path) {
+        return (*method == Method::POST && tail == "git-upload-pack")
+            || (*method == Method::GET
+                && tail == "info/refs"
+                && uri.query() == Some("service=git-upload-pack"));
     }
     if !matches!(*method, Method::GET | Method::HEAD) {
         return false;

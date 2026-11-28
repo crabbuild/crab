@@ -119,6 +119,7 @@ pub(super) async fn list(
         homepage,
         license,
         is_template,
+        metadata_updated_at_ms,
         ..
     } in matches
     {
@@ -155,6 +156,8 @@ pub(super) async fn list(
             "protected_branches": protections.rules,
             "archive_version": lifecycle.version,
             "archived": lifecycle.archived,
+            "created_at_ms": repository.created_at_ms,
+            "metadata_updated_at_ms": metadata_updated_at_ms,
         });
         if let Some(organization) = repository.owning_organization() {
             view["organization_id"] = json!(organization);

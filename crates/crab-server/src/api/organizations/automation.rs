@@ -55,7 +55,8 @@ async fn list(
     Extension(principal): Extension<Principal>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<AutomationSnapshot>> {
-    if !principal.is_user() {
+    // Automation credentials are managed only from an interactive session.
+    if !principal.has_browser_session() {
         return Err(Error::SessionRequired);
     }
     let actor = actor(&server, &principal).await?;
@@ -163,7 +164,8 @@ async fn change(
     Path(id): Path<Uuid>,
     Json(input): Json<Input>,
 ) -> Result<Json<ChangeResult>> {
-    if !principal.is_user() {
+    // Automation credentials are managed only from an interactive session.
+    if !principal.has_browser_session() {
         return Err(Error::SessionRequired);
     }
     let actor = actor(&server, &principal).await?;

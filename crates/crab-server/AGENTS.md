@@ -27,6 +27,12 @@ and migration limitations.
 2. `crates/crab-server/src/server/mod.rs` — `serve`: process composition and ordered shutdown; `src/server/http/mod.rs` composes routes and `src/repository/mod.rs` owns pinned reads and maintenance.
 3. `crates/crab-server/src/app.rs` — `admit / repository`: request repository/principal boundary and error mapping.
 4. `crates/crab-server/src/auth/mod.rs` — `Authentication`: identity and configuration; `auth/principal/` owns credentials and UUID-bound current grants; `auth/state.rs` owns durable sessions, `auth/http/mod.rs` owns login/session endpoints, and `auth/transport.rs` bounds provider requests.
+   `auth/personal_tokens/` owns account-bound personal access tokens for
+   GitHub clients: issue, list, and revoke from a browser session only, and
+   verification against the account revision pinned at issuance. Tokens
+   carry no OIDC group evidence; without `repo` scope they hold no member
+   grant. The boundary accepts them only in the `Authorization` header of
+   GitHub API requests and as the Basic password on Git transport.
    `auth/deploy_tokens/` owns administrator issue and revoke plus Git-only
    authentication of read-only repository credentials. The repository Cell
    stores versioned digests and expiry. Authentication verifies each transport
@@ -465,6 +471,22 @@ private initialization; serving never creates its schema implicitly. HTTP author
 Cell error mapping stay in `src/app.rs`. No previous-runtime readers or catalog
 and session migration paths are supported.
 
+`github/` owns the GitHub-compatible REST (`/api/v3`) and GraphQL
+(`/api/graphql`) surfaces that GitHub clients such as `gh` use. `native.rs`
+dispatches each operation in process to the native routes through the shared
+boundary with a `Delegated` principal, so repository admission, grants,
+archive checks, and Cell transactions keep their native owners; never add
+repository policy here. `graphql/` is the bounded parser, validator, and
+executor; `schema.graphql` is the served GitHub subset, and a field missing
+from it fails with GitHub's own validation message, which gh uses for
+feature detection. `objects/` resolves GitHub types from native JSON, and
+REST endpoints in `rest.rs` run internal GraphQL documents against those same
+resolvers. `ids.rs` owns opaque node IDs, which embed repository UUIDs.
+`COMPATIBLE_VERSION` is the GitHub Enterprise release reported to clients;
+changing it changes which gh features run. Git also answers at GitHub's
+`/{owner}/{name}.git/` layout (`git::transport_tail`), which gh builds clone
+URLs from.
+
 ## Module layout
 
 - Use `<component>/mod.rs` for every component with child modules; keep its
@@ -549,6 +571,7 @@ and session migration paths are supported.
 | Fork pull request merges | `crates/crab-server/src/api/pulls/merge/mod.rs` | `src/git/receive/fork_merge.rs` (exact fork dependencies), `src/git/receive/publish.rs` (upstream policy and both ref leases) |
 | Commit review suggestions | `crates/crab-server/src/api/pulls/review_threads/suggestions.rs` | `src/git/receive/publish.rs` (target lease and fresh review checks), `packages/ui/src/features/pull-requests/reviews/suggestion.tsx` (destination and commit dialog) |
 | Browse APIs | `crates/crab-server/src/api/mod.rs` | `src/api/query.rs` (Git queries), `src/api/representation.rs` (encoding/ranges) |
+| GitHub API and gh compatibility | `crates/crab-server/src/github/mod.rs` | `src/github/schema.graphql` (served schema), `src/github/objects/` (resolvers), `src/github/rest.rs` (REST shapes), `src/auth/personal_tokens/mod.rs` (credentials), `src/github/tests/` (gh documents and the real-CLI test) |
 
 ## Invariants
 

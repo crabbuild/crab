@@ -63,7 +63,8 @@ async fn admin(
     key: &(String, String),
 ) -> Result<Arc<Repository>> {
     let repo = app::repository(server, principal, key)?;
-    if !principal.is_user()
+    // Issuing repository credentials needs an interactive session.
+    if !principal.has_browser_session()
         || !app::membership(server, principal, &repo)
             .await?
             .principal

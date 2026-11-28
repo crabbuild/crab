@@ -1,7 +1,7 @@
 //! Public transport composition and the shared security boundary.
 
 use super::Server;
-use crate::{api, assets, auth, git, git_import};
+use crate::{api, assets, auth, git, git_import, github};
 use axum::{Json, Router, middleware, routing::get};
 use serde_json::json;
 use std::sync::Arc;
@@ -10,12 +10,25 @@ mod boundary;
 mod moved;
 
 pub(crate) fn router(server: Arc<Server>) -> Router {
-    Router::new()
+    let native = Router::new()
         .merge(api::routes(Arc::clone(&server)))
         .merge(git_import::routes(Arc::clone(&server)))
         .merge(git::routes())
         .merge(auth::routes())
-        .merge(auth::scim::routes(Arc::clone(&server)))
+        .merge(auth::scim::routes(Arc::clone(&server)));
+    // GitHub API operations re-enter the native routes in process through the
+    // same boundary, so repository admission and policy keep one owner.
+    let dispatch = github::Dispatch(
+        native
+            .clone()
+            .layer(middleware::from_fn_with_state(
+                Arc::clone(&server),
+                boundary::protect,
+            ))
+            .with_state(Arc::clone(&server)),
+    );
+    native
+        .merge(github::routes(dispatch))
         .route("/livez", get(|| async { Json(json!({"status": "ok"})) }))
         .fallback(assets::serve)
         // Wrap every domain router and fallback in the same identity/mutation

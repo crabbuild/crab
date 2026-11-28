@@ -486,6 +486,7 @@ boundary. [DESIGN.md](DESIGN.md) covers Git publication ownership.
 | Push, handle uncertain publication, and inspect limits | [Native push](REFERENCE.md#native-git-push), [write design](DESIGN.md) |
 | Work on issues, pull requests, reviews, or merges | [Collaboration](REFERENCE.md#issues-pull-requests-and-reviews) |
 | Report CI results or enforce merge checks | [Statuses and checks](REFERENCE.md#commit-statuses-and-required-checks) |
+| Use the GitHub CLI and GitHub API clients | [GitHub API](REFERENCE.md#github-api-and-the-github-cli) |
 
 Pull request Files changed views support durable inline review threads in
 addition to the existing summary review. Members can anchor a comment to an

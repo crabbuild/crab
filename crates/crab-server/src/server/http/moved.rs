@@ -16,6 +16,8 @@ pub(super) enum Kind {
     Web,
     Api,
     Git,
+    /// Git smart HTTP at GitHub's `/{owner}/{name}.git/` layout.
+    GitHubGit,
 }
 
 pub(super) fn web_address(uri: &Uri) -> Option<(&str, &str)> {
@@ -52,6 +54,7 @@ pub(super) async fn response(
         Kind::Web => ("", ""),
         Kind::Api => ("/api/repos", ""),
         Kind::Git => ("/git", ".git"),
+        Kind::GitHubGit => ("", ".git"),
     };
     let Some(rest) = uri
         .path()

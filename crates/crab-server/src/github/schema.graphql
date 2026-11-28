@@ -1,0 +1,1026 @@
+# The GitHub GraphQL schema subset Crab serves at /api/graphql.
+#
+# Names and nullability follow GitHub's public schema so GitHub clients can
+# decode responses unchanged. Every field here resolves to Crab data or to a
+# value that is empty in Crab's model (for example, no stars). Fields absent
+# from this file fail validation with GitHub's own error message, which is how
+# clients such as gh detect optional features.
+
+scalar DateTime
+scalar URI
+scalar GitObjectID
+scalar GitTimestamp
+scalar BigInt
+
+interface Node {
+  id: ID!
+}
+
+interface UniformResourceLocatable {
+  resourcePath: URI!
+  url: URI!
+}
+
+interface Actor {
+  login: String!
+  resourcePath: URI!
+  url: URI!
+}
+
+interface RepositoryOwner {
+  id: ID!
+  login: String!
+  repositories(first: Int, after: String, last: Int, before: String, privacy: RepositoryPrivacy, visibility: RepositoryVisibility, isFork: Boolean, isArchived: Boolean, isLocked: Boolean, ownerAffiliations: [RepositoryAffiliation], affiliations: [RepositoryAffiliation], orderBy: RepositoryOrder): RepositoryConnection!
+  repository(name: String!, followRenames: Boolean): Repository
+  resourcePath: URI!
+  url: URI!
+}
+
+interface GitObject {
+  abbreviatedOid: String!
+  commitUrl: URI!
+  id: ID!
+  oid: GitObjectID!
+  repository: Repository!
+}
+
+type Query {
+  viewer: User!
+  repository(owner: String!, name: String!, followRenames: Boolean): Repository
+  repositoryOwner(login: String!): RepositoryOwner
+  user(login: String!): User
+  organization(login: String!): Organization
+  node(id: ID!): Node
+  nodes(ids: [ID!]!): [Node]!
+  search(first: Int, after: String, last: Int, before: String, query: String!, type: SearchType!): SearchResultItemConnection!
+  rateLimit(dryRun: Boolean): RateLimit
+}
+
+type Mutation {
+  addComment(input: AddCommentInput!): AddCommentPayload
+  closeIssue(input: CloseIssueInput!): CloseIssuePayload
+  reopenIssue(input: ReopenIssueInput!): ReopenIssuePayload
+  createIssue(input: CreateIssueInput!): CreateIssuePayload
+  createRepository(input: CreateRepositoryInput!): CreateRepositoryPayload
+  updateIssue(input: UpdateIssueInput!): UpdateIssuePayload
+  createPullRequest(input: CreatePullRequestInput!): CreatePullRequestPayload
+  updatePullRequest(input: UpdatePullRequestInput!): UpdatePullRequestPayload
+  closePullRequest(input: ClosePullRequestInput!): ClosePullRequestPayload
+  reopenPullRequest(input: ReopenPullRequestInput!): ReopenPullRequestPayload
+  mergePullRequest(input: MergePullRequestInput!): MergePullRequestPayload
+  addPullRequestReview(input: AddPullRequestReviewInput!): AddPullRequestReviewPayload
+  markPullRequestReadyForReview(input: MarkPullRequestReadyForReviewInput!): MarkPullRequestReadyForReviewPayload
+  convertPullRequestToDraft(input: ConvertPullRequestToDraftInput!): ConvertPullRequestToDraftPayload
+  addLabelsToLabelable(input: AddLabelsToLabelableInput!): AddLabelsToLabelablePayload
+  removeLabelsFromLabelable(input: RemoveLabelsFromLabelableInput!): RemoveLabelsFromLabelablePayload
+}
+
+type RateLimit {
+  cost: Int!
+  limit: Int!
+  nodeCount: Int!
+  remaining: Int!
+  resetAt: DateTime!
+  used: Int!
+}
+
+type PageInfo {
+  endCursor: String
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+}
+
+type User implements Node & Actor & RepositoryOwner & UniformResourceLocatable {
+  bio: String
+  company: String
+  databaseId: Int
+  email: String!
+  id: ID!
+  isSiteAdmin: Boolean!
+  isViewer: Boolean!
+  location: String
+  login: String!
+  name: String
+  organizations(first: Int, after: String, last: Int, before: String): OrganizationConnection!
+  repositories(first: Int, after: String, last: Int, before: String, privacy: RepositoryPrivacy, visibility: RepositoryVisibility, isFork: Boolean, isArchived: Boolean, isLocked: Boolean, ownerAffiliations: [RepositoryAffiliation], affiliations: [RepositoryAffiliation], orderBy: RepositoryOrder): RepositoryConnection!
+  repository(name: String!, followRenames: Boolean): Repository
+  resourcePath: URI!
+  url: URI!
+}
+
+type Bot implements Node & Actor & UniformResourceLocatable {
+  databaseId: Int
+  id: ID!
+  login: String!
+  resourcePath: URI!
+  url: URI!
+}
+
+type Organization implements Node & Actor & RepositoryOwner & UniformResourceLocatable {
+  databaseId: Int
+  description: String
+  email: String
+  id: ID!
+  login: String!
+  name: String
+  repositories(first: Int, after: String, last: Int, before: String, privacy: RepositoryPrivacy, visibility: RepositoryVisibility, isFork: Boolean, isArchived: Boolean, isLocked: Boolean, ownerAffiliations: [RepositoryAffiliation], affiliations: [RepositoryAffiliation], orderBy: RepositoryOrder): RepositoryConnection!
+  repository(name: String!, followRenames: Boolean): Repository
+  resourcePath: URI!
+  url: URI!
+  viewerCanAdminister: Boolean!
+  viewerIsAMember: Boolean!
+}
+
+type OrganizationConnection {
+  edges: [OrganizationEdge]
+  nodes: [Organization]
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type OrganizationEdge {
+  cursor: String!
+  node: Organization
+}
+
+type Team implements Node {
+  combinedSlug: String!
+  description: String
+  id: ID!
+  name: String!
+  organization: Organization!
+  slug: String!
+}
+
+type UserConnection {
+  edges: [UserEdge]
+  nodes: [User]
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type UserEdge {
+  cursor: String!
+  node: User
+}
+
+type Repository implements Node & UniformResourceLocatable {
+  archivedAt: DateTime
+  assignableUsers(first: Int, after: String, last: Int, before: String, query: String): UserConnection!
+  autoMergeAllowed: Boolean!
+  createdAt: DateTime!
+  databaseId: Int
+  defaultBranchRef: Ref
+  deleteBranchOnMerge: Boolean!
+  description: String
+  diskUsage: Int
+  hasDiscussionsEnabled: Boolean!
+  hasIssuesEnabled: Boolean!
+  hasProjectsEnabled: Boolean!
+  hasWikiEnabled: Boolean!
+  homepageUrl: URI
+  id: ID!
+  isArchived: Boolean!
+  isBlankIssuesEnabled: Boolean!
+  isDisabled: Boolean!
+  isEmpty: Boolean!
+  isFork: Boolean!
+  isInOrganization: Boolean!
+  isLocked: Boolean!
+  isPrivate: Boolean!
+  isTemplate: Boolean!
+  isUserConfigurationRepository: Boolean!
+  issue(number: Int!): Issue
+  issueOrPullRequest(number: Int!): IssueOrPullRequest
+  issues(first: Int, after: String, last: Int, before: String, labels: [String!], orderBy: IssueOrder, states: [IssueState!], filterBy: IssueFilters): IssueConnection!
+  label(name: String!): Label
+  labels(first: Int, after: String, last: Int, before: String, orderBy: LabelOrder, query: String): LabelConnection
+  mentionableUsers(first: Int, after: String, last: Int, before: String, query: String): UserConnection!
+  mergeCommitAllowed: Boolean!
+  milestone(number: Int!): Milestone
+  milestones(first: Int, after: String, last: Int, before: String, states: [MilestoneState!], orderBy: MilestoneOrder, query: String): MilestoneConnection
+  name: String!
+  nameWithOwner: String!
+  owner: RepositoryOwner!
+  parent: Repository
+  pullRequest(number: Int!): PullRequest
+  pullRequests(first: Int, after: String, last: Int, before: String, states: [PullRequestState!], labels: [String!], headRefName: String, baseRefName: String, orderBy: IssueOrder): PullRequestConnection!
+  pushedAt: DateTime
+  rebaseMergeAllowed: Boolean!
+  ref(qualifiedName: String!): Ref
+  refs(first: Int, after: String, last: Int, before: String, refPrefix: String!, query: String, direction: OrderDirection): RefConnection
+  repositoryTopics(first: Int, after: String, last: Int, before: String): RepositoryTopicConnection!
+  resourcePath: URI!
+  squashMergeAllowed: Boolean!
+  stargazerCount: Int!
+  templateRepository: Repository
+  updatedAt: DateTime!
+  url: URI!
+  viewerCanAdminister: Boolean!
+  viewerDefaultMergeMethod: PullRequestMergeMethod!
+  viewerHasStarred: Boolean!
+  viewerPermission: RepositoryPermission
+  visibility: RepositoryVisibility!
+}
+
+type RepositoryConnection {
+  edges: [RepositoryEdge]
+  nodes: [Repository]
+  pageInfo: PageInfo!
+  totalCount: Int!
+  totalDiskUsage: Int!
+}
+
+type RepositoryEdge {
+  cursor: String!
+  node: Repository
+}
+
+type RepositoryTopicConnection {
+  edges: [RepositoryTopicEdge]
+  nodes: [RepositoryTopic]
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type RepositoryTopicEdge {
+  cursor: String!
+  node: RepositoryTopic
+}
+
+type RepositoryTopic implements Node & UniformResourceLocatable {
+  id: ID!
+  resourcePath: URI!
+  topic: Topic!
+  url: URI!
+}
+
+type Topic implements Node {
+  id: ID!
+  name: String!
+}
+
+type Ref implements Node {
+  branchProtectionRule: BranchProtectionRule
+  id: ID!
+  name: String!
+  prefix: String!
+  repository: Repository!
+  target: GitObject
+}
+
+type BranchProtectionRule {
+  requiredApprovingReviewCount: Int
+  requiresApprovingReviews: Boolean!
+  requiresStrictStatusChecks: Boolean!
+}
+
+type RefConnection {
+  edges: [RefEdge]
+  nodes: [Ref]
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type RefEdge {
+  cursor: String!
+  node: Ref
+}
+
+type Commit implements Node & GitObject & UniformResourceLocatable {
+  abbreviatedOid: String!
+  authoredDate: DateTime!
+  author: GitActor
+  authors(first: Int, after: String, last: Int, before: String): GitActorConnection!
+  commitUrl: URI!
+  committedDate: DateTime!
+  committer: GitActor
+  id: ID!
+  message: String!
+  messageBody: String!
+  messageHeadline: String!
+  oid: GitObjectID!
+  repository: Repository!
+  resourcePath: URI!
+  statusCheckRollup: StatusCheckRollup
+  url: URI!
+}
+
+type GitActor {
+  date: GitTimestamp
+  email: String
+  name: String
+  user: User
+}
+
+type GitActorConnection {
+  edges: [GitActorEdge]
+  nodes: [GitActor]
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type GitActorEdge {
+  cursor: String!
+  node: GitActor
+}
+
+type Label implements Node {
+  color: String!
+  createdAt: DateTime
+  description: String
+  id: ID!
+  isDefault: Boolean!
+  name: String!
+  resourcePath: URI!
+  updatedAt: DateTime
+  url: URI!
+}
+
+type LabelConnection {
+  edges: [LabelEdge]
+  nodes: [Label]
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type LabelEdge {
+  cursor: String!
+  node: Label
+}
+
+type Milestone implements Node & UniformResourceLocatable {
+  closed: Boolean!
+  closedAt: DateTime
+  createdAt: DateTime!
+  description: String
+  dueOn: DateTime
+  id: ID!
+  number: Int!
+  progressPercentage: Float!
+  resourcePath: URI!
+  state: MilestoneState!
+  title: String!
+  updatedAt: DateTime!
+  url: URI!
+}
+
+type MilestoneConnection {
+  edges: [MilestoneEdge]
+  nodes: [Milestone]
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type MilestoneEdge {
+  cursor: String!
+  node: Milestone
+}
+
+type ReactionGroup {
+  content: ReactionContent!
+  createdAt: DateTime
+  users(first: Int, after: String, last: Int, before: String): ReactingUserConnection!
+  viewerHasReacted: Boolean!
+}
+
+type ReactingUserConnection {
+  edges: [ReactingUserEdge]
+  nodes: [User]
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type ReactingUserEdge {
+  cursor: String!
+  node: User!
+}
+
+type Issue implements Node & UniformResourceLocatable {
+  assignees(first: Int, after: String, last: Int, before: String): UserConnection!
+  author: Actor
+  authorAssociation: CommentAuthorAssociation!
+  body: String!
+  closed: Boolean!
+  closedAt: DateTime
+  comments(first: Int, after: String, last: Int, before: String): IssueCommentConnection!
+  createdAt: DateTime!
+  databaseId: Int
+  fullDatabaseId: BigInt
+  id: ID!
+  includesCreatedEdit: Boolean!
+  labels(first: Int, after: String, last: Int, before: String): LabelConnection
+  lastEditedAt: DateTime
+  milestone: Milestone
+  number: Int!
+  publishedAt: DateTime
+  reactionGroups: [ReactionGroup!]
+  repository: Repository!
+  resourcePath: URI!
+  state: IssueState!
+  stateReason: IssueStateReason
+  title: String!
+  updatedAt: DateTime!
+  url: URI!
+  viewerCanUpdate: Boolean!
+  viewerDidAuthor: Boolean!
+}
+
+type IssueConnection {
+  edges: [IssueEdge]
+  nodes: [Issue]
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type IssueEdge {
+  cursor: String!
+  node: Issue
+}
+
+type IssueComment implements Node & UniformResourceLocatable {
+  author: Actor
+  authorAssociation: CommentAuthorAssociation!
+  body: String!
+  createdAt: DateTime!
+  databaseId: Int
+  fullDatabaseId: BigInt
+  id: ID!
+  includesCreatedEdit: Boolean!
+  isMinimized: Boolean!
+  issue: Issue!
+  lastEditedAt: DateTime
+  minimizedReason: String
+  publishedAt: DateTime
+  pullRequest: PullRequest
+  reactionGroups: [ReactionGroup!]
+  repository: Repository!
+  resourcePath: URI!
+  updatedAt: DateTime!
+  url: URI!
+  viewerCanDelete: Boolean!
+  viewerCanUpdate: Boolean!
+  viewerDidAuthor: Boolean!
+}
+
+type IssueCommentConnection {
+  edges: [IssueCommentEdge]
+  nodes: [IssueComment]
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type IssueCommentEdge {
+  cursor: String!
+  node: IssueComment
+}
+
+union IssueOrPullRequest = Issue | PullRequest
+
+type PullRequest implements Node & UniformResourceLocatable {
+  additions: Int!
+  assignees(first: Int, after: String, last: Int, before: String): UserConnection!
+  author: Actor
+  authorAssociation: CommentAuthorAssociation!
+  autoMergeRequest: AutoMergeRequest
+  baseRef: Ref
+  baseRefName: String!
+  baseRefOid: GitObjectID!
+  baseRepository: Repository
+  body: String!
+  changedFiles: Int!
+  closed: Boolean!
+  closedAt: DateTime
+  comments(first: Int, after: String, last: Int, before: String): IssueCommentConnection!
+  commits(first: Int, after: String, last: Int, before: String): PullRequestCommitConnection!
+  createdAt: DateTime!
+  databaseId: Int
+  deletions: Int!
+  files(first: Int, after: String, last: Int, before: String): PullRequestChangedFileConnection
+  fullDatabaseId: BigInt
+  headRef: Ref
+  headRefName: String!
+  headRefOid: GitObjectID!
+  headRepository: Repository
+  headRepositoryOwner: RepositoryOwner
+  id: ID!
+  includesCreatedEdit: Boolean!
+  isCrossRepository: Boolean!
+  isDraft: Boolean!
+  labels(first: Int, after: String, last: Int, before: String): LabelConnection
+  lastEditedAt: DateTime
+  latestReviews(first: Int, after: String, last: Int, before: String): PullRequestReviewConnection
+  maintainerCanModify: Boolean!
+  mergeCommit: Commit
+  mergeStateStatus: MergeStateStatus!
+  mergeable: MergeableState!
+  merged: Boolean!
+  mergedAt: DateTime
+  mergedBy: Actor
+  milestone: Milestone
+  number: Int!
+  permalink: URI!
+  potentialMergeCommit: Commit
+  publishedAt: DateTime
+  reactionGroups: [ReactionGroup!]
+  repository: Repository!
+  resourcePath: URI!
+  reviewDecision: PullRequestReviewDecision
+  reviewRequests(first: Int, after: String, last: Int, before: String): ReviewRequestConnection
+  reviews(first: Int, after: String, last: Int, before: String, states: [PullRequestReviewState!], author: String): PullRequestReviewConnection
+  state: PullRequestState!
+  title: String!
+  totalCommentsCount: Int
+  updatedAt: DateTime!
+  url: URI!
+  viewerCanUpdate: Boolean!
+  viewerDidAuthor: Boolean!
+}
+
+type PullRequestConnection {
+  edges: [PullRequestEdge]
+  nodes: [PullRequest]
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type PullRequestEdge {
+  cursor: String!
+  node: PullRequest
+}
+
+type PullRequestCommit implements Node & UniformResourceLocatable {
+  commit: Commit!
+  id: ID!
+  pullRequest: PullRequest!
+  resourcePath: URI!
+  url: URI!
+}
+
+type PullRequestCommitConnection {
+  edges: [PullRequestCommitEdge]
+  nodes: [PullRequestCommit]
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type PullRequestCommitEdge {
+  cursor: String!
+  node: PullRequestCommit
+}
+
+type PullRequestChangedFile {
+  additions: Int!
+  changeType: PatchStatus!
+  deletions: Int!
+  path: String!
+}
+
+type PullRequestChangedFileConnection {
+  edges: [PullRequestChangedFileEdge]
+  nodes: [PullRequestChangedFile]
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type PullRequestChangedFileEdge {
+  cursor: String!
+  node: PullRequestChangedFile
+}
+
+type PullRequestReview implements Node & UniformResourceLocatable {
+  author: Actor
+  authorAssociation: CommentAuthorAssociation!
+  body: String!
+  commit: Commit
+  createdAt: DateTime!
+  databaseId: Int
+  fullDatabaseId: BigInt
+  id: ID!
+  includesCreatedEdit: Boolean!
+  pullRequest: PullRequest!
+  reactionGroups: [ReactionGroup!]
+  resourcePath: URI!
+  state: PullRequestReviewState!
+  submittedAt: DateTime
+  updatedAt: DateTime!
+  url: URI!
+}
+
+type PullRequestReviewConnection {
+  edges: [PullRequestReviewEdge]
+  nodes: [PullRequestReview]
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type PullRequestReviewEdge {
+  cursor: String!
+  node: PullRequestReview
+}
+
+type ReviewRequest implements Node {
+  asCodeOwner: Boolean!
+  id: ID!
+  pullRequest: PullRequest!
+  requestedReviewer: RequestedReviewer
+}
+
+type ReviewRequestConnection {
+  edges: [ReviewRequestEdge]
+  nodes: [ReviewRequest]
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type ReviewRequestEdge {
+  cursor: String!
+  node: ReviewRequest
+}
+
+union RequestedReviewer = Bot | Team | User
+
+type AutoMergeRequest {
+  authorEmail: String
+  commitBody: String
+  commitHeadline: String
+  enabledAt: DateTime
+  enabledBy: Actor
+  mergeMethod: PullRequestMergeMethod!
+  pullRequest: PullRequest!
+}
+
+type StatusCheckRollup implements Node {
+  commit: Commit
+  contexts(first: Int, after: String, last: Int, before: String): StatusCheckRollupContextConnection!
+  id: ID!
+  state: StatusState!
+}
+
+type StatusCheckRollupContextConnection {
+  checkRunCount: Int!
+  checkRunCountsByState: [CheckRunStateCount!]
+  edges: [StatusCheckRollupContextEdge]
+  nodes: [StatusCheckRollupContext]
+  pageInfo: PageInfo!
+  statusContextCount: Int!
+  statusContextCountsByState: [StatusContextStateCount!]
+  totalCount: Int!
+}
+
+type StatusCheckRollupContextEdge {
+  cursor: String!
+  node: StatusCheckRollupContext
+}
+
+type CheckRunStateCount {
+  count: Int!
+  state: CheckRunState!
+}
+
+type StatusContextStateCount {
+  count: Int!
+  state: StatusState!
+}
+
+union StatusCheckRollupContext = CheckRun | StatusContext
+
+type StatusContext implements Node {
+  context: String!
+  createdAt: DateTime!
+  description: String
+  id: ID!
+  isRequired(pullRequestId: ID, pullRequestNumber: Int): Boolean!
+  state: StatusState!
+  targetUrl: URI
+}
+
+type CheckRun implements Node & UniformResourceLocatable {
+  checkSuite: CheckSuite!
+  completedAt: DateTime
+  conclusion: CheckConclusionState
+  databaseId: Int
+  detailsUrl: URI
+  id: ID!
+  isRequired(pullRequestId: ID, pullRequestNumber: Int): Boolean!
+  name: String!
+  resourcePath: URI!
+  startedAt: DateTime
+  status: CheckStatusState!
+  summary: String
+  title: String
+  url: URI!
+}
+
+type CheckSuite implements Node {
+  id: ID!
+  workflowRun: WorkflowRun
+}
+
+type WorkflowRun implements Node {
+  databaseId: Int
+  event: String!
+  id: ID!
+  workflow: Workflow!
+}
+
+type Workflow implements Node {
+  id: ID!
+  name: String!
+}
+
+type SearchResultItemConnection {
+  codeCount: Int!
+  discussionCount: Int!
+  edges: [SearchResultItemEdge]
+  issueCount: Int!
+  nodes: [SearchResultItem]
+  pageInfo: PageInfo!
+  repositoryCount: Int!
+  userCount: Int!
+  wikiCount: Int!
+}
+
+type SearchResultItemEdge {
+  cursor: String!
+  node: SearchResultItem
+}
+
+union SearchResultItem = Issue | PullRequest | Repository | User | Organization
+
+enum CheckConclusionState { ACTION_REQUIRED CANCELLED FAILURE NEUTRAL SKIPPED STALE STARTUP_FAILURE SUCCESS TIMED_OUT }
+enum CheckRunState { ACTION_REQUIRED CANCELLED COMPLETED FAILURE IN_PROGRESS NEUTRAL PENDING QUEUED SKIPPED STALE STARTUP_FAILURE SUCCESS TIMED_OUT WAITING }
+enum CheckStatusState { COMPLETED IN_PROGRESS PENDING QUEUED REQUESTED WAITING }
+enum CommentAuthorAssociation { COLLABORATOR CONTRIBUTOR FIRST_TIMER FIRST_TIME_CONTRIBUTOR MANNEQUIN MEMBER NONE OWNER }
+enum IssueClosedStateReason { COMPLETED DUPLICATE NOT_PLANNED }
+enum IssueOrderField { COMMENTS CREATED_AT UPDATED_AT }
+enum IssueState { CLOSED OPEN }
+enum IssueStateReason { COMPLETED DUPLICATE NOT_PLANNED REOPENED }
+enum LabelOrderField { CREATED_AT NAME }
+enum MergeStateStatus { BEHIND BLOCKED CLEAN DIRTY DRAFT HAS_HOOKS UNKNOWN UNSTABLE }
+enum MergeableState { CONFLICTING MERGEABLE UNKNOWN }
+enum MilestoneOrderField { CREATED_AT DUE_DATE NUMBER UPDATED_AT }
+enum MilestoneState { CLOSED OPEN }
+enum OrderDirection { ASC DESC }
+enum PatchStatus { ADDED CHANGED COPIED DELETED MODIFIED RENAMED }
+# FAST_FORWARD is Crab's: it publishes the head commits unchanged.
+enum PullRequestMergeMethod { FAST_FORWARD MERGE REBASE SQUASH }
+enum PullRequestReviewDecision { APPROVED CHANGES_REQUESTED REVIEW_REQUIRED }
+enum PullRequestReviewEvent { APPROVE COMMENT DISMISS REQUEST_CHANGES }
+enum PullRequestReviewState { APPROVED CHANGES_REQUESTED COMMENTED DISMISSED PENDING }
+enum PullRequestState { CLOSED MERGED OPEN }
+enum PullRequestUpdateState { CLOSED OPEN }
+enum ReactionContent { CONFUSED EYES HEART HOORAY LAUGH ROCKET THUMBS_DOWN THUMBS_UP }
+enum RepositoryAffiliation { COLLABORATOR ORGANIZATION_MEMBER OWNER }
+enum RepositoryOrderField { CREATED_AT NAME PUSHED_AT STARGAZERS UPDATED_AT }
+enum RepositoryPermission { ADMIN MAINTAIN READ TRIAGE WRITE }
+enum RepositoryPrivacy { PRIVATE PUBLIC }
+enum RepositoryVisibility { INTERNAL PRIVATE PUBLIC }
+enum SearchType { DISCUSSION ISSUE REPOSITORY USER }
+enum StatusState { ERROR EXPECTED FAILURE PENDING SUCCESS }
+
+input IssueOrder {
+  direction: OrderDirection!
+  field: IssueOrderField!
+}
+
+input IssueFilters {
+  assignee: String
+  createdBy: String
+  labels: [String!]
+  mentioned: String
+  milestone: String
+  milestoneNumber: String
+  since: DateTime
+  states: [IssueState!]
+  viewerSubscribed: Boolean
+}
+
+input RepositoryOrder {
+  direction: OrderDirection!
+  field: RepositoryOrderField!
+}
+
+input LabelOrder {
+  direction: OrderDirection!
+  field: LabelOrderField!
+}
+
+input MilestoneOrder {
+  direction: OrderDirection!
+  field: MilestoneOrderField!
+}
+
+input AddCommentInput {
+  body: String!
+  clientMutationId: String
+  subjectId: ID!
+}
+
+type AddCommentPayload {
+  clientMutationId: String
+  commentEdge: IssueCommentEdge
+  subject: Node
+}
+
+input CloseIssueInput {
+  clientMutationId: String
+  duplicateIssueId: ID
+  issueId: ID!
+  stateReason: IssueClosedStateReason
+}
+
+type CloseIssuePayload {
+  clientMutationId: String
+  issue: Issue
+}
+
+input ReopenIssueInput {
+  clientMutationId: String
+  issueId: ID!
+}
+
+type ReopenIssuePayload {
+  clientMutationId: String
+  issue: Issue
+}
+
+input CreateIssueInput {
+  assigneeIds: [ID!]
+  body: String
+  clientMutationId: String
+  issueTemplate: String
+  labelIds: [ID!]
+  milestoneId: ID
+  projectIds: [ID!]
+  repositoryId: ID!
+  title: String!
+}
+
+type CreateIssuePayload {
+  clientMutationId: String
+  issue: Issue
+}
+
+input UpdateIssueInput {
+  assigneeIds: [ID!]
+  body: String
+  clientMutationId: String
+  id: ID!
+  labelIds: [ID!]
+  milestoneId: ID
+  projectIds: [ID!]
+  state: IssueState
+  title: String
+}
+
+type UpdateIssuePayload {
+  clientMutationId: String
+  issue: Issue
+}
+
+input CreatePullRequestInput {
+  baseRefName: String!
+  body: String
+  clientMutationId: String
+  draft: Boolean
+  headRefName: String!
+  headRepositoryId: ID
+  maintainerCanModify: Boolean
+  repositoryId: ID!
+  title: String!
+}
+
+type CreatePullRequestPayload {
+  clientMutationId: String
+  pullRequest: PullRequest
+}
+
+input UpdatePullRequestInput {
+  assigneeIds: [ID!]
+  baseRefName: String
+  body: String
+  clientMutationId: String
+  labelIds: [ID!]
+  maintainerCanModify: Boolean
+  milestoneId: ID
+  projectIds: [ID!]
+  pullRequestId: ID!
+  state: PullRequestUpdateState
+  title: String
+}
+
+type UpdatePullRequestPayload {
+  clientMutationId: String
+  pullRequest: PullRequest
+}
+
+input ClosePullRequestInput {
+  clientMutationId: String
+  pullRequestId: ID!
+}
+
+type ClosePullRequestPayload {
+  clientMutationId: String
+  pullRequest: PullRequest
+}
+
+input ReopenPullRequestInput {
+  clientMutationId: String
+  pullRequestId: ID!
+}
+
+type ReopenPullRequestPayload {
+  clientMutationId: String
+  pullRequest: PullRequest
+}
+
+input MergePullRequestInput {
+  authorEmail: String
+  clientMutationId: String
+  commitBody: String
+  commitHeadline: String
+  expectedHeadOid: GitObjectID
+  mergeMethod: PullRequestMergeMethod
+  pullRequestId: ID!
+}
+
+type MergePullRequestPayload {
+  clientMutationId: String
+  pullRequest: PullRequest
+}
+
+# Inline review comments are not accepted; Crab submits a review at once.
+input AddPullRequestReviewInput {
+  body: String
+  clientMutationId: String
+  commitOID: GitObjectID
+  event: PullRequestReviewEvent
+  pullRequestId: ID!
+}
+
+type AddPullRequestReviewPayload {
+  clientMutationId: String
+  pullRequestReview: PullRequestReview
+}
+
+input MarkPullRequestReadyForReviewInput {
+  clientMutationId: String
+  pullRequestId: ID!
+}
+
+type MarkPullRequestReadyForReviewPayload {
+  clientMutationId: String
+  pullRequest: PullRequest
+}
+
+input ConvertPullRequestToDraftInput {
+  clientMutationId: String
+  pullRequestId: ID!
+}
+
+type ConvertPullRequestToDraftPayload {
+  clientMutationId: String
+  pullRequest: PullRequest
+}
+
+input AddLabelsToLabelableInput {
+  clientMutationId: String
+  labelIds: [ID!]!
+  labelableId: ID!
+}
+
+type AddLabelsToLabelablePayload {
+  clientMutationId: String
+  labelable: IssueOrPullRequest
+}
+
+input RemoveLabelsFromLabelableInput {
+  clientMutationId: String
+  labelIds: [ID!]!
+  labelableId: ID!
+}
+
+type RemoveLabelsFromLabelablePayload {
+  clientMutationId: String
+  labelable: IssueOrPullRequest
+}
+
+input CreateRepositoryInput {
+  clientMutationId: String
+  description: String
+  hasIssuesEnabled: Boolean
+  hasWikiEnabled: Boolean
+  homepageUrl: URI
+  name: String!
+  ownerId: ID
+  teamId: ID
+  template: Boolean
+  visibility: RepositoryVisibility!
+}
+
+type CreateRepositoryPayload {
+  clientMutationId: String
+  repository: Repository
+}

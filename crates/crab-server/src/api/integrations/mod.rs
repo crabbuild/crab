@@ -111,7 +111,8 @@ fn admin(
     key: &(String, String),
 ) -> Result<Arc<Repository>> {
     let repo = app::repository(server, principal, key)?;
-    if !(principal.is_user() || principal.is_local()) || !principal.can_admin(repo.id) {
+    // Integration secrets are configured only from an interactive session.
+    if !(principal.has_browser_session() || principal.is_local()) || !principal.can_admin(repo.id) {
         return Err(Error::NotFound);
     }
     Ok(repo)

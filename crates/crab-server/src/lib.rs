@@ -9,6 +9,7 @@ mod cells;
 mod config;
 mod git;
 mod git_import;
+mod github;
 mod integrity;
 mod local_disk;
 mod markdown;
