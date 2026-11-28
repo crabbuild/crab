@@ -106,6 +106,14 @@ async fn automation_only_writes_its_grants_and_old_tokens_cannot_regain_access()
             .await
             .unwrap();
     assert_eq!(rest.status(), StatusCode::UNAUTHORIZED);
+    let automation_rest =
+        f.h.http
+            .get(format!("{}{endpoint}", f.h.origin))
+            .basic_auth("crab", Some(writer))
+            .send()
+            .await
+            .unwrap();
+    assert_eq!(automation_rest.status(), StatusCode::UNAUTHORIZED);
 
     let content = b"native LFS automation";
     let oid = format!("{:x}", Sha256::digest(content));
@@ -380,4 +388,18 @@ async fn automation_follows_renames_and_a_returned_repository_requires_a_new_gra
         .await
     );
     f.h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn local_operator_lists_organization_automation() {
+    let h = Harness::local().await;
+    let (organization, _) =
+        crate::test_support::http::organizations::bootstrap_local(&h, "aaaa").await;
+    let by_handle = h.json("/api/organizations/by-handle/aaaa", "").await;
+    assert_eq!(by_handle["organization"]["id"], json!(organization));
+    let snapshot = h
+        .json(&format!("/api/organizations/{organization}/automation"), "")
+        .await;
+    assert_eq!(snapshot["identities"], json!([]));
+    h.close().await;
 }

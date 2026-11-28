@@ -1410,3 +1410,95 @@ test("organization creation alert button preserves contrast and no underline in 
     await expectNoAccessibilityViolations(page);
   }
 });
+
+test("a 401 from deleted repositories or automation does not trigger an infinite refresh loop when the session stays active", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  state.organization = { ...state.organization, handle: "aaaa" };
+  let sessionAuthenticated = true;
+  let sessionCalls = 0;
+  let orgCalls = 0;
+  let deletedCalls = 0;
+  let automationCalls = 0;
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const { pathname } = new URL(request.url());
+    if (pathname === "/api/session") {
+      sessionCalls += 1;
+      return route.fulfill({
+        json: sessionAuthenticated
+          ? {
+              authenticated: true,
+              mode: "local",
+              user: null,
+              csrf: null,
+              can_sign_up: false,
+            }
+          : {
+              authenticated: false,
+              mode: "oidc",
+              user: null,
+              csrf: null,
+              can_sign_up: false,
+            },
+      });
+    }
+    if (
+      pathname === "/api/organizations/by-handle/aaaa" ||
+      pathname === `/api/organizations/${id}`
+    ) {
+      orgCalls += 1;
+      return route.fallback();
+    }
+    if (pathname === `/api/organizations/${id}/deleted-repositories`) {
+      deletedCalls += 1;
+      return route.fulfill({
+        status: 401,
+        json: {
+          error: {
+            code: "session_required",
+            message: "Sign in to use account features",
+          },
+        },
+      });
+    }
+    if (pathname === `/api/organizations/${id}/automation`) {
+      automationCalls += 1;
+      return route.fulfill({
+        status: 401,
+        json: {
+          error: {
+            code: "session_required",
+            message: "Sign in to use account features",
+          },
+        },
+      });
+    }
+    return route.fallback();
+  });
+
+  await page.goto("/aaaa?tab=deleted-repositories");
+  await expect(page.getByRole("alert")).toContainText(
+    "Sign in to use account features",
+  );
+  await page.waitForTimeout(300);
+  expect(deletedCalls).toBe(1);
+  expect(orgCalls).toBe(1);
+  expect(sessionCalls).toBeLessThanOrEqual(2);
+
+  await page.getByRole("link", { name: "Automation", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Sign in to use account features",
+  );
+  await page.waitForTimeout(300);
+  expect(automationCalls).toBe(1);
+  expect(orgCalls).toBe(1);
+  expect(sessionCalls).toBeLessThanOrEqual(3);
+
+  sessionAuthenticated = false;
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Sign in to Crab" }),
+  ).toBeVisible();
+});

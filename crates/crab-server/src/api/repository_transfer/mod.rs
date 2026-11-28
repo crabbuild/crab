@@ -128,9 +128,6 @@ struct Current {
 }
 
 pub(super) fn account(principal: &Principal) -> Result<MembershipActor> {
-    if !principal.is_user() {
-        return Err(Error::SessionRequired);
-    }
     let actor = app::account(principal)?;
     Ok(MembershipActor {
         issuer: actor.issuer,
@@ -201,16 +198,21 @@ pub(super) async fn management_access(
     actor: &MembershipActor,
     operation: Management,
 ) -> Result<SourceAccess> {
-    let auth = server.auth.as_ref().ok_or(Error::SessionRequired)?;
-    if actor.issuer != auth.issuer()
-        || auth
-            .account_state(&actor.subject)
-            .await
-            .map_err(|error| Error::IdentityAuthority(Box::new(error)))?
-            .suspended
+    let auth = server.auth.as_ref();
+    if let Some(auth) = auth
+        && (actor.issuer != auth.issuer()
+            || auth
+                .account_state(&actor.subject)
+                .await
+                .map_err(|error| Error::IdentityAuthority(Box::new(error)))?
+                .suspended)
     {
         return Ok(SourceAccess::None);
     }
+    let local_operator = auth.is_none()
+        && Principal::local()
+            .identity()
+            .is_some_and(|local| local.issuer == actor.issuer && local.subject == actor.subject);
     let (organization_admin, permitted) = if let Some(organization) = &record.organization {
         let grant = access::organization_grants_for_identity(
             server,
@@ -236,7 +238,8 @@ pub(super) async fn management_access(
     } else {
         SourceAccess::Admin
     };
-    if organization_admin
+    if local_operator
+        || organization_admin
         || record.members.iter().any(|member| {
             member.subject == actor.subject && member.access == RepositoryAccess::Admin
         })
@@ -249,7 +252,8 @@ pub(super) async fn management_access(
         .filter(|grant| grant.access == RepositoryAccess::Admin)
         .cloned()
         .collect();
-    if !admin_groups.is_empty()
+    if let Some(auth) = auth
+        && !admin_groups.is_empty()
         && auth.is_oidc()
         && auth
             .mention_group(&actor.subject, &admin_groups)
