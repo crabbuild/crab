@@ -1,4 +1,5 @@
 pub(crate) mod objects;
+pub(crate) mod templates;
 
 pub(crate) mod lfs;
 pub(crate) mod receive;

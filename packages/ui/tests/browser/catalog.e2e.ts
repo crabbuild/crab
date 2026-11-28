@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { expectNoAccessibilityViolations } from "./accessibility";
+import { expectNoAccessibilityViolations, selectTheme } from "./accessibility";
 
 const owner = "alice";
 
@@ -61,7 +61,25 @@ test("the owner picker scopes creation and import to the selected organization",
   );
   await page.goto("/-/repositories");
   await page.getByRole("button", { name: "Owner · Personal" }).click();
-  await page.getByRole("button", { name: "Crab engineering" }).click();
+  const ownerDialog = page.getByRole("dialog", {
+    name: "Choose repository owner",
+  });
+  await expect(ownerDialog).toBeVisible();
+  await expect(
+    ownerDialog.getByRole("button", { name: /Personal/ }),
+  ).toBeVisible();
+  await expect(
+    ownerDialog.getByText(/Switching owner updates both/),
+  ).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+  await page.keyboard.press("Escape");
+  await selectTheme(page, "dark");
+  await page.getByRole("button", { name: "Owner · Personal" }).click();
+  await expectNoAccessibilityViolations(page);
+  await page.keyboard.press("Escape");
+  await selectTheme(page, "light");
+  await page.getByRole("button", { name: "Owner · Personal" }).click();
+  await ownerDialog.getByRole("button", { name: /Crab engineering/ }).click();
   await page.getByRole("button", { name: "Import from Git" }).click();
   await expect(page.getByLabel("Organization", { exact: true })).toHaveValue(
     "Crab engineering",
@@ -369,4 +387,86 @@ test("a reloaded public import keeps its visibility and takes a fresh source tok
     .click();
   await expect(page).toHaveURL(`/${owner}/repo`);
   await expect(page.locator(".global-repository h1")).toContainText("repo");
+});
+
+test("new repository aligns owner and name heights and initializes readme, gitignore, and license", async ({
+  page,
+}) => {
+  await session(page);
+  await page.route("**/api/organizations", (route) =>
+    route.fulfill({ json: { next: null, items: [] } }),
+  );
+  await page.route("**/api/repos/creation", async (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        json: {
+          owner,
+          default_branch: "main",
+          visibilities: ["private", "public"],
+        },
+      });
+    }
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    expect(body.name).toBe("starter-kit");
+    expect(body.add_readme).toBe(true);
+    expect(body.gitignore_template).toBe("Rust");
+    expect(body.license_template).toBe("MIT");
+    return route.fulfill({
+      status: 201,
+      json: { id: "new-repo-id", owner, name: "starter-kit" },
+    });
+  });
+  await page.route(
+    (url) => url.pathname === "/api/repos",
+    (route) => route.fulfill({ json: { repositories: [], next: null } }),
+  );
+
+  await page.goto("/-/new");
+  const ownerButton = page.locator("#new-repository-owner");
+  const nameInput = page.locator("#new-repository-name");
+  await expect(ownerButton).toBeVisible();
+  await expect(nameInput).toBeVisible();
+  const ownerBox = await ownerButton.boundingBox();
+  const nameBox = await nameInput.boundingBox();
+  expect(ownerBox).not.toBeNull();
+  expect(nameBox).not.toBeNull();
+  expect(Math.abs(ownerBox!.height - nameBox!.height)).toBeLessThanOrEqual(1);
+
+  await nameInput.fill("starter-kit");
+
+  const readmeSwitch = page.getByRole("switch", { name: "Add README" });
+  await expect(readmeSwitch).toHaveAttribute("aria-checked", "false");
+  await readmeSwitch.click();
+  await expect(readmeSwitch).toHaveAttribute("aria-checked", "true");
+
+  await page.locator("#new-repository-gitignore").click();
+  const gitignoreSearch = page.getByPlaceholder("Search templates");
+  await expect(gitignoreSearch).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+  await gitignoreSearch.fill("Rust");
+  await page.getByRole("option", { name: "Rust", exact: true }).click();
+  await expect(page.locator("#new-repository-gitignore")).toHaveText("Rust");
+
+  await page.locator("#new-repository-license").click();
+  const licenseSearch = page.getByPlaceholder("Search licenses");
+  await expect(licenseSearch).toBeVisible();
+  await licenseSearch.fill("MIT");
+  await page.getByRole("option", { name: "MIT License", exact: true }).click();
+  await expect(page.locator("#new-repository-license")).toHaveText(
+    "MIT License",
+  );
+
+  await expect(
+    page.getByText(
+      "initialized with README.md, .gitignore (Rust), LICENSE (MIT)",
+    ),
+  ).toBeVisible();
+
+  await expectNoAccessibilityViolations(page);
+  await selectTheme(page, "dark");
+  await expectNoAccessibilityViolations(page);
+  await selectTheme(page, "light");
+
+  await page.getByRole("button", { name: "Create repository" }).click();
+  await expect(page).toHaveURL(`/${owner}/starter-kit`);
 });

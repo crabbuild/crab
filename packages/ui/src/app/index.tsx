@@ -1,3 +1,4 @@
+import { GlobeIcon, PersonIcon, RepoIcon } from "@primer/octicons-react";
 import { ProjectCommandsProvider } from "@/features/projects/commands";
 import { OrganizationProjects } from "@/features/projects/workspace";
 import { AppearanceControl, type Theme } from "@/app/theme/control";
@@ -671,6 +672,7 @@ export function App() {
                             : "page"
                         }
                       >
+                        <RepoIcon data-icon="inline-start" aria-hidden="true" />
                         All accessible
                       </Link>
                     </Button>
@@ -682,6 +684,10 @@ export function App() {
                         href="/-/repositories/personal"
                         aria-current={personalRepositories ? "page" : undefined}
                       >
+                        <PersonIcon
+                          data-icon="inline-start"
+                          aria-hidden="true"
+                        />
                         Personal
                       </Link>
                     </Button>
@@ -693,6 +699,10 @@ export function App() {
                         href="/-/public"
                         aria-current={publicRepositories ? "page" : undefined}
                       >
+                        <GlobeIcon
+                          data-icon="inline-start"
+                          aria-hidden="true"
+                        />
                         Public
                       </Link>
                     </Button>

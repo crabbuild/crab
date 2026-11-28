@@ -84,6 +84,12 @@ struct Entry<'a> {
     description: &'a str,
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     topics: &'a [String],
+    #[serde(skip_serializing_if = "str::is_empty")]
+    homepage: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    license: &'a str,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    is_template: bool,
     archived: bool,
     visibility: Visibility,
     fork: bool,
@@ -167,6 +173,7 @@ pub(super) async fn list(
     .await?;
     let property_organization = organization.filter(|_| property_filter && !scoped.is_empty());
     let mut topics = HashMap::new();
+    let mut attributes = HashMap::new();
     let mut updates = HashMap::new();
     let mut visibility = HashMap::new();
     let mut team_grants = HashMap::new();
@@ -187,6 +194,10 @@ pub(super) async fn list(
                 return None;
             }
             topics.insert(row.repository.id, row.topics);
+            attributes.insert(
+                row.repository.id,
+                (row.homepage, row.license, row.is_template),
+            );
             if let Some(time) = row.metadata_updated_at_ms {
                 updates.insert(row.repository.id, time);
             }
@@ -382,6 +393,15 @@ pub(super) async fn list(
             name: &repo.config.name,
             description: &repo.config.description,
             topics: topics.get(&repo.id).map_or(&[], Vec::as_slice),
+            homepage: attributes
+                .get(&repo.id)
+                .map_or("", |(homepage, _, _)| homepage.as_str()),
+            license: attributes
+                .get(&repo.id)
+                .map_or("", |(_, license, _)| license.as_str()),
+            is_template: attributes
+                .get(&repo.id)
+                .is_some_and(|(_, _, is_template)| *is_template),
             archived: lifecycle.archived,
             visibility: visibility.get(&repo.id).copied().unwrap_or_default(),
             fork: repo.forked_from.is_some(),

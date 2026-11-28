@@ -1,23 +1,42 @@
-import { RepoIcon } from "@primer/octicons-react";
-import { SettingsIcon } from "lucide-react";
-import { useRef, type ReactNode } from "react";
+import { LawIcon, LinkIcon, RepoIcon } from "@primer/octicons-react";
+import {
+  RotateCcwIcon,
+  SettingsIcon,
+  SlidersHorizontalIcon,
+} from "lucide-react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { RelativeTime } from "@/components/discussion/time";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { formatHomepageLabel } from "@/features/settings/attributes";
 import { endpoint, navigate, useRequest, type Repository } from "@/lib/api";
 import type { RepositoryAccess } from "@/lib/contracts";
 import { repositoryRoleLabels } from "@/lib/repository-roles";
 import { repoHref } from "@/lib/repository-route";
 import { RepositoryPropertyFilters } from "./catalog-property-filters";
-import { CatalogSearchInput, catalogQueryLimit } from "./catalog-search";
+import {
+  CatalogSearchInput,
+  catalogQueryLimit,
+  countActiveCatalogFilters,
+  stripCatalogFilters,
+} from "./catalog-search";
 import { RepositoryStateFilters } from "./catalog-state-filters";
 import { TopicLinks } from "./topic-links";
 
 type Entry = Pick<
   Repository,
-  "id" | "owner" | "name" | "description" | "archived" | "topics" | "visibility"
+  | "id"
+  | "owner"
+  | "name"
+  | "description"
+  | "homepage"
+  | "license"
+  | "is_template"
+  | "archived"
+  | "topics"
+  | "visibility"
 >;
 type Page = {
   repositories: (Entry & {
@@ -99,6 +118,10 @@ export function BrowseRepositories({
         ? "h3"
         : "h2";
   const searchInput = useRef<HTMLInputElement>(null);
+  const activeFilterCount = countActiveCatalogFilters(query);
+  const [filtersToggle, setFiltersToggle] = useState<boolean>();
+  const filtersOpen = filtersToggle ?? activeFilterCount > 0;
+  const filtersPanelId = useId();
 
   function href(search: string, next?: string) {
     const destination = new URL(url);
@@ -118,65 +141,116 @@ export function BrowseRepositories({
 
   return (
     <div className="grid min-w-0 gap-4">
-      <div className="flex flex-wrap items-start gap-2">
-        <form
-          className="flex min-w-0 flex-1 basis-80 flex-wrap items-center gap-2"
-          aria-label="Repository search"
-          role="search"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const value = new FormData(event.currentTarget).get("q");
-            const destination = href(
-              typeof value === "string" ? value.trim() : "",
-            );
-            if (destination === url.pathname + url.search) page.retry();
-            else navigate(destination);
-          }}
-        >
-          <CatalogSearchInput
-            key={query}
-            input={searchInput}
-            query={query}
-            organization={organization}
-          />
-          {/* Beside page actions, search yields the primary style to them. */}
-          <Button
-            type="submit"
-            variant={actions ? "outline" : "default"}
-            size={actions ? "default" : "sm"}
+      <div className="rounded-lg border bg-card">
+        <div className="flex flex-wrap items-center gap-2 p-3">
+          <form
+            className="flex min-w-0 flex-1 basis-80 flex-wrap items-center gap-2"
+            aria-label="Repository search"
+            role="search"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const value = new FormData(event.currentTarget).get("q");
+              const destination = href(
+                typeof value === "string" ? value.trim() : "",
+              );
+              if (destination === url.pathname + url.search) page.retry();
+              else navigate(destination);
+            }}
           >
-            Search
-          </Button>
-          {query && (
-            <Button asChild variant="ghost" size="sm">
-              <Link href={href("")}>Clear search</Link>
+            <div className="contents sm:flex sm:min-w-0 sm:flex-1 sm:items-center">
+              <CatalogSearchInput
+                key={query}
+                input={searchInput}
+                query={query}
+                organization={organization}
+                inputClassName="sm:rounded-r-none sm:border-r-0"
+              />
+              {/* Beside page actions, search yields the primary style to them. */}
+              <Button
+                type="submit"
+                variant={actions ? "outline" : "default"}
+                size="default"
+                className="sm:rounded-l-none"
+              >
+                Search
+              </Button>
+            </div>
+            <Button
+              type="button"
+              variant={
+                filtersOpen || activeFilterCount > 0 ? "secondary" : "outline"
+              }
+              size={activeFilterCount > 0 ? "default" : "icon"}
+              aria-label="Advanced search"
+              title="Advanced search"
+              aria-expanded={filtersOpen}
+              aria-controls={filtersPanelId}
+              onClick={() => setFiltersToggle(!filtersOpen)}
+            >
+              <SlidersHorizontalIcon className="size-4" aria-hidden="true" />
+              {activeFilterCount > 0 && (
+                <span className="rounded-full bg-primary px-1.5 py-0.5 text-[11px] leading-none font-semibold text-primary-foreground">
+                  {activeFilterCount}
+                </span>
+              )}
             </Button>
+            {query && (
+              <Button asChild variant="ghost" size="sm">
+                <Link href={href("")}>Clear search</Link>
+              </Button>
+            )}
+          </form>
+          {actions && (
+            // An expanded panel, such as the Git import form, takes a full row.
+            <div className="flex flex-wrap items-start gap-2 has-[>section]:basis-full [&>section]:basis-full">
+              {actions}
+            </div>
           )}
-        </form>
-        {actions && (
-          // An expanded panel, such as the Git import form, takes a full row.
-          <div className="flex flex-wrap items-start gap-2 has-[>section]:basis-full [&>section]:basis-full">
-            {actions}
+        </div>
+        {filtersOpen && (
+          <div
+            id={filtersPanelId}
+            className="grid gap-3 rounded-b-lg border-t bg-muted/30 px-3 py-3"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+              <span>
+                Filter by status, visibility, or sort order. Tip: combine with{" "}
+                <code className="rounded bg-muted px-1 py-0.5 text-foreground">
+                  topic:name
+                </code>
+              </span>
+              {activeFilterCount > 0 && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="xs"
+                  onClick={() => apply(stripCatalogFilters(query))}
+                >
+                  <RotateCcwIcon className="size-3" aria-hidden="true" />
+                  Reset filters
+                </Button>
+              )}
+            </div>
+            <RepositoryStateFilters
+              key={query}
+              query={query}
+              showVisibility={scope.kind !== "public" && !forks}
+              showFork={!forks}
+              draft={draft}
+              apply={apply}
+            />
+            {organization && (
+              <RepositoryPropertyFilters
+                organization={organization}
+                apply={(filter) => {
+                  const text = draft();
+                  return apply(text ? `${text} ${filter}` : filter);
+                }}
+              />
+            )}
           </div>
         )}
       </div>
-      <RepositoryStateFilters
-        key={query}
-        query={query}
-        showVisibility={scope.kind !== "public" && !forks}
-        showFork={!forks}
-        draft={draft}
-        apply={apply}
-      />
-      {organization && (
-        <RepositoryPropertyFilters
-          organization={organization}
-          apply={(filter) => {
-            const text = draft();
-            return apply(text ? `${text} ${filter}` : filter);
-          }}
-        />
-      )}
       <Result state={page} timingLabel="Repositories">
         {({ repositories, next }) => (
           <>
@@ -216,6 +290,9 @@ export function BrowseRepositories({
                       </RepositoryHeading>
                       {repo.archived && (
                         <Badge variant="outline">Archived</Badge>
+                      )}
+                      {repo.is_template && (
+                        <Badge variant="outline">Template</Badge>
                       )}
                       {repo.fork && !forks && (
                         <Badge variant="outline">Fork</Badge>
@@ -282,9 +359,27 @@ export function BrowseRepositories({
                       names={repo.topics}
                       href={(topic) => href(`topic:${topic}`)}
                     />
-                    {(repo.created_at_ms !== undefined ||
+                    {(repo.license ||
+                      repo.homepage ||
+                      repo.created_at_ms !== undefined ||
                       repo.metadata_updated_at_ms !== undefined) && (
-                      <p className="mt-2 flex flex-wrap gap-x-3 text-xs text-muted-foreground">
+                      <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                        {repo.license && (
+                          <span className="inline-flex items-center gap-1">
+                            <LawIcon size={14} /> {repo.license} license
+                          </span>
+                        )}
+                        {repo.homepage && (
+                          <a
+                            href={repo.homepage}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 hover:text-foreground hover:underline"
+                          >
+                            <LinkIcon size={14} />{" "}
+                            {formatHomepageLabel(repo.homepage)}
+                          </a>
+                        )}
                         {repo.created_at_ms !== undefined && (
                           <span>
                             Created <RelativeTime value={repo.created_at_ms} />

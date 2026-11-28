@@ -207,6 +207,9 @@ pub(crate) async fn materialize_record(
     repository.public_fork = record.is_public_fork();
     repository.mirror = record.mirror.as_ref().map(|mirror| mirror.source.clone());
     repository.topics.clone_from(&record.topics.names);
+    repository.homepage.clone_from(&record.attributes.homepage);
+    repository.license.clone_from(&record.attributes.license);
+    repository.is_template = record.attributes.is_template;
     Ok(repository)
 }
 

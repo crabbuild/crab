@@ -1,3 +1,4 @@
+pub(crate) mod attributes;
 pub(crate) mod audit;
 pub(crate) mod collaborators;
 pub(crate) mod deletion;
@@ -93,6 +94,8 @@ pub struct CatalogRecord {
     description_edit: Option<description::Description>,
     #[serde(default, skip_serializing_if = "topics::Topics::is_initial")]
     pub(crate) topics: topics::Topics,
+    #[serde(default, skip_serializing_if = "attributes::Attributes::is_initial")]
+    pub(crate) attributes: attributes::Attributes,
     #[serde(default, skip_serializing_if = "forking::Forking::is_initial")]
     pub(crate) forking: forking::Forking,
     // The immutable reservation intent survives later visibility changes.
@@ -448,6 +451,7 @@ impl CatalogDocument {
                 .as_ref()
                 .is_some_and(|edit| !edit.valid_saved())
                 || !record.topics.valid_saved()
+                || !record.attributes.valid_saved()
                 || !record.forking.valid_saved()
                 || !record.visibility.valid_saved()
             {
@@ -950,6 +954,12 @@ pub(crate) struct BrowserCreation {
     pub(crate) visibility: visibility::Visibility,
     #[serde(default)]
     pub(crate) properties: BTreeMap<Uuid, crate::cells::organization::properties::PropertyValue>,
+    #[serde(default)]
+    pub(crate) add_readme: bool,
+    #[serde(default)]
+    pub(crate) gitignore_template: Option<String>,
+    #[serde(default)]
+    pub(crate) license_template: Option<String>,
 }
 
 pub(crate) fn browser_repository_id(owner: &str, request_id: Uuid) -> Uuid {
@@ -1024,6 +1034,7 @@ impl CatalogStore {
             description,
             description_edit: None,
             topics: topics::Topics::default(),
+            attributes: attributes::Attributes::default(),
             forking: forking::Forking::default(),
             creation_visibility: visibility::Visibility::Private,
             visibility: visibility::Setting::default(),
@@ -1053,6 +1064,20 @@ impl CatalogStore {
         };
         let (owner, organization) = namespace.reservation_owner(&actor, &members)?;
         let id = browser_repository_id(org_id_seed.as_deref().unwrap_or(&owner), input.request_id);
+        let attributes = match input
+            .license_template
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(license) => attributes::Attributes {
+                homepage: String::new(),
+                license: license.to_owned(),
+                is_template: false,
+                version: 1,
+            },
+            None => attributes::Attributes::default(),
+        };
         self.insert_with_mode(
             CatalogRecord {
                 id,
@@ -1074,6 +1099,7 @@ impl CatalogStore {
                 description: input.description,
                 description_edit: None,
                 topics: topics::Topics::default(),
+                attributes,
                 forking: forking::Forking::default(),
                 creation_visibility: input.visibility,
                 visibility: visibility::Setting::default(),
@@ -1152,6 +1178,7 @@ impl CatalogStore {
                 description,
                 description_edit: None,
                 topics: topics::Topics::default(),
+                attributes: attributes::Attributes::default(),
                 forking: forking::Forking::default(),
                 creation_visibility: visibility,
                 visibility: visibility::Setting::default(),
@@ -1220,6 +1247,7 @@ impl CatalogStore {
             description,
             description_edit: None,
             topics: topics::Topics::default(),
+            attributes: attributes::Attributes::default(),
             forking: forking::Forking::default(),
             creation_visibility: visibility::Visibility::Private,
             visibility: visibility::Setting::default(),
@@ -1670,6 +1698,7 @@ impl CatalogStore {
                                 && existing.name == record.name
                                 && existing.description == record.description
                                 && existing.creation_visibility == record.creation_visibility
+                                && existing.attributes.license == record.attributes.license
                         }
                     };
                 return if same {
