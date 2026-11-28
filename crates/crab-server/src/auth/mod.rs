@@ -7,6 +7,7 @@ mod backchannel_logout;
 pub(crate) mod deploy_tokens;
 mod git_tokens;
 mod http;
+pub(crate) mod personal_tokens;
 pub(crate) mod scim;
 mod state;
 mod transport;
@@ -486,6 +487,7 @@ pub(crate) fn routes() -> axum::Router<std::sync::Arc<crate::server::Server>> {
                 .delete(revoke_git_tokens)
                 .layer(axum::extract::DefaultBodyLimit::max(2048)),
         )
+        .merge(personal_tokens::routes())
         .route("/api/session", get(session))
         .route("/auth/login", get(login))
         .route("/auth/callback", get(callback))

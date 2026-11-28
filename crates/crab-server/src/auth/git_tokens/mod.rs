@@ -60,12 +60,26 @@ impl Authentication {
         let Ok(decoded) = STANDARD.decode(encoded) else {
             return Principal::anonymous();
         };
-        let Some(token) = std::str::from_utf8(&decoded)
+        let Some((username, token)) = std::str::from_utf8(&decoded)
             .ok()
-            .and_then(|value| value.strip_prefix("crab:"))
+            .and_then(|value| value.split_once(':'))
         else {
             return Principal::anonymous();
         };
+        // GitHub clients send their login or `x-access-token` as the username.
+        // A personal token identifies its account itself, so any name works.
+        if super::personal_tokens::recognizes(token) {
+            return if git_transport {
+                self.verify_personal_token(token)
+                    .await
+                    .unwrap_or_else(Principal::anonymous)
+            } else {
+                Principal::anonymous()
+            };
+        }
+        if username != "crab" {
+            return Principal::anonymous();
+        }
         if super::automation::recognizes(token) {
             return if git_transport {
                 super::automation::verify(server, token)
@@ -87,6 +101,37 @@ impl Authentication {
             .await
             .map(Principal::git)
             .unwrap_or(Principal::anonymous())
+    }
+
+    /// Authenticates a GitHub API request from its `Authorization` header
+    /// alone; cookies never authenticate this surface, so it needs no CSRF
+    /// token. Absent credentials yield the anonymous principal and invalid
+    /// ones `None`, which GitHub clients expect as `401 Bad credentials`.
+    pub(crate) async fn api_principal(&self, headers: &HeaderMap) -> Option<Principal> {
+        let mut values = headers.get_all(header::AUTHORIZATION).iter();
+        let Some(value) = values.next() else {
+            return Some(Principal::anonymous());
+        };
+        if values.next().is_some() {
+            return None;
+        }
+        let value = value.to_str().ok().filter(|value| value.len() <= 1024)?;
+        let (scheme, credential) = value.split_once(' ')?;
+        let credential = credential.trim();
+        let token = if scheme.eq_ignore_ascii_case("token") || scheme.eq_ignore_ascii_case("bearer")
+        {
+            credential.to_owned()
+        } else if scheme.eq_ignore_ascii_case("basic") {
+            let decoded = STANDARD.decode(credential).ok()?;
+            let (_, password) = std::str::from_utf8(&decoded).ok()?.split_once(':')?;
+            password.to_owned()
+        } else {
+            return None;
+        };
+        if !super::personal_tokens::recognizes(&token) {
+            return None;
+        }
+        self.verify_personal_token(&token).await
     }
 
     pub(super) async fn load_git_token(&self, token_key: Key) -> Option<Arc<GitToken>> {

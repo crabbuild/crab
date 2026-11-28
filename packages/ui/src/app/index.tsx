@@ -148,15 +148,17 @@ export function App() {
             ? "notifications"
             : url.pathname === "/-/settings/git-access"
               ? "git-access"
-              : url.pathname === "/-/settings/organizations"
-                ? "organizations"
-                : url.pathname === "/-/settings/repositories"
-                  ? "repositories"
-                  : url.pathname === "/-/settings/saved-replies"
-                    ? "saved-replies"
-                    : url.pathname === "/-/settings/review-availability"
-                      ? "review-availability"
-                      : undefined;
+              : url.pathname === "/-/settings/tokens"
+                ? "tokens"
+                : url.pathname === "/-/settings/organizations"
+                  ? "organizations"
+                  : url.pathname === "/-/settings/repositories"
+                    ? "repositories"
+                    : url.pathname === "/-/settings/saved-replies"
+                      ? "saved-replies"
+                      : url.pathname === "/-/settings/review-availability"
+                        ? "review-availability"
+                        : undefined;
   const profileSettings = settingsSection !== undefined;
   const actorRoute =
     /^\/-\/users\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(\/repositories)?$/i.exec(

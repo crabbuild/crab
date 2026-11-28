@@ -20,6 +20,7 @@ enum Credential {
     Anonymous,
     Local,
     User(Arc<Session>),
+    Token(Arc<super::personal_tokens::PersonalToken>),
     Git(Arc<GitToken>),
     Automation(Arc<super::automation::Credential>),
     Deploy { expires_at: u64 },
@@ -78,6 +79,30 @@ impl Principal {
             public_read: None,
         }
     }
+    pub(super) fn token(token: Arc<super::personal_tokens::PersonalToken>) -> Self {
+        Self {
+            credential: Credential::Token(token),
+            grant: None,
+            repository_scope: RepositoryScope::Unrestricted,
+            allow_public_reads: false,
+            public_read: None,
+        }
+    }
+
+    /// The personal access token that authenticated this request, if any.
+    pub(crate) fn personal_token(&self) -> Option<&super::personal_tokens::PersonalToken> {
+        match &self.credential {
+            Credential::Token(token) if token.active() => Some(token),
+            _ => None,
+        }
+    }
+
+    /// Whether an interactive browser session made this request. Credential
+    /// issuance requires one, so a leaked token cannot mint further tokens.
+    pub(crate) fn has_browser_session(&self) -> bool {
+        self.user_session().is_some()
+    }
+
     pub(super) fn git(token: Arc<GitToken>) -> Self {
         Self {
             credential: Credential::Git(token),
@@ -245,14 +270,18 @@ impl Principal {
         // token or worker scoped to the origin cannot read another repository.
         if let Some(session) = self.user_session() {
             Some(Self::user(Arc::clone(session)))
+        } else if let Credential::Token(token) = &self.credential {
+            Some(Self::token(Arc::clone(token)))
         } else if self.is_local() {
             Some(Self::local())
         } else {
             None
         }
     }
+    /// Whether a human account is acting, through a browser session or its
+    /// own personal access token.
     pub(crate) fn is_user(&self) -> bool {
-        self.user_session().is_some()
+        self.user_session().is_some() || self.personal_token().is_some()
     }
     pub(crate) fn is_git(&self) -> bool {
         matches!(
@@ -274,6 +303,7 @@ impl Principal {
             Credential::Anonymous => false,
             Credential::Local | Credential::Import(_) | Credential::AutoMerge(_) => true,
             Credential::User(session) => session.active(),
+            Credential::Token(token) => token.active(),
             Credential::Git(token) => token.active(),
             Credential::Automation(credential) => credential.active(),
             Credential::Deploy { expires_at } => {
@@ -284,6 +314,7 @@ impl Principal {
     pub(crate) fn identity(&self) -> Option<Identity> {
         match &self.credential {
             Credential::User(session) if session.active() => Some(session.identity.clone()),
+            Credential::Token(token) if token.active() => Some(token.identity().clone()),
             Credential::Git(token) if token.active() => Some(token.session.identity.clone()),
             Credential::Automation(credential) if credential.active() => {
                 Some(credential.identity())
@@ -332,6 +363,11 @@ impl Principal {
                 session.groups.as_slice(),
                 RepositoryAccess::Admin,
             )),
+            // Tokens never carry provider group evidence. Without `repo`
+            // scope they hold no member grant and read only public data.
+            Credential::Token(token) if token.active() => token
+                .ceiling()
+                .map(|ceiling| (token.identity(), &[][..], ceiling)),
             Credential::Git(token)
                 if token.active()
                     && token.repository_id == repository

@@ -43,6 +43,7 @@ pub(crate) async fn serve(request: Request) -> Response {
             | "appearance"
             | "notifications"
             | "git-access"
+            | "tokens"
             | "organizations"
             | "repositories"
             | "saved-replies"

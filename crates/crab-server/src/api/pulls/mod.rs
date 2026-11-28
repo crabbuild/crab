@@ -838,6 +838,8 @@ fn merge_requirements(
 }
 
 pub(super) fn pull_list_view(
+    server: &Server,
+    repo: &Repository,
     authors: &super::profiles::attribution::Authors,
     pull: &PullSummary,
     labels: &[crate::cells::repository::search::index::LabelSummary],
@@ -854,7 +856,7 @@ pub(super) fn pull_list_view(
                 .ok_or(Error::CellContract("Pull rollup is missing"))?,
         )
     };
-    Ok(json!({
+    let mut view = json!({
         "kind": "pull",
         "rollup": rollup,
         "draft": pull.draft,
@@ -873,7 +875,19 @@ pub(super) fn pull_list_view(
         "updated_at": pull.updated_at_ms,
         "labels": pull.label_ids.iter().filter_map(|id|labels.iter().find(|label|label.id==*id)).collect::<Vec<_>>(),
         "assignees": assignees.view(&pull.assignees),
-    }))
+    });
+    // Only fork pull requests name a head repository, with the detail
+    // view's disclosure: public readers never learn a fork's address, and a
+    // detached fork resolves to none.
+    if let Some(fork) = pull
+        .head_repository
+        .filter(|_| !public_reader)
+        .and_then(|id| git::fork_repository(server, repo, id).ok())
+    {
+        view["head_repository"] =
+            json!({"id": fork.id, "owner": fork.config.owner, "name": fork.config.name});
+    }
+    Ok(view)
 }
 
 async fn list(
@@ -931,6 +945,8 @@ async fn list(
         .iter()
         .map(|pull| {
             pull_list_view(
+                &server,
+                repo,
                 &authors,
                 pull,
                 &page.labels,

@@ -198,6 +198,8 @@ async fn list(
                 issue_types::visible(&repo, issue.issue_type, types),
             )),
             DiscussionSummary::Pull(pull) => super::pulls::pull_list_view(
+                &server,
+                &repo,
                 &authors,
                 pull,
                 &page.labels,

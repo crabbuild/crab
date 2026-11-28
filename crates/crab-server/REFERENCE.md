@@ -23,6 +23,7 @@ Use this map to enter the reference without reading it in order.
 | Push branches and tags | [Native Git push](#native-git-push) |
 | Use issues, pulls, reviews, labels, or assignees | [Issues, pull requests and reviews](#issues-pull-requests-and-reviews) |
 | Report continuous integration (CI) results | [Commit statuses and required checks](#commit-statuses-and-required-checks) |
+| Use the GitHub CLI or GitHub API clients | [GitHub API and the GitHub CLI](#github-api-and-the-github-cli) |
 | Inspect limits and failure behavior | [Resource and lifecycle limits](#resource-and-lifecycle-limits) |
 | Run verification | [Current verification](#current-verification) |
 | Assess release readiness | [Completion requirements](#completion-requirements) |
@@ -6022,6 +6023,107 @@ even if policy or check results have since changed.
 Update the repository Cell peers and bundled UI together for the check snapshot
 read. Rules containing only named Crab contexts retain their existing storage
 representation.
+
+## GitHub API and the GitHub CLI
+
+Crab serves a GitHub Enterprise-compatible API so GitHub clients work without
+new tooling: GraphQL at `/api/graphql`, REST at `/api/v3`, and smart HTTP Git
+at GitHub's `https://HOST/OWNER/NAME.git` layout as well as `/git/`. The GitHub
+CLI addresses any non-github.com host this way. Each operation is translated
+into native API requests that pass the same boundary as the browser, so
+repository grants, rulesets, archive state, and audit apply unchanged.
+
+### Create a personal access token
+
+Open **Settings → Personal access tokens**, or call the session API, which
+accepts only an interactive browser session (a token cannot mint tokens):
+
+```http
+POST /api/personal-access-tokens
+{"name": "GitHub CLI", "scopes": ["repo", "read:org", "gist"], "expires_in_days": 30}
+```
+
+The response contains `token` once; Crab stores only its digest. `GET` lists
+your tokens and `DELETE /api/personal-access-tokens/{id}` revokes one. Tokens
+expire after 1 to 366 days, and at most 50 exist per account.
+
+| Scope | Effect |
+| --- | --- |
+| `repo` | Repository access up to your current role. Without it, a token reads public repositories only. |
+| `read:org` | Organization and team membership reads. `write:org` and `admin:org` grant the same. |
+| `delete_repo` | Repository deletion, which also needs the administrator role. |
+| `gist`, `workflow` | Accepted so GitHub CLI's scope check passes; they grant nothing. |
+
+A token acts as its account, but carries no identity-provider group claims:
+only individual, organization, and team grants apply. Issuance pins the
+account's lifecycle revision, so suspension or a SCIM deactivation revokes
+the token for good, like browser sessions. Tokens authenticate only the
+`Authorization` header of GitHub API requests (`token`, `Bearer`, or Basic)
+and the Basic password of Git transport with any username. Cookies never
+authenticate the GitHub API, so it needs no CSRF proof.
+
+### Sign in with the GitHub CLI
+
+```sh
+gh auth login --hostname crab.example.com --with-token < token.txt
+gh auth setup-git --hostname crab.example.com
+gh repo clone crab.example.com/OWNER/NAME
+```
+
+`gh auth setup-git` lets gh answer Git credential prompts with the token.
+Inside a clone, gh resolves the host and repository from the `origin` remote.
+Without a terminal, `gh pr create` opens a pull request only for a branch
+that is already pushed, so scripts run `git push -u origin BRANCH` first.
+
+### Know the compatibility contract
+
+`GET /api/v3/meta` reports `installed_version` `3.17.0`, and responses carry
+`X-GitHub-Enterprise-Version`; gh enables features by this version and by
+introspecting the schema. GraphQL validates documents before execution: a
+field Crab does not serve fails with GitHub's own message, such as `Field
+'projectItems' doesn't exist on type 'Issue'`, which gh already tolerates.
+Node IDs are opaque and embed the repository UUID, so a stale ID never acts on
+a repository that reuses the same address. Numeric REST IDs are stable,
+JavaScript-safe, and only comment IDs are addressable. Lists use cursor
+pagination: follow the `Link` header (`after=`); page numbers beyond the first
+are rejected rather than walked. Rate-limit headers report an unused
+allowance because Crab enforces none per token.
+
+Pull request branches use GitHub's short names, and `headRefName` filters
+match a branch exactly. A pull request opened from a fork, through
+`owner:branch` or `headRepositoryId`, binds the base and head commits current
+at the request, as the browser's comparison step does. Review requests list
+people and teams; Crab teams have no slug, so a team's `slug` is its UUID.
+
+### Know what is covered
+
+These GitHub CLI workflows are exercised end to end by
+`github::tests::gh` and the document tests beside it: `auth login`, `auth
+status`, `auth setup-git`, `api`, `repo create`, `repo clone`, `repo view`,
+`repo list`, `label create` and `list`, `issue create`, `list`, `view`,
+`comment`, `close`, and `reopen`, and `pr create`, `list`, `view`, `diff`,
+`review`, `checkout`, and `merge --delete-branch`. REST covers users,
+organizations, repositories, README, branches, branch deletion, labels,
+issues, comments, pull requests, diffs, files, and merges. REST pull request
+listings omit `requested_reviewers`, `requested_teams`, and `auto_merge`;
+read a single pull request for them.
+
+Known gaps, each reported as an explicit error rather than a guess:
+
+- Projects, gists, Actions workflows, releases, and stars are not served.
+- Requesting reviewers (`gh pr create --reviewer`, `gh pr edit
+  --add-reviewer`) and forking (`gh repo fork`) are not served yet; use the
+  browser for both.
+- `mergeable` is `UNKNOWN`: Crab detects conflicts when a merge runs.
+- Search requires a `repo:` qualifier; global issue search and repository or
+  user search use the REST listing endpoints instead.
+- Changing a pull request's base branch, closing as a duplicate, and filtering
+  by mention or subscription are rejected.
+- Reviews are submitted at once: pending reviews and inline review comments
+  are not accepted through the GitHub API.
+- Crab publishes no `refs/pull/N/head` refs, so `gh pr checkout` of a fork's
+  pull request needs a remote for that fork.
+- `gh auth login --web` is not offered; sign in with a token.
 
 ## Resource and lifecycle limits
 
