@@ -552,3 +552,124 @@ test("a proven input rejection releases the form so it can be corrected", async 
     fixture.submissions[0].request_id,
   );
 });
+
+test("project creation modal renders distinct layout and field previews in light and dark themes", async ({
+  page,
+}) => {
+  await setup(page);
+  await page.route("**/api/repos/team/project/projects/templates*", (route) =>
+    route.fulfill({
+      json: {
+        items: [
+          {
+            id: "table",
+            description: "Start with a flexible list of work.",
+            definition: {
+              ...definition,
+              name: "Table",
+              statuses: ["Todo", "In progress", "Done"],
+              fields: [],
+              views: [{ ...views[0], name: "Table", layout: "table" }],
+            },
+          },
+          {
+            id: "board",
+            description: "Move work through a visual workflow.",
+            definition: {
+              ...definition,
+              name: "Board",
+              statuses: ["Todo", "In progress", "Done"],
+              fields: [],
+              views: [{ ...views[1], name: "Board", layout: "board" }],
+            },
+          },
+          {
+            id: "roadmap",
+            description: "Plan work over time with start and target dates.",
+            definition: {
+              ...definition,
+              name: "Roadmap",
+              statuses: ["Planned", "In progress", "Shipped"],
+              fields: [],
+              views: [{ ...views[2], name: "Roadmap", layout: "roadmap" }],
+            },
+          },
+          {
+            id: "team-planning",
+            description: "Prioritize your backlog and plan the next cycle.",
+            definition: {
+              ...definition,
+              name: "Team planning",
+              statuses: ["Backlog", "Ready", "In progress", "Done"],
+              fields: [
+                { id: "cycle", name: "Cycle", definition: { kind: "text" } },
+                {
+                  id: "estimate",
+                  name: "Estimate",
+                  definition: { kind: "number" },
+                },
+              ],
+              views: [{ ...views[0], name: "Team planning", layout: "table" }],
+            },
+          },
+          {
+            id: "bug-tracker",
+            description: "Triage, prioritize, and resolve reported problems.",
+            definition: {
+              ...definition,
+              name: "Bug tracker",
+              statuses: [
+                "Triage",
+                "Confirmed",
+                "In progress",
+                "Fixed",
+                "Won't fix",
+              ],
+              fields: [
+                {
+                  id: "severity",
+                  name: "Severity",
+                  definition: {
+                    kind: "select",
+                    options: ["Critical", "High", "Medium", "Low"],
+                  },
+                },
+              ],
+              views: [{ ...views[1], name: "Bug tracker", layout: "board" }],
+            },
+          },
+        ],
+      },
+    }),
+  );
+
+  await page.goto("/team/project/projects");
+  await page.getByRole("button", { name: "New project", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Create a project" });
+  await expect(dialog).toBeVisible();
+
+  await expect(dialog.locator('[data-preview-layout="table"]')).toHaveCount(2);
+  await expect(dialog.locator('[data-preview-layout="board"]')).toHaveCount(2);
+  await expect(dialog.locator('[data-preview-layout="roadmap"]')).toHaveCount(
+    1,
+  );
+
+  const teamPlanningCard = dialog.locator(".project-template-choice", {
+    hasText: "Team planning",
+  });
+  await expect(teamPlanningCard).toContainText("Cycle");
+  await expect(teamPlanningCard).toContainText("Estimate");
+
+  const bugTrackerCard = dialog.locator(".project-template-choice", {
+    hasText: "Bug tracker",
+  });
+  await expect(bugTrackerCard).toContainText("Severity");
+  await expect(bugTrackerCard).toContainText("+2 more lanes");
+
+  await expectNoAccessibilityViolations(page);
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await selectDarkTheme(page);
+  await page.getByRole("button", { name: "New project", exact: true }).click();
+  await expect(dialog).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+});
