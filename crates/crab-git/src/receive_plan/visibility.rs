@@ -35,8 +35,8 @@ pub type CommitObserver<'a> = dyn FnMut(ObjectId, &[u8]) -> Result<()> + Send + 
 /// A trusted object's existence alone cannot stop reachability traversal.
 /// Call after `validate`, on a blocking worker, with the same pinned source and
 /// caller-provided bounds. This proves visibility, not ref policy or publication.
-pub fn plan_visibility<S: VisibilitySource, C: Fn() -> bool>(
-    incoming: &IncomingPack,
+pub fn plan_visibility<R: Received, S: VisibilitySource, C: Fn() -> bool>(
+    incoming: &R,
     new: ObjectId,
     source: &mut S,
     limits: GraphLimits,
@@ -46,8 +46,8 @@ pub fn plan_visibility<S: VisibilitySource, C: Fn() -> bool>(
 }
 
 /// Computes exact ref reachability and optionally observes newly reachable commits.
-pub fn plan_visibility_with_commits<S: VisibilitySource, C: Fn() -> bool>(
-    incoming: &IncomingPack,
+pub fn plan_visibility_with_commits<R: Received, S: VisibilitySource, C: Fn() -> bool>(
+    incoming: &R,
     new: ObjectId,
     source: &mut S,
     limits: GraphLimits,
@@ -88,7 +88,7 @@ pub fn plan_visibility_with_commits<S: VisibilitySource, C: Fn() -> bool>(
     })
 }
 
-impl<S: VisibilitySource, C: Fn() -> bool> Validator<'_, S, C> {
+impl<R: Received, S: VisibilitySource, C: Fn() -> bool> Validator<'_, R, S, C> {
     fn prior_contains(&mut self, oid: ObjectId) -> Result<bool> {
         self.source
             .in_prior_closure(&oid)
@@ -115,7 +115,7 @@ impl<S: VisibilitySource, C: Fn() -> bool> Validator<'_, S, C> {
             };
             let kind = match visited {
                 Some(kind) => kind,
-                None if self.incoming.object(&oid).is_some() => {
+                None if self.incoming.size(&oid).is_some() => {
                     self.load_observing(oid, observer.as_deref_mut())?.kind
                 }
                 None => match self.trusted_kind(oid)? {

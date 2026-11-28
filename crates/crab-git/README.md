@@ -46,7 +46,8 @@ The main surfaces are:
 - `url`, `discover`, `ref_resolve`, `refname`, and `worktree` for repository
   identity and local Git layout;
 - `receive_plan` for exact atomic ref comparisons, policy checks and bounded
-  commit/tree/tag connectivity with generation-pinned proof frontiers;
+  commit/tree/tag connectivity with generation-pinned proof frontiers, over a
+  quarantined pack or `VerifiedObjects` parsed while a fetched pack streams;
 - `receive_wire` for bounded native receive commands, advertisements and atomic
   status framing without consuming the following pack;
 - `incoming_pack` for bounded full/thin-pack quarantine, with injected authorized

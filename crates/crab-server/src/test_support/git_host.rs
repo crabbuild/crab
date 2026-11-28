@@ -29,6 +29,7 @@ pub(crate) struct GitHost {
     pub(crate) origin: String,
     lfs: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
     fetches: Arc<AtomicUsize>,
+    token: Arc<Mutex<Option<String>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -44,6 +45,7 @@ struct Served {
     origin: Arc<String>,
     lfs: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
     fetches: Arc<AtomicUsize>,
+    token: Arc<Mutex<Option<String>>>,
 }
 
 impl GitHost {
@@ -53,11 +55,13 @@ impl GitHost {
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let lfs = Arc::new(Mutex::new(BTreeMap::new()));
         let fetches = Arc::new(AtomicUsize::new(0));
+        let token = Arc::new(Mutex::new(None));
         let state = Served {
             root: Arc::new(root.to_owned()),
             origin: Arc::new(origin.clone()),
             lfs: Arc::clone(&lfs),
             fetches: Arc::clone(&fetches),
+            token: Arc::clone(&token),
         };
         let app = Router::new()
             .route("/{repository}/info/refs", get(advertise))
@@ -72,8 +76,14 @@ impl GitHost {
             origin,
             lfs,
             fetches,
+            token,
             task,
         }
+    }
+
+    /// Require `Authorization: Bearer <token>` for Git and LFS batch requests.
+    pub(crate) fn require_token(&self, token: &str) {
+        *self.token.lock().unwrap() = Some(token.to_owned());
     }
 
     /// Clone URL for `root/<name>`.
@@ -98,6 +108,16 @@ impl GitHost {
     }
 }
 
+fn authorized(state: &Served, headers: &HeaderMap) -> bool {
+    let expected = state.token.lock().unwrap().clone();
+    expected.is_none_or(|token| {
+        headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            == Some(format!("Bearer {token}").as_str())
+    })
+}
+
 fn repository(state: &Served, name: &str) -> Option<PathBuf> {
     let name = name.strip_suffix(".git")?;
     (!name.contains(['/', '\\']) && !name.starts_with('.')).then(|| state.root.join(name))
@@ -108,6 +128,9 @@ async fn advertise(
     Route(name): Route<String>,
     headers: HeaderMap,
 ) -> Response {
+    if !authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     let Some(directory) = repository(&state, &name) else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -126,6 +149,9 @@ async fn upload_pack(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if !authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     let Some(directory) = repository(&state, &name) else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -177,8 +203,12 @@ async fn run(directory: &Path, headers: &HeaderMap, advertise: bool, input: Byte
 async fn batch(
     State(state): State<Served>,
     Route(_): Route<String>,
+    headers: HeaderMap,
     Json(request): Json<Value>,
 ) -> Response {
+    if !authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     let lfs = state.lfs.lock().unwrap();
     let objects = request["objects"]
         .as_array()

@@ -421,6 +421,12 @@ async fn import_source(
             .await?;
     }
     let repository = open_destination(catalog, &record, &snapshot).await?;
+    if request.mirror
+        && let Some(token) = request.token.as_deref()
+    {
+        // Unattended syncs need the token after this request's memory is gone.
+        super::mirror::store_credential(server, record.id, &request.source, token).await?;
+    }
     let root = catalog.root();
     let staging = root.path(&format!(
         ".crab/http-server/v1/git-imports/staging/{id}.pack"
@@ -730,9 +736,20 @@ async fn validate_destination_policy(
         return Err(ImportError::DestinationChanged);
     }
     let rules = ImportRules::load(server, &repository, owner, fork).await?;
-    rules.check(view.refs().keys().map(String::as_str), view.head(), |_| {
-        false
-    })?;
+    let creations = view
+        .refs()
+        .iter()
+        .map(|(name, oid)| {
+            Ok(crab_git::receive_plan::RefUpdate {
+                name: name.clone(),
+                old: None,
+                new: Some(gix_hash::ObjectId::from_hex(oid.as_bytes()).map_err(|_| {
+                    ImportError::Git("The import destination holds an invalid ref target".into())
+                })?),
+            })
+        })
+        .collect::<Result<Vec<_>, ImportError>>()?;
+    rules.check(&creations, view.head(), &Default::default(), |_| false)?;
     Ok((rules.inherited.version, baseline))
 }
 
@@ -782,17 +799,67 @@ impl ImportRules {
         })
     }
 
-    /// Reject refs whose creation a ruleset restricts or whose history it requires to be linear.
+    /// Inherited rulesets for the server's own mirror sync, which bypasses none.
+    pub(super) async fn unattended(
+        server: &Server,
+        repository: &Repository,
+    ) -> Result<Self, ImportError> {
+        Ok(Self {
+            inherited: crate::repository::settings::inherited_rulesets(server, repository)
+                .await
+                .map_err(ImportError::organization)?,
+            organization_owner: false,
+            teams: Vec::new(),
+        })
+    }
+
+    /// Reject updates an inherited ruleset prohibits for this importer.
     ///
-    /// `nonlinear` reports whether a ref's first-parent history contains a merge.
-    pub(super) fn check<'a>(
+    /// Creation, update, and deletion restrictions apply as for a push; refs in
+    /// `rewritten` must also allow force pushes, and `nonlinear` reports whether
+    /// an updated ref's new history adds a merge to a ref that requires none.
+    pub(super) fn check(
         &self,
-        refs: impl Iterator<Item = &'a str>,
+        updates: &[crab_git::receive_plan::RefUpdate],
         head: &str,
+        rewritten: &std::collections::BTreeSet<String>,
         nonlinear: impl Fn(&str) -> bool,
     ) -> Result<(), ImportError> {
-        use crate::cells::repository::rulesets::{ActiveRulesets, BypassContext};
-        let actor = BypassContext {
+        let actor = self.actor();
+        let rules = self.active()?;
+        for update in updates {
+            if rules.matches(&update.name, head).any(|rule| {
+                (rule.violation(update, false).is_some()
+                    || (rewritten.contains(&update.name) && rule.blocks_force_push())
+                    || (rule.require_linear_history
+                        && update.new.is_some()
+                        && nonlinear(&update.name)))
+                    && !rule.allows_bypass(actor, false)
+            }) {
+                return Err(ImportError::Ruleset);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether an inherited ruleset requires linear history on `reference`.
+    pub(super) fn requires_linear(&self, reference: &str, head: &str) -> bool {
+        self.active().is_ok_and(|rules| {
+            rules
+                .matches(reference, head)
+                .any(|rule| rule.require_linear_history)
+        })
+    }
+
+    fn active(
+        &self,
+    ) -> Result<crate::cells::repository::rulesets::ActiveRulesets<'_>, ImportError> {
+        crate::cells::repository::rulesets::ActiveRulesets::new(&self.inherited)
+            .map_err(|error| ImportError::organization(crate::app::Error::Cell(error)))
+    }
+
+    fn actor(&self) -> crate::cells::repository::rulesets::BypassContext<'_> {
+        crate::cells::repository::rulesets::BypassContext {
             role: Some(if self.organization_owner {
                 RepositoryAccess::Admin
             } else {
@@ -801,18 +868,7 @@ impl ImportRules {
             organization_owner: self.organization_owner,
             teams: &self.teams,
             organization_teams: &self.teams,
-        };
-        let rules = ActiveRulesets::new(&self.inherited)
-            .map_err(|error| ImportError::organization(crate::app::Error::Cell(error)))?;
-        for reference in refs {
-            if rules.matches(reference, head).any(|rule| {
-                (rule.restrict_creations || (rule.require_linear_history && nonlinear(reference)))
-                    && !rule.allows_bypass(actor, false)
-            }) {
-                return Err(ImportError::Ruleset);
-            }
         }
-        Ok(())
     }
 }
 

@@ -3180,6 +3180,7 @@ dependencies = [
  "blake3",
  "bytes",
  "cellar-main",
+ "chacha20poly1305",
  "clap",
  "crab-auth-store",
  "crab-cache",

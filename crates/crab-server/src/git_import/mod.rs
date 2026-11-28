@@ -9,7 +9,6 @@ mod source;
 mod workflow;
 
 use authority::{ForkSource, ImportAccount, OrganizationDestination};
-pub(crate) use lfs::copy_mirror_lfs;
 use source::{GitImportRequest, ValidatedImport, validate_request};
 use workflow::run_import;
 
@@ -361,7 +360,7 @@ impl Drop for ImportGuard {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ImportError {
+enum ImportError {
     #[error("invalid request: {0}")]
     Invalid(&'static str),
     #[error("the import service is unavailable")]
@@ -416,6 +415,8 @@ pub(crate) enum ImportError {
     Stage(#[source] crab_storage::StorageError),
     #[error("import publication failed")]
     Publication(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("fetched Git history failed receive validation")]
+    Validation(#[source] Box<crab_remote::prepare::Error>),
 }
 
 impl From<crab_metadata::error::MetadataError> for ImportError {
@@ -439,6 +440,12 @@ impl From<crab_remote::publication::Error> for ImportError {
             crab_remote::publication::Error::Cancelled => Self::Cancelled,
             error => Self::Publication(Box::new(error)),
         }
+    }
+}
+
+impl From<app::Error> for ImportError {
+    fn from(source: app::Error) -> Self {
+        Self::organization(source)
     }
 }
 
@@ -518,7 +525,7 @@ impl IntoResponse for ImportError {
                 "git_source_unavailable",
                 "The Git source could not be cloned or published; verify the URL, access, token, and server capacity",
             ),
-            Self::Pack(_) | Self::History(_) => (
+            Self::Pack(_) | Self::History(_) | Self::Validation(_) => (
                 StatusCode::BAD_GATEWAY,
                 "git_source_invalid",
                 "The Git source sent history that Crab cannot verify",
@@ -576,6 +583,10 @@ pub(crate) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             "/api/repositories/{repository}/mirror/sync",
             post(mirror::request_sync),
         )
+        .route(
+            "/api/repositories/{repository}/mirror/credential",
+            axum::routing::put(mirror::set_credential).delete(mirror::remove_credential),
+        )
         .route("/api/imports/git/{id}/resume", post(resume))
         .route(
             "/api/organizations/{organization}/repositories/imports/git",
@@ -610,6 +621,11 @@ async fn start(
     let Json(request) = body.map_err(|_| ImportError::Invalid("invalid import request"))?;
     let id = request.request_id.unwrap_or_else(Uuid::now_v7);
     let mut request = validate_request(request, path.organization, &context.allowed_hosts)?;
+    if request.mirror && request.token.is_some() && !mirror::seals_credentials(&server) {
+        return Err(ImportError::Invalid(
+            "Mirroring a private source needs auth.state_key_file to protect its token",
+        ));
+    }
     if let Some(owner) = account.organization_owner() {
         request.owner = owner.to_owned();
     }

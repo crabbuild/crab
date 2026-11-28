@@ -28,6 +28,7 @@ mod publish;
 mod push_attribution;
 mod recent_pushes;
 pub(crate) use fork_sync::{merge_fork_head, synchronize_fork};
+pub(crate) use publish::repository_options;
 mod validate;
 
 const MAX_BODY: u64 = 8 * 1024 * 1024 * 1024;
@@ -36,7 +37,6 @@ pub(crate) const IMPORT_RECEIVE_INITIAL_RESERVATION: u64 = 64 * 1024 * 1024;
 pub(crate) const REQUEST_BUDGET: Duration = Duration::from_secs(30 * 60);
 pub(crate) const READ_ONLY_MIRROR: &str =
     "This repository is a read-only mirror; its branches and tags follow the upstream";
-const NOT_A_MIRROR: &str = "This repository no longer mirrors an upstream";
 const REF_UPDATE_BUDGET: Duration = Duration::from_secs(30);
 const CONTENT_TYPE: &str = "application/x-git-receive-pack-result";
 
@@ -110,8 +110,6 @@ pub(crate) enum ReceiveError {
     Write(#[from] crab_write::WriteError),
     #[error("pointer content rejected")]
     Dependency(#[source] Box<crab_read::dependency_proof::DependencyProofError>),
-    #[error("mirror upstream transfer failed")]
-    MirrorSource(#[source] Box<crate::git_import::ImportError>),
     #[error("receive failed and its remote reader also failed to close")]
     Close {
         #[source]
@@ -918,50 +916,6 @@ pub(crate) async fn set_default_branch(
         },
     )
     .await
-}
-
-/// Move a pull mirror's branches and tags to its upstream's, then follow its HEAD.
-///
-/// `pack` holds fetched objects in local staging. The edits pass the same
-/// validation, visibility, and LFS proofs as a push, under the mirror principal.
-pub(crate) async fn publish_mirror(
-    server: Arc<Server>,
-    repository: Arc<Repository>,
-    updates: Vec<crab_git::receive_plan::RefUpdate>,
-    pack: Option<(crate::local_disk::StagingDirectory, std::path::PathBuf)>,
-    head: String,
-) -> Result<()> {
-    let cancel = server.cancellation.child_token();
-    let permit = server.acquire_transfer(&cancel).await?;
-    let worker_cancel = cancel.clone();
-    let worker_server = Arc::clone(&server);
-    let (send, result) = tokio::sync::oneshot::channel();
-    server.receives.spawn(async move {
-        let permit = permit;
-        let work = publish::publish_mirror(
-            &worker_server,
-            &repository,
-            updates,
-            pack,
-            &head,
-            &worker_cancel,
-        );
-        tokio::pin!(work);
-        let completed = tokio::select! {
-            result = &mut work => result,
-            () = tokio::time::sleep(REQUEST_BUDGET) => {
-                worker_cancel.cancel();
-                work.await
-            }
-        };
-        if let Err(Err(error)) = send.send(completed) {
-            tracing::error!(error = ?error, "detached mirror publication failed");
-        }
-        permit.release().await;
-    });
-    result
-        .await
-        .map_err(|_| ReceiveError::Request("Mirror publication worker stopped"))?
 }
 
 enum RefPublication {

@@ -67,26 +67,7 @@ pub(super) fn validate_request(
     };
     let name = identifier(request.name, "name")?;
     let description = description(request.description.as_deref().unwrap_or_default())?;
-    let token = request
-        .token
-        .map(|token| token.trim().to_owned())
-        .filter(|token| !token.is_empty());
-    if token.as_deref().is_some_and(|token| {
-        token.len() > MAX_TOKEN_BYTES || token.bytes().any(|byte| !byte.is_ascii_graphic())
-    }) {
-        return Err(ImportError::Invalid("the Git source token is invalid"));
-    }
-    if token.is_some() && !source.starts_with("https://") {
-        return Err(ImportError::Invalid(
-            "source tokens require an HTTPS Git URL",
-        ));
-    }
-    // Source credentials are never stored, and a mirror syncs unattended.
-    if request.mirror && token.is_some() {
-        return Err(ImportError::Invalid(
-            "A pull mirror syncs without stored credentials; mirror a source that allows anonymous reads",
-        ));
-    }
+    let token = token(request.token, &source)?;
     Ok(ValidatedImport {
         source,
         fork_source: None,
@@ -99,6 +80,28 @@ pub(super) fn validate_request(
         properties: request.properties,
         token,
     })
+}
+
+/// A source token for `source`, trimmed; blank means none.
+pub(super) fn token(value: Option<String>, source: &str) -> Result<Option<String>, ImportError> {
+    let token = value
+        .map(|token| token.trim().to_owned())
+        .filter(|token| !token.is_empty());
+    if token.as_deref().is_some_and(|token| {
+        token.len() > MAX_TOKEN_BYTES || token.bytes().any(|byte| !byte.is_ascii_graphic())
+    }) {
+        return Err(ImportError::Invalid("the Git source token is invalid"));
+    }
+    // A token crosses the network only over TLS; loopback traffic stays on this host.
+    if token.is_some()
+        && !source.starts_with("https://")
+        && !Url::parse(source).is_ok_and(|url| loopback_http(&url))
+    {
+        return Err(ImportError::Invalid(
+            "source tokens require an HTTPS Git URL",
+        ));
+    }
+    Ok(token)
 }
 
 pub(super) fn description(value: &str) -> Result<String, ImportError> {

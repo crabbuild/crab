@@ -233,3 +233,128 @@ fn visibility_honors_bounds_cancellation_and_prior_binding() {
         Err(ReceivePlanError::Cancelled)
     ));
 }
+
+#[test]
+fn streamed_structure_validates_and_plans_exactly_like_a_quarantined_pack() {
+    let (source, old, root) = base();
+    let lfs = crate::lfs_pointer::LfsPointer {
+        oid: [7; 32],
+        size: 42,
+        extensions: Vec::new(),
+    }
+    .serialize();
+    let hello = b"hello".to_vec();
+    let files = tree(&[
+        ("100644", b"asset.bin", object_id(Kind::Blob, &lfs)),
+        ("100644", b"hello", object_id(Kind::Blob, &hello)),
+    ]);
+    let files_oid = object_id(Kind::Tree, &files);
+    let first = commit(files_oid, &[old], "first");
+    let first_oid = object_id(Kind::Commit, &first);
+    let side = commit(root, &[old], "side");
+    let side_oid = object_id(Kind::Commit, &side);
+    let merge = commit(files_oid, &[first_oid, side_oid], "merge");
+    let merge_oid = object_id(Kind::Commit, &merge);
+    let release = tag(merge_oid, Kind::Commit, "v1");
+    let release_oid = object_id(Kind::Tag, &release);
+    let objects = [
+        (Kind::Blob, lfs),
+        (Kind::Blob, hello),
+        (Kind::Tree, files),
+        (Kind::Commit, first),
+        (Kind::Commit, side),
+        (Kind::Commit, merge),
+        (Kind::Tag, release),
+    ];
+    let quarantined = incoming(&objects);
+    let mut verified = VerifiedObjects::new(10_000);
+    for (kind, data) in &objects {
+        verified.add(object_id(*kind, data), *kind, data).unwrap();
+    }
+    let base_refs = BTreeMap::from([("refs/heads/main".to_owned(), old)]);
+    let updates = [
+        update("refs/heads/main", Some(old), Some(merge_oid)),
+        update("refs/heads/side", None, Some(side_oid)),
+        update("refs/tags/v1", None, Some(release_oid)),
+    ];
+    let linear = |_: &str| RefPolicy {
+        allow_delete: true,
+        allow_non_fast_forward: false,
+        inspect_linear_history: true,
+    };
+    let mut visibility = Visibility {
+        source,
+        prior: Some(old),
+        members: HashSet::from([old, root]),
+    };
+    let summary = |plan: ValidatedRefUpdates| {
+        (
+            plan.refs().clone(),
+            plan.peeled().clone(),
+            plan.pointers()
+                .iter()
+                .map(|dependency| (dependency.blob, format!("{:?}", dependency.pointer)))
+                .collect::<Vec<_>>(),
+            plan.changed_path_hashes().clone(),
+            plan.linear_history().clone(),
+            plan.rewritten_refs().clone(),
+        )
+    };
+    let expected = summary(
+        validate(
+            &quarantined,
+            &base_refs,
+            &updates,
+            linear,
+            &mut visibility,
+            graph_limits(),
+            || false,
+        )
+        .unwrap(),
+    );
+    let streamed = summary(
+        validate(
+            &verified,
+            &base_refs,
+            &updates,
+            linear,
+            &mut visibility,
+            graph_limits(),
+            || false,
+        )
+        .unwrap(),
+    );
+    assert_eq!(streamed, expected);
+    assert_eq!(expected.2.len(), 1, "the LFS pointer is a dependency");
+    assert_eq!(expected.4.get("refs/heads/main"), Some(&false));
+    for tip in [merge_oid, side_oid, release_oid] {
+        let quarantine_plan =
+            plan_visibility(&quarantined, tip, &mut visibility, graph_limits(), || false).unwrap();
+        let streamed_plan =
+            plan_visibility(&verified, tip, &mut visibility, graph_limits(), || false).unwrap();
+        assert_eq!(streamed_plan, quarantine_plan, "{tip}");
+    }
+}
+
+#[test]
+fn streamed_structure_refuses_to_feed_commit_observers() {
+    let (source, old, root) = base();
+    let body = commit(root, &[old], "new");
+    let new = object_id(Kind::Commit, &body);
+    let mut verified = VerifiedObjects::new(100);
+    verified.add(new, Kind::Commit, &body).unwrap();
+    let mut source = Visibility {
+        source,
+        prior: Some(old),
+        members: HashSet::from([old, root]),
+    };
+    let observed = plan_visibility_with_commits(
+        &verified,
+        new,
+        &mut source,
+        graph_limits(),
+        || false,
+        Some(&mut |_, _| Ok(())),
+    );
+    assert!(matches!(observed, Err(ReceivePlanError::Invalid { .. })));
+}

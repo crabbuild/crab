@@ -13,9 +13,10 @@ use crab_git::import_graph::{CompleteGraph, GraphLimits, ImportGraph};
 use crab_git::pack_stream::{
     IndexedPack, PackResolver, PackScanner, PackTable, StreamLimits, WindowedSource,
 };
+use crab_git::receive_plan::{RefPolicy, RefUpdate, VerifiedObjects};
 use crab_metadata::capsule_protocol::{
-    CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction, CapsuleVisibilityDelta,
-    DetachedGitPack, DetachedPackCapsule, StreamedLeafRun,
+    Capsule, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
+    CapsuleVisibilityDelta, DetachedGitPack, DetachedPackCapsule, StreamedLeafRun,
 };
 use crab_metadata::git_visibility::{
     GIT_VISIBILITY_EDIT_VERSION, GitVisibilityDictionary, GitVisibilityEdit, GitVisibilityObjects,
@@ -38,6 +39,14 @@ const BASE_CACHE_BYTES: usize = 768 * 1024 * 1024;
 const WINDOW_BYTES: u64 = 4 * 1024 * 1024;
 const WINDOW_SLOTS: usize = 64;
 const LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+// Matches native receive validation: every object, entry, and history read counts.
+const SYNC_GRAPH: crab_git::receive_plan::GraphLimits = crab_git::receive_plan::GraphLimits {
+    max_ref_updates: MAX_IMPORT_REFS,
+    max_graph_steps: 100_000_000,
+    max_object_bytes: LIMITS.max_object_bytes,
+    max_read_bytes: 64 * 1024 * 1024 * 1024,
+};
 
 pub(super) const LIMITS: StreamLimits = StreamLimits {
     max_pack_bytes: 64 * 1024 * 1024 * 1024,
@@ -104,6 +113,9 @@ pub(super) async fn discover(remote: &Remote) -> Result<Discovered, ImportError>
             "The Git source has more than {MAX_IMPORT_REFS} branches and tags"
         )));
     }
+    crab_git::refname::validate_ref_namespace(refs.keys().map(String::as_str)).map_err(|_| {
+        ImportError::Git("The Git source has a ref nested beneath another ref".into())
+    })?;
     let head = head_target
         .as_deref()
         .and_then(|target| target.strip_prefix("refs/heads/"))
@@ -258,34 +270,50 @@ fn scan(mut receiver: tokio::sync::mpsc::Receiver<Bytes>) -> Result<PackTable, I
     Ok(scanner.finish()?)
 }
 
-/// Objects, sidecars and graph of a staged pack, with the run hash prefix absorbed.
-pub(super) struct Indexed {
+/// Objects, sidecars and object structure of a staged pack, with the run hash prefix absorbed.
+pub(super) struct Indexed<G> {
     pub(super) pack: IndexedPack,
-    pub(super) graph: CompleteGraph,
+    pub(super) graph: G,
     pub(super) hasher: blake3::Hasher,
 }
 
-/// Reconstruct every staged object once, building sidecars and the import graph.
+type SinkError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Structure built from every object a staged pack reconstructs.
+pub(super) trait Admit: Send + 'static {
+    fn admit(&mut self, oid: ObjectId, kind: Kind, data: &[u8]) -> Result<(), SinkError>;
+}
+
+impl Admit for ImportGraph {
+    fn admit(&mut self, oid: ObjectId, kind: Kind, data: &[u8]) -> Result<(), SinkError> {
+        Ok(self.add(oid, kind, data)?)
+    }
+}
+
+impl Admit for VerifiedObjects {
+    fn admit(&mut self, oid: ObjectId, kind: Kind, data: &[u8]) -> Result<(), SinkError> {
+        Ok(self.add(oid, kind, data)?)
+    }
+}
+
+/// Reconstruct every staged object once, building sidecars and `graph`.
 ///
 /// `prefix` is hashed before the pack bytes so the streamed run identity needs
 /// no further read of the staged object.
-pub(super) async fn index(
+pub(super) async fn index<G: Admit>(
     store: &Store,
     path: &Path,
     table: Arc<PackTable>,
     prefix: Bytes,
+    mut graph: G,
     cancel: &CancellationToken,
-) -> Result<Indexed, ImportError> {
+) -> Result<Indexed<G>, ImportError> {
     let (_, _, mut stream) = store.get_stream(path, None).await?;
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<Bytes>(CHANNEL_CHUNKS);
     let handle = tokio::runtime::Handle::current();
     let (reader, reader_path) = (store.clone(), path.clone());
     let watched = cancel.clone();
     let worker = tokio::task::spawn_blocking(move || {
-        let mut graph = ImportGraph::new(GraphLimits {
-            max_objects: LIMITS.max_objects as usize,
-            max_links: crab_git::shared_visibility::Limits::default().max_links,
-        });
         let mut hasher = blake3::Hasher::new();
         hasher.update(&prefix);
         let mut source = WindowedSource::new(
@@ -299,9 +327,7 @@ pub(super) async fn index(
             WINDOW_SLOTS,
         );
         let mut sink = |object: crab_git::pack_stream::ResolvedObject<'_>| {
-            graph
-                .add(object.oid, object.kind, object.data)
-                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+            graph.admit(object.oid, object.kind, object.data)
         };
         let mut resolver = PackResolver::new(&table, LIMITS, move || watched.is_cancelled())?;
         while let Some(chunk) = receiver.blocking_recv() {
@@ -312,7 +338,7 @@ pub(super) async fn index(
         drop(sink);
         Ok::<_, ImportError>(Indexed {
             pack,
-            graph: graph.finish()?,
+            graph,
             hasher,
         })
     });
@@ -420,7 +446,7 @@ fn run(
     staged: &Staged,
     pack: IndexedPack,
     hasher: blake3::Hasher,
-    visibility: CapsuleSection,
+    sections: Vec<CapsuleSection>,
 ) -> Result<StreamedLeafRun, ImportError> {
     let (members, _) = crab_git::pack_locator::sorted_object_ids_from_index_bytes(&pack.index)
         .map_err(|error| ImportError::Git(format!("Staged pack index is invalid: {error}")))?;
@@ -443,7 +469,7 @@ fn run(
             git_checksum: pack.checksum.to_string(),
             object_count: u64::from(pack.object_count),
         },
-        vec![visibility],
+        sections,
         hasher,
     )?;
     Ok(StreamedLeafRun::build(capsule, vec![members])?)
@@ -545,29 +571,44 @@ pub(super) async fn publish(
                 path,
                 Arc::clone(&staged.table),
                 prefix.clone(),
+                ImportGraph::new(GraphLimits {
+                    max_objects: LIMITS.max_objects as usize,
+                    max_links: crab_git::shared_visibility::Limits::default().max_links,
+                }),
                 &cancel,
             )
             .await?;
+            let graph = graph.finish()?;
             let verified = edits(&graph, &discovered.refs)?;
             if verified != transaction.edits() {
                 return Err(ImportError::Git(
                     "The Git source advertised tag targets that do not match its pack".into(),
                 ));
             }
-            rules.check(
-                verified.iter().map(CapsuleRefEdit::ref_name),
-                &head,
-                |reference| {
-                    discovered
-                        .refs
-                        .get(reference)
-                        .and_then(|oid| object_id(oid).ok())
-                        .is_some_and(|tip| !graph.is_linear(tip).unwrap_or(false))
-                },
-            )?;
-            super::lfs::copy(lfs.url, lfs.token, repository, graph.pointers(), &cancel).await?;
+            let creations = verified
+                .iter()
+                .map(|edit| creation(edit.ref_name(), edit.new_oid()))
+                .collect::<Result<Vec<_>, _>>()?;
+            rules.check(&creations, &head, &BTreeSet::new(), |reference| {
+                discovered
+                    .refs
+                    .get(reference)
+                    .and_then(|oid| object_id(oid).ok())
+                    .is_some_and(|tip| !graph.is_linear(tip).unwrap_or(false))
+            })?;
+            let pointers = graph
+                .pointers()
+                .iter()
+                .map(
+                    |(blob, pointer)| crab_git::receive_plan::PointerDependency {
+                        blob: *blob,
+                        pointer: pointer.clone(),
+                    },
+                )
+                .collect::<Vec<_>>();
+            super::lfs::copy(lfs.url, lfs.token, repository, &pointers, &cancel).await?;
             let visibility = visibility(graph, &verified, &cancel)?;
-            let run = run(&transaction, staged, pack, hasher, visibility)?;
+            let run = run(&transaction, staged, pack, hasher, vec![visibility])?;
             let body = Arc::new(RunBody {
                 store: store.clone(),
                 path: path.clone(),
@@ -588,6 +629,266 @@ pub(super) async fn publish(
             )
             .await?;
             Ok(())
+        },
+    )
+    .await?;
+    repository.invalidate().await;
+    Ok(())
+}
+
+/// A ref creation as the receive model spells it.
+fn creation(name: &str, oid: Option<&str>) -> Result<RefUpdate, ImportError> {
+    Ok(RefUpdate {
+        name: name.to_owned(),
+        old: None,
+        new: oid.map(object_id).transpose()?,
+    })
+}
+
+/// Publish one mirror sync's ref updates under ref leases and GC fences.
+///
+/// The staged pack is parsed once while it is reread; native receive rules
+/// then validate those objects against the mirror's visible history and plan
+/// exact visibility. Rulesets and LFS payloads are checked before any ref
+/// moves, and the run streams from the staged object, so no local file is
+/// written. `updates` must be computed from refs the leases still protect.
+pub(super) async fn publish_updates(
+    server: &crate::server::Server,
+    repository: &crate::repository::Repository,
+    staged: Option<(&Staged, &Path)>,
+    discovered: &Discovered,
+    updates: Vec<RefUpdate>,
+    rules: &super::workflow::ImportRules,
+    lfs: LfsSource<'_>,
+    cancel: &CancellationToken,
+) -> Result<(), ImportError> {
+    let names = updates
+        .iter()
+        .map(|update| update.name.clone())
+        .collect::<Vec<_>>();
+    let store = repository.store.clone();
+    crab_remote::publication::with_leases(
+        &repository.store,
+        &repository.layout,
+        names,
+        LEASE_TTL,
+        cancel,
+        move |_holders, cancel| async move {
+            let options =
+                crate::git::receive::repository_options(server).map_err(ImportError::Setup)?;
+            let (mut view, mut reader) = repository
+                .open_capsule_repository(server, options, &cancel)
+                .await
+                .map_err(ImportError::Setup)?;
+            // Bound each ref's capsule frontier before adding another capsule.
+            if updates.iter().any(|update| {
+                view.ref_capsule_count(&update.name)
+                    >= crate::repository::maintenance::FOREGROUND_CAPSULE_THRESHOLD
+            }) {
+                repository
+                    .checkpoint_now(server, &cancel)
+                    .await
+                    .map_err(ImportError::Setup)?;
+                (view, reader) = repository
+                    .open_capsule_repository(server, options, &cancel)
+                    .await
+                    .map_err(ImportError::Setup)?;
+            }
+            if updates.iter().any(|update| {
+                view.refs().get(&update.name).map(String::as_str)
+                    != update.old.map(|oid| oid.to_string()).as_deref()
+            }) {
+                return Err(ImportError::DestinationChanged);
+            }
+            let base = view.root_snapshot().clone();
+            // Peeled tag targets come from the advertisement; validation proves
+            // them against the received graph before publication.
+            let transaction = CapsuleTransaction::new(
+                base.record().digest(),
+                updates
+                    .iter()
+                    .map(|update| {
+                        CapsuleRefEdit::new(
+                            update.name.clone(),
+                            update.old.map(|oid| oid.to_string()),
+                            update.new.map(|oid| oid.to_string()),
+                            update
+                                .new
+                                .and_then(|_| discovered.peeled.get(&update.name))
+                                .map(ToString::to_string),
+                        )
+                    })
+                    .collect(),
+            )?;
+            let (received, indexed) = match staged {
+                Some((staged, path)) => {
+                    let prefix = DetachedPackCapsule::prefix(&transaction)?;
+                    let Indexed {
+                        pack,
+                        graph,
+                        hasher,
+                    } = index(
+                        &store,
+                        path,
+                        Arc::clone(&staged.table),
+                        prefix.clone(),
+                        VerifiedObjects::new(SYNC_GRAPH.max_graph_steps),
+                        &cancel,
+                    )
+                    .await?;
+                    (graph, Some((pack, hasher, prefix, staged, path)))
+                }
+                None => (VerifiedObjects::new(0), None),
+            };
+            let linear = updates
+                .iter()
+                .filter(|update| {
+                    update.new.is_some() && rules.requires_linear(&update.name, view.head())
+                })
+                .map(|update| update.name.clone())
+                .collect::<BTreeSet<_>>();
+            let visibility_index = view
+                .git_visibility_index()
+                .await
+                .map_err(|error| ImportError::Publication(Box::new(error)))?;
+            let (plan, evidence) = crab_remote::prepare::plan_verified(
+                reader,
+                visibility_index,
+                received,
+                updates.clone(),
+                &cancel,
+                crab_remote::prepare::Options {
+                    layout: repository.layout.clone(),
+                    graph: SYNC_GRAPH,
+                    pack: crab_git::incoming_pack::ReceiveLimits {
+                        max_pack_bytes: LIMITS.max_pack_bytes,
+                        max_objects: LIMITS.max_objects,
+                        max_object_bytes: LIMITS.max_object_bytes,
+                        max_inflated_bytes: LIMITS.max_inflated_bytes,
+                        max_delta_depth: LIMITS.max_delta_depth,
+                    },
+                    // A mirror follows its upstream through rewinds and deletions.
+                    policy: move |name: &str| RefPolicy {
+                        allow_delete: true,
+                        allow_non_fast_forward: true,
+                        inspect_linear_history: linear.contains(name),
+                    },
+                    inspect_visible_tip: None,
+                },
+            )
+            .await
+            .map_err(|error| ImportError::Validation(Box::new(error)))?;
+            if updates
+                .iter()
+                .filter(|update| update.new.is_some())
+                .any(|update| {
+                    plan.peeled().get(&update.name).map(ToString::to_string)
+                        != discovered.peeled.get(&update.name).map(ToString::to_string)
+                })
+            {
+                return Err(ImportError::Git(
+                    "The Git source advertised tag targets that do not match its pack".into(),
+                ));
+            }
+            rules.check(&updates, view.head(), plan.rewritten_refs(), |reference| {
+                plan.linear_history().get(reference) == Some(&false)
+            })?;
+            super::lfs::copy(lfs.url, lfs.token, repository, plan.pointers(), &cancel).await?;
+            let sections = if evidence.is_empty() {
+                Vec::new()
+            } else {
+                vec![CapsuleSection::new(
+                    CapsuleSectionKind::VisibilityDelta,
+                    CapsuleVisibilityDelta::new(evidence)?.encode()?,
+                )]
+            };
+            if cancel.is_cancelled() {
+                return Err(ImportError::Cancelled);
+            }
+            match indexed {
+                Some((pack, hasher, prefix, staged, path)) => {
+                    let run = run(&transaction, staged, pack, hasher, sections)?;
+                    let body = Arc::new(RunBody {
+                        store: store.clone(),
+                        path: path.clone(),
+                        prefix,
+                        pack_length: run.pack_length(),
+                        suffix: run.suffix().clone(),
+                    });
+                    crab_write::capsule_protocol::publish_streamed(
+                        &repository.layout,
+                        base,
+                        &transaction,
+                        &run,
+                        body,
+                        &cancel,
+                    )
+                    .await?;
+                }
+                None => {
+                    let capsule = Capsule::build(&transaction, Vec::new(), sections)?;
+                    crab_write::capsule_protocol::publish(
+                        &repository.layout,
+                        base,
+                        &transaction,
+                        capsule,
+                    )
+                    .await?;
+                }
+            }
+            Ok(())
+        },
+    )
+    .await?;
+    repository.invalidate().await;
+    Ok(())
+}
+
+/// Point the mirror's HEAD at `head` once that branch exists.
+pub(super) async fn follow_head(
+    server: &crate::server::Server,
+    repository: &crate::repository::Repository,
+    head: &str,
+    cancel: &CancellationToken,
+) -> Result<(), ImportError> {
+    let view = repository
+        .open_ref_view()
+        .await
+        .map_err(ImportError::Setup)?;
+    if view.head() == head || !view.refs().contains_key(head) {
+        return Ok(());
+    }
+    crab_remote::publication::with_leases(
+        &repository.store,
+        &repository.layout,
+        [head.to_owned()],
+        LEASE_TTL,
+        cancel,
+        |_holders, cancel| async move {
+            // Default-branch rulesets match HEAD; serialize with their edits.
+            crate::repository::settings::with_ruleset_lease(
+                server,
+                crate::repository::settings::RulesetScope::Repository(repository),
+                &cancel,
+                |_| async move {
+                    let view = repository
+                        .open_ref_view()
+                        .await
+                        .map_err(ImportError::Setup)?;
+                    if view.head() == head || !view.refs().contains_key(head) {
+                        return Ok::<_, ImportError>(());
+                    }
+                    crab_write::capsule_protocol::retarget_head(
+                        &repository.layout,
+                        view.root_snapshot().clone(),
+                        view.head(),
+                        head,
+                    )
+                    .await?;
+                    Ok(())
+                },
+            )
+            .await
         },
     )
     .await?;

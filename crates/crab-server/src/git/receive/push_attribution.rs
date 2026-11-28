@@ -18,7 +18,6 @@ use super::{Result, validate};
 pub(super) fn tracks(server: &Server, principal: &Principal, updates: &[RefUpdate]) -> bool {
     server.cells().is_some()
         && principal.import_grant().is_none()
-        && !principal.is_mirror()
         && updates.iter().any(branch_update)
 }
 
