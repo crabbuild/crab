@@ -45,6 +45,7 @@ import type {
 import { organizationHref } from "@/lib/organization-route";
 import { ProfileAvatarPicker } from "./avatar-picker";
 import { ProfileForm } from "./form";
+import { PersonalAccessTokensSettingsPanel } from "./personal-access-tokens";
 import { ReviewAvailabilitySettings } from "./review-availability";
 import { SavedReplies } from "./saved-replies";
 import {
@@ -62,6 +63,7 @@ export type SettingsSection =
   | "appearance"
   | "notifications"
   | "git-access"
+  | "tokens"
   | "organizations"
   | "repositories"
   | "review-availability"
@@ -161,6 +163,12 @@ export function ProfileSettings({
                 id: "git-access" as const,
                 href: "/-/settings/git-access",
                 label: "Git access",
+                Icon: KeyIcon,
+              },
+              {
+                id: "tokens" as const,
+                href: "/-/settings/tokens",
+                label: "Personal access tokens",
                 Icon: KeyIcon,
               },
             ]
@@ -324,6 +332,8 @@ export function ProfileSettings({
             <NotificationSettingsPanel csrf={csrf} />
           ) : section === "git-access" ? (
             <GitAccessSettingsPanel session={session} />
+          ) : section === "tokens" ? (
+            <PersonalAccessTokensSettingsPanel session={session} />
           ) : section === "organizations" ? (
             <OrganizationsSettingsPanel csrf={csrf} />
           ) : section === "repositories" ? (
