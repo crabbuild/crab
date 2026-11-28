@@ -240,6 +240,10 @@ pub(crate) enum Error {
     Merge(#[source] Box<crate::git::receive::ReceiveError>),
     #[error("Pull request merge object construction failed")]
     MergeObject(#[source] Box<crab_remote::objects::Error>),
+    #[error("Repository initial commit failed")]
+    InitialCommit(#[source] Box<crate::git::receive::ReceiveError>),
+    #[error("Repository initial commit object construction failed")]
+    InitialCommitObject(#[source] Box<crab_remote::objects::Error>),
     #[error(
         "This submission ID was already used for different content; check the existing result before submitting again"
     )]
@@ -324,6 +328,8 @@ impl IntoResponse for Error {
                     | Self::Merge(_)
                     | Self::PullBranch(_)
                     | Self::MergeObject(_)
+                    | Self::InitialCommit(_)
+                    | Self::InitialCommitObject(_)
                     | Self::Release(_)
                     | Self::ReleaseAssetIo(_)
                     | Self::ReleaseAssetCoordination(_)
@@ -335,9 +341,10 @@ impl IntoResponse for Error {
             tracing::error!(error = ?self, "collaboration request failed");
         }
         let staging = match &self {
-            Self::Merge(error) | Self::Release(error) | Self::PullBranch(error) => {
-                error.staging_status()
-            }
+            Self::Merge(error)
+            | Self::Release(error)
+            | Self::PullBranch(error)
+            | Self::InitialCommit(error) => error.staging_status(),
             _ => None,
         };
         if let Some((status, message)) = staging {
@@ -934,6 +941,11 @@ impl IntoResponse for Error {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "release_failed",
                 "The release tag may have been published. Retry the same submission to recover it",
+            ),
+            Self::InitialCommit(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "initial_commit_failed",
+                "The repository was created, but the initial commit failed. Retry the same submission",
             ),
             _ => (
                 StatusCode::BAD_GATEWAY,

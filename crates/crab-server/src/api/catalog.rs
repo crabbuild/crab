@@ -621,11 +621,13 @@ async fn create_organization(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(organization): Path<Uuid>,
-    Json(input): Json<BrowserCreation>,
+    Json(mut input): Json<BrowserCreation>,
 ) -> app::Result<(StatusCode, Json<CreatedRepository>)> {
     let actor = super::organizations::actor(&server, &principal).await?;
+    input.normalize_templates();
     input.validate()?;
     app::account(&principal)?;
+    let initial = InitialFiles::from_creation(&input);
     let worker = Arc::clone(&server);
     let account = principal.clone();
     let prepare = move |cancel: tokio_util::sync::CancellationToken| async move {
@@ -696,13 +698,51 @@ async fn create_organization(
     };
     let (record, default_branch) =
         super::organizations::with_org_policy(&server, organization, prepare).await?;
-    let response = publish(&server, &principal, record, default_branch).await?;
+    let response = publish(&server, &principal, record, default_branch, initial).await?;
     ensure_can_create(&server, organization, actor).await?;
     app::account(&principal)?;
     Ok(response)
 }
 
+#[derive(Clone)]
+struct InitialFiles {
+    add_readme: bool,
+    gitignore_template: Option<String>,
+    license_template: Option<String>,
+    repo_name: String,
+    description: String,
+}
+
+impl InitialFiles {
+    fn from_creation(input: &BrowserCreation) -> Self {
+        Self {
+            add_readme: input.add_readme,
+            gitignore_template: input.gitignore_template.clone(),
+            license_template: input.license_template.clone(),
+            repo_name: input.name.clone(),
+            description: input.description.trim().to_owned(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.add_readme && self.gitignore_template.is_none() && self.license_template.is_none()
+    }
+}
+
 impl BrowserCreation {
+    fn normalize_templates(&mut self) {
+        self.gitignore_template = self
+            .gitignore_template
+            .take()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        self.license_template = self
+            .license_template
+            .take()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+    }
+
     fn validate(&self) -> app::Result<()> {
         if self.request_id.is_nil() {
             return Err(app::Error::Invalid("Repository submission ID is invalid"));
@@ -717,6 +757,18 @@ impl BrowserCreation {
                 "The repository description must be one line of at most 350 characters",
             ));
         }
+        if let Some(template) = &self.gitignore_template
+            && !crate::git::templates::validate_gitignore(template)
+        {
+            return Err(app::Error::Invalid(
+                "Choose a supported .gitignore template",
+            ));
+        }
+        if let Some(license) = &self.license_template
+            && !crate::git::templates::validate_license(license)
+        {
+            return Err(app::Error::Invalid("Choose a supported license template"));
+        }
         Ok(())
     }
 }
@@ -724,10 +776,11 @@ impl BrowserCreation {
 async fn create(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
-    Json(input): Json<BrowserCreation>,
+    Json(mut input): Json<BrowserCreation>,
 ) -> app::Result<(StatusCode, Json<CreatedRepository>)> {
     let identity = app::account(&principal)?;
     let owner = personal_owner_name(&server, &principal).await?;
+    input.normalize_templates();
     input.validate()?;
     if !input.properties.is_empty() {
         return Err(app::Error::Invalid(
@@ -739,6 +792,7 @@ async fn create(
             "Choose a visibility available for this account",
         ));
     }
+    let initial = InitialFiles::from_creation(&input);
     let destination = if principal.is_local() {
         BrowserNamespace::Personal(owner)
     } else {
@@ -756,6 +810,7 @@ async fn create(
         &principal,
         record,
         crate::config::default_repository_branch(),
+        initial,
     )
     .await
 }
@@ -795,21 +850,104 @@ async fn reserve(
         })
 }
 
+async fn publish_initial_commit(
+    server: &Arc<Server>,
+    principal: &Principal,
+    authorized: &Principal,
+    repository: &crate::repository::Repository,
+    record: &CatalogRecord,
+    default_branch: &str,
+    initial: &InitialFiles,
+) -> app::Result<()> {
+    if initial.is_empty() {
+        return Ok(());
+    }
+    let cancellation = server.cancellation.child_token();
+    let opened = repository
+        .open_current(server, server.options, &cancellation)
+        .await
+        .map_err(|error| app::Error::RepositorySetup(Box::new(error)))?;
+    if !opened.refs().entries.is_empty() {
+        return Ok(());
+    }
+    if !authorized.can_write(repository.id) {
+        return Err(app::Error::Forbidden);
+    }
+    let actor = app::actor(principal)?;
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let year = crate::git::templates::utc_year(seconds);
+    let holder = if record.organization.is_some() {
+        record.owner.clone()
+    } else {
+        let name = actor.name.trim();
+        if name.is_empty() {
+            record.owner.clone()
+        } else {
+            name.to_owned()
+        }
+    };
+
+    let mut owned_files = Vec::new();
+    if initial.add_readme {
+        owned_files.push((
+            "README.md",
+            crate::git::templates::readme_content(&initial.repo_name, &initial.description)
+                .into_bytes(),
+        ));
+    }
+    if let Some(template) = &initial.gitignore_template {
+        let content = crate::git::templates::gitignore_content(template).ok_or(
+            app::Error::Invalid("Choose a supported .gitignore template"),
+        )?;
+        owned_files.push((".gitignore", content.as_bytes().to_vec()));
+    }
+    if let Some(spdx) = &initial.license_template {
+        let content = crate::git::templates::license_content(spdx, year, &holder)
+            .ok_or(app::Error::Invalid("Choose a supported license template"))?;
+        owned_files.push(("LICENSE", content.into_bytes()));
+    }
+
+    let (commit_oid, objects) =
+        crate::git::templates::build_initial_commit(&owned_files, &actor, seconds)
+            .map_err(|error| app::Error::InitialCommitObject(Box::new(error)))?;
+
+    crate::git::receive::publish_objects(
+        Arc::clone(server),
+        principal.clone(),
+        (record.owner.clone(), record.name.clone()),
+        crab_git::receive_plan::RefUpdate {
+            name: format!("refs/heads/{default_branch}"),
+            old: None,
+            new: Some(commit_oid),
+        },
+        objects,
+        None,
+    )
+    .await
+    .map_err(|error| match error {
+        crate::git::receive::ReceiveError::Forbidden => app::Error::Forbidden,
+        other => app::Error::InitialCommit(Box::new(other)),
+    })
+}
+
 async fn publish(
     server: &Arc<Server>,
     principal: &Principal,
     record: CatalogRecord,
     default_branch: String,
+    initial: InitialFiles,
 ) -> app::Result<(StatusCode, Json<CreatedRepository>)> {
     let catalog = server.catalog().ok_or(app::Error::CellUnavailable)?;
     let worker = Arc::clone(server);
+    let init_branch = default_branch.clone();
     let result = server
         .receives
         .spawn(async move {
             if record.application == RepositoryApplicationState::EmptyCellPending {
-                catalog
-                    .initialize_git(&record, &default_branch, true)
-                    .await?;
+                catalog.initialize_git(&record, &init_branch, true).await?;
                 worker
                     .initialize_catalog_repository(
                         record.id,
@@ -831,7 +969,17 @@ async fn publish(
         .filter(|repo| repo.id == result.id && repo.organization == result.organization_id())
         .ok_or(app::Error::NotFound)?;
     // A replay must still pass current grants after routing has been refreshed.
-    app::membership(server, principal, &repository).await?;
+    let current = app::membership(server, principal, &repository).await?;
+    publish_initial_commit(
+        server,
+        principal,
+        &current.principal,
+        &repository,
+        &result,
+        &default_branch,
+        &initial,
+    )
+    .await?;
     Ok((
         StatusCode::CREATED,
         Json(CreatedRepository {
@@ -891,6 +1039,9 @@ mod tests {
                     description: "Start here".into(),
                     visibility: Visibility::Private,
                     properties: Default::default(),
+                    add_readme: false,
+                    gitignore_template: None,
+                    license_template: None,
                 },
                 actor,
                 vec![RepositoryMember {
@@ -1095,6 +1246,135 @@ mod tests {
             h.json("/api/repos/personal", &bob).await["repositories"],
             json!([])
         );
+        h.close().await;
+    }
+
+    #[tokio::test]
+    async fn browser_creation_initializes_readme_gitignore_and_license_commit() {
+        crate::test_support::server::init_test_tracing();
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let h = Harness::new_with_store_and_prefix(false, false, store, "browser-init").await;
+        h.initialize_directory().await;
+        let catalog = h.server.catalog().unwrap();
+        let existing = h.server.repositories.values()[0].id;
+        catalog.mark_cell_ready(existing).await.unwrap();
+        let alice = h.login().await;
+
+        h.write(
+            Method::POST,
+            "/api/profile",
+            &alice,
+            json!({"request_id": Uuid::now_v7(), "handle": "forhappy", "name": "Alice"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+
+        for invalid in [
+            json!({"request_id": Uuid::now_v7(), "name": "bad-ignore", "description": "", "gitignore_template": "UnknownLang"}),
+            json!({"request_id": Uuid::now_v7(), "name": "bad-license", "description": "", "license_template": "Fake-License"}),
+        ] {
+            let response = h
+                .write(Method::POST, "/api/repos/creation", &alice, invalid)
+                .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+
+        let request_id = Uuid::now_v7();
+        let payload = json!({
+            "request_id": request_id,
+            "name": "starter-kit",
+            "description": "Initial template showcase",
+            "visibility": "private",
+            "add_readme": true,
+            "gitignore_template": "Rust",
+            "license_template": "MIT"
+        });
+        let created: Value = h
+            .write(Method::POST, "/api/repos/creation", &alice, payload.clone())
+            .await
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(created["owner"], "forhappy");
+        assert_eq!(created["name"], "starter-kit");
+
+        let tree = h
+            .json(
+                "/api/repos/forhappy/starter-kit/tree?rev=refs%2Fheads%2Fmain",
+                &alice,
+            )
+            .await;
+        let paths: Vec<&str> = tree["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, vec![".gitignore", "LICENSE", "README.md"]);
+        let initial_commit = tree["commit"].as_str().unwrap().to_owned();
+
+        let read_blob = |file_name: &str| {
+            let path_hex: String = file_name
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            let url = format!(
+                "{}/api/repos/forhappy/starter-kit/blob?rev=refs%2Fheads%2Fmain&path_hex={path_hex}",
+                h.origin
+            );
+            let client = h.http.clone();
+            let cookie = alice.clone();
+            async move {
+                client
+                    .get(url)
+                    .header(reqwest::header::COOKIE, cookie)
+                    .send()
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap()
+                    .text()
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let readme = read_blob("README.md").await;
+        assert_eq!(readme, "# starter-kit\n\nInitial template showcase\n");
+
+        let gitignore = read_blob(".gitignore").await;
+        assert!(gitignore.contains("/target/"));
+
+        let license_text = read_blob("LICENSE").await;
+        assert!(license_text.contains("MIT License"));
+        assert!(license_text.contains("Alice"));
+
+        let detail = h
+            .json("/api/repos?owner=forhappy&name=starter-kit", &alice)
+            .await;
+        assert_eq!(detail["repositories"][0]["license"], "MIT");
+
+        let replay = h
+            .write(Method::POST, "/api/repos/creation", &alice, payload)
+            .await
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(replay["id"], created["id"]);
+        let replay_tree = h
+            .json(
+                "/api/repos/forhappy/starter-kit/tree?rev=refs%2Fheads%2Fmain",
+                &alice,
+            )
+            .await;
+        assert_eq!(replay_tree["commit"], initial_commit);
+
         h.close().await;
     }
 }
